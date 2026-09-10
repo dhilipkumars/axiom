@@ -1,0 +1,39 @@
+// Axiom gateway API, v1.
+//
+// Phase 0 defines only the liveness/plumbing surface. Later phases add the
+// Get/List/Create/Update/Delete/Subscribe/DiscoverSchema RPCs described in
+// docs/DESIGN.md §5.1. Credentials never appear as fields in any message here:
+// each side holds its own credentials locally (docs/RULES.md §3).
+syntax = "proto3";
+
+package axiom.v1;
+
+option go_package = "github.com/dhilipkumars/axiom/gateway/gen/axiom/v1;axiomv1";
+
+import "google/protobuf/timestamp.proto";
+
+// GatewayService is the cluster-side service the Postgres extension talks to.
+service GatewayService {
+  // Ping is a liveness round-trip used by the extension's background worker to
+  // verify connectivity and TLS setup. The gateway echoes the caller's nonce so
+  // the caller can detect a mismatched/out-of-order reply, and reports its own
+  // version and clock for diagnostics.
+  //
+  // Errors: INVALID_ARGUMENT if the request nonce is zero (zero is reserved as
+  // "unset" so accidental default-constructed requests are rejected loudly).
+  rpc Ping(PingRequest) returns (PingResponse);
+}
+
+message PingRequest {
+  // Caller-chosen, non-zero. Echoed back verbatim in PingResponse.nonce.
+  uint64 nonce = 1;
+}
+
+message PingResponse {
+  // Echo of PingRequest.nonce.
+  uint64 nonce = 1;
+  // Gateway build version string (e.g. "0.1.0" or a git describe).
+  string gateway_version = 2;
+  // Gateway wall-clock time at the moment the reply was built.
+  google.protobuf.Timestamp server_time = 3;
+}

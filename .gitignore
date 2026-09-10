@@ -1,0 +1,16 @@
+# Rust
+extension/target/
+extension/*.iml
+**/*.rs.bk
+# Go
+gateway/bin/
+# Local tooling
+.idea/
+.vscode/
+*.log
+# Never commit certificates or keys (docs/RULES.md §3)
+*.pem
+*.key
+*.crt
+*.csr
+*.srl

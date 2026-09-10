@@ -1,0 +1,90 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  PG_MAJOR: "16"
+  CARGO_PGRX_VERSION: "0.12.9"
+
+jobs:
+  proto:
+    name: proto lint + generated-code drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: gateway/go.mod }
+      - uses: bufbuild/buf-action@v1
+        with: { setup_only: true }
+      - run: make proto-check BUF=buf
+
+  gateway-unit:
+    name: gateway unit tests + lint + vuln scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: gateway/go.mod }
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.11.4
+          working-directory: gateway
+      - run: make gateway-test
+      - run: make gateway-vuln
+
+  extension-unit:
+    name: extension unit + pg tests + clippy + audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PostgreSQL ${{ env.PG_MAJOR }} (PGDG)
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-${PG_MAJOR} postgresql-server-dev-${PG_MAJOR} libclang-dev clang
+          # cargo pgrx test runs initdb/postgres as the current user; it must own the install dirs.
+          sudo chown -R "$USER" /usr/lib/postgresql/${PG_MAJOR} /usr/share/postgresql/${PG_MAJOR}
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: "clippy, rustfmt" }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: extension }
+      - name: Install cargo tooling
+        run: |
+          cargo install cargo-pgrx --version "${CARGO_PGRX_VERSION}" --locked
+          cargo install cargo-audit cargo-deny --locked
+          cargo pgrx init --pg${PG_MAJOR} /usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
+      - run: make ext-lint PG=pg${PG_MAJOR}
+      - run: make ext-test PG=pg${PG_MAJOR}
+      - run: make ext-audit
+
+  secret-scan:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read # gitleaks-action lists the PR's commits to scope the scan
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  e2e-ping:
+    name: "e2e-ping (Phase 0 gate; compose: gateway + postgres + extension)"
+    runs-on: ubuntu-latest
+    needs: [gateway-unit, extension-unit]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - run: make e2e-ping
+        env:
+          E2E_TIMEOUT_SECS: "120"

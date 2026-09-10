@@ -1,0 +1,58 @@
+[package]
+name = "axiom"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Axiom: a Postgres foreign data wrapper for Kubernetes (Phase 0 plumbing)"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "pgrx_embed_axiom"
+path = "./src/bin/pgrx_embed.rs"
+
+[features]
+default = ["pg16"]
+pg14 = ["pgrx/pg14", "pgrx-tests/pg14"]
+pg15 = ["pgrx/pg15", "pgrx-tests/pg15"]
+pg16 = ["pgrx/pg16", "pgrx-tests/pg16"]
+pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
+pg_test = []
+
+[dependencies]
+pgrx = "=0.12.9"
+tokio = { version = "1", features = ["rt", "time", "net"] }
+tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "transport", "tls", "tls-webpki-roots", "channel"] }
+prost = "0.13"
+prost-types = "0.13"
+url = "2"
+
+[build-dependencies]
+tonic-build = { version = "0.12", default-features = false, features = ["prost", "transport"] }
+protoc-bin-vendored = "3"
+
+[dev-dependencies]
+pgrx-tests = "=0.12.9"
+
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+# pgrx's pg_module_magic! probes every pg version feature it knows about.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("pg12", "pg13"))', 'cfg(pgrx_embed)'] }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Reviewed allow-list (docs/RULES.md §1): each entry has a reason.
+# pgrx-generated glue (pg_module_magic!, #[pg_extern]) trips these; not actionable in our code.
+missing_errors_doc = "allow"   # error contracts are documented in the item doc comment prose instead
+module_name_repetitions = "allow"  # `config::ConfigError` style naming is intentional
+must_use_candidate = "allow"   # noisy on small pure helpers
