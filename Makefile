@@ -37,6 +37,9 @@ ext-build:
 	cd extension && cargo build --no-default-features --features $(PG)
 
 ext-test:
+	# Always start from a fresh scratch cluster: a stale/partially-cached
+	# test-pgdata makes pgrx skip initdb and then fail to start Postgres.
+	rm -rf "$${CARGO_TARGET_DIR:-extension/target}/test-pgdata"
 	cd extension && cargo pgrx test $(PG)
 
 ext-lint:
