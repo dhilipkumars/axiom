@@ -1,0 +1,199 @@
+# Axiom — Implementation Plan
+
+Companion to [DESIGN.md](./DESIGN.md) and [RULES.md](./RULES.md). Every phase below
+is gated by RULES.md — quality, testability, security, and E2E-hardening
+requirements apply to each phase's own code as it lands, not as later cleanup.
+Breaks the architecture into phases, each
+ending in a working, demoable slice with its own E2E test. Phases are ordered so
+each one is buildable on real infrastructure (a local `kind` cluster) without
+depending on a piece from a later phase.
+
+Test infra assumed throughout: a `kind` cluster spun up in CI, a local Postgres
+(via `pgrx run` / a container), and a `justfile`/`Makefile` target `e2e-phaseN` that
+brings both up, runs the phase's test, tears down. Each phase's E2E test is additive
+— later phases re-run earlier phases' tests as regression checks, not replace them.
+
+---
+
+## Phase 0 — Skeleton & plumbing (no k8s yet)
+
+**Goal**: prove the gRPC-boundary shape works before any Kubernetes code exists.
+
+Tasks:
+- [ ] Scaffold pgrx extension crate (`cargo pgrx new axiom`), confirm it loads in a
+  local Postgres (`CREATE EXTENSION axiom;`).
+- [ ] Scaffold Go gateway module, minimal `grpc-go` server with a `Ping` RPC.
+- [ ] Define `.proto` for `Ping` only; generate Rust (`tonic-build`) and Go stubs.
+- [ ] bgworker skeleton: starts on `_PG_init`, owns a tokio runtime, connects to the
+  gateway's `Ping` RPC on a timer, logs success/failure via `elog`.
+- [ ] Docker Compose / `kind`-free local dev setup: gateway binary + Postgres +
+  extension, one `docker-compose up` brings up both.
+
+**E2E test (`e2e-phase0`)**: start gateway + Postgres via compose, `CREATE EXTENSION
+axiom`, assert the bgworker's log shows a successful `Ping` round-trip within N
+seconds. Fully automated, no real cluster involved.
+
+---
+
+## Phase 1 — Read-only, single built-in resource, on-demand only
+
+**Goal**: first real SQL query returns real Kubernetes data. No caching, no watch,
+no writes yet — prove the FDW scan → unary RPC → k8s API path end to end.
+
+Tasks:
+- [ ] Gateway: `List(gvk, namespace_filter)` and `Get(gvk, namespace, name)` RPCs,
+  backed by `client-go` against a real cluster (start with **Pods** only).
+- [ ] Extension: `GetForeignRelSize`/`GetForeignPaths`/`IterateForeignScan` for a
+  hardcoded `k8s_pods` foreign table (typed columns: name, namespace, phase, node,
+  raw jsonb).
+- [ ] Qual pushdown: `namespace = X` and `name = Y` translated to RPC filters (not
+  fetch-all-then-filter-in-Postgres).
+- [ ] `CREATE SERVER`/`CREATE FOREIGN TABLE` DDL for `k8s_pods` against one gateway
+  endpoint.
+- [ ] Basic error surfacing: gateway unreachable / RPC error → SQL error, not a
+  crash or silent empty result.
+
+**E2E test (`e2e-phase1`)**: `kind` cluster in CI, apply a few known Pods, run
+`SELECT name, phase FROM k8s_pods WHERE namespace = 'default'` from Postgres,
+assert the result matches `kubectl get pods -n default`. Also test the point-get
+path (`WHERE namespace = 'x' AND name = 'y'`) and a "pod doesn't exist" case.
+
+---
+
+## Phase 2 — Write path
+
+**Goal**: SQL DML actually mutates the cluster, with real conflict handling.
+
+Tasks:
+- [ ] Gateway: `Create`/`Update`/`Delete` RPCs against the API server, `Update`
+  requires a `resourceVersion` and surfaces 409s distinctly from other errors.
+- [ ] Extension: `ExecForeignInsert`/`ExecForeignUpdate`/`ExecForeignDelete` for
+  `k8s_pods` (or switch the demo resource to **ConfigMaps**, cheaper/safer to
+  mutate in a shared test cluster than Pods).
+- [ ] Map a k8s 409 Conflict to a distinct SQL error (not a generic failure) —
+  e.g. `SQLSTATE` chosen for "serialization/concurrency conflict."
+  the caller can catch/retry.
+- [ ] Guardrail: writes are never cache-served (already true by design, add a test
+  asserting the write path always calls the gateway even if a cache exists later).
+
+**E2E test (`e2e-phase2`)**: `INSERT INTO k8s_configmaps (...)` from Postgres, assert
+`kubectl get configmap` shows it; `UPDATE ... SET data = ...`, assert the cluster
+reflects the change; concurrently update the same object out-of-band via `kubectl`
+between a Postgres `SELECT` and `UPDATE` to force a 409, assert Postgres raises the
+distinct conflict error rather than silently overwriting or crashing; `DELETE`,
+assert it's gone cluster-side.
+
+---
+
+## Phase 3 — Watch-driven cache (the "live" tier)
+
+**Goal**: the actual differentiator — standing watch, shared-memory cache, no RPC
+per read.
+
+Tasks:
+- [ ] Gateway: `Subscribe(gvk, namespace_filter, resourceVersion?) ->
+  stream<WatchEvent>` server-streaming RPC backed by a `client-go` informer,
+  supporting resync-from-bookmark.
+- [ ] Extension bgworker: opens one persistent `Subscribe` stream per configured
+  cluster+GVK, reconnect/backoff on drop, relist on resume.
+- [ ] Shared-memory cache (`dshash`) keyed `(cluster_id, gvk, namespace, name)`,
+  populated by the bgworker from stream events; tombstone-and-sweep for deletes.
+- [ ] Subscription/consistency-tier state tracked per `(cluster_id, gvk,
+  namespace_filter)`: `ACTIVE` / `RESYNCING` / `DEGRADED`.
+- [ ] `IterateForeignScan` updated to serve from cache when `ACTIVE`, fall through
+  to direct RPC when no subscription exists yet (`cache_mode 'on_demand'` default
+  for tables not yet touched), and surface staleness when `DEGRADED` (a
+  `k8s_watch_status('k8s_pods')` helper function, or a hidden `_stale_since`
+  column).
+- [ ] `LISTEN`/`NOTIFY` emitted by the bgworker on cache changes.
+
+**E2E test (`e2e-phase3`)**: run a `SELECT` to warm the watch on `k8s_pods`, then
+create/delete Pods via `kubectl` directly (not through Postgres) and assert a
+subsequent `SELECT` from Postgres reflects the change within a bounded latency
+**without** the extension issuing a new List RPC (assert via a gateway-side call
+counter or metric that only one initial List happened). Separate test: kill the
+gateway pod mid-stream, assert the extension marks the subscription `DEGRADED`,
+restart the gateway, assert it resyncs and returns to `ACTIVE` with correct state
+(no missed/duplicated events versus a `kubectl` ground truth). Separate test:
+`LISTEN k8s_events; ...` in a psql session, mutate via `kubectl`, assert a
+`NOTIFY` payload arrives with the right GVK/name/type.
+
+---
+
+## Phase 4 — CRDs & schema discovery
+
+**Goal**: generalize beyond hardcoded built-ins to arbitrary CRDs.
+
+Tasks:
+- [ ] Gateway: `DiscoverSchema(gvk) -> ColumnSchema` using the cluster's
+  discovery/OpenAPI client.
+- [ ] Extension: generic scan/DML path driven by discovered schema instead of
+  hardcoded Rust structs (promoted scalar columns + `spec jsonb`/`status jsonb`
+  catch-all, per DESIGN.md §5.4).
+- [ ] `IMPORT FOREIGN SCHEMA` implementation: queries `DiscoverSchema` for all (or a
+  filtered set of) GVKs in a cluster and emits `CREATE FOREIGN TABLE` statements.
+- [ ] Extend watch/cache machinery (already generic by `gvk` key from Phase 3) to
+  a test CRD — should require no changes if Phase 3 was built generically; this
+  phase is partly a regression check on that assumption.
+
+**E2E test (`e2e-phase4`)**: apply a test CRD + CRD instances to the `kind` cluster,
+run `IMPORT FOREIGN SCHEMA` against it, assert the generated foreign table's columns
+match the CRD schema, `SELECT`/`INSERT`/`UPDATE`/watch against it exactly as in
+Phases 1–3's tests but parameterized over the CRD instead of Pods/ConfigMaps —
+i.e. re-run the Phase 1–3 test suite generically against a CRD to prove genericity.
+
+---
+
+## Phase 5 — Multi-cluster
+
+**Goal**: prove the `CREATE SERVER`-per-cluster abstraction actually holds up with
+≥2 independent clusters/gateways simultaneously.
+
+Tasks:
+- [ ] bgworker: manage N independent persistent streams (one per configured
+  server), independent reconnect/backoff state per cluster.
+- [ ] Cache key already includes `cluster_id` (from Phase 3) — this phase is mostly
+  a concurrency/isolation test, plus config surface (`CREATE SERVER ... OPTIONS
+  (endpoint ...)` per cluster wired end to end).
+- [ ] Verify a failure/degradation in one cluster's stream doesn't affect another
+  cluster's `ACTIVE` state or block its scans (isolation, not just "it also works").
+
+**E2E test (`e2e-phase5`)**: two `kind` clusters in CI, two gateways, two `CREATE
+SERVER`s. Query both, mutate one cluster's data, assert only that cluster's cached
+table updates. Kill one gateway, assert the other cluster's `ACTIVE`/live queries
+are unaffected (isolation test), then bring it back and assert it resyncs.
+
+---
+
+## Phase 6 — Gateway auth hardening
+
+**Goal**: replace the POC's placeholder auth with the real model from DESIGN.md §7.
+
+Tasks:
+- [ ] mTLS between extension gRPC client and gateway.
+- [ ] `CREATE USER MAPPING` credential → gateway-side mapping to a scoped k8s RBAC
+  identity (not a shared superuser token).
+- [ ] Negative tests: a Postgres role mapped to a restricted identity cannot read/
+  write resources outside its RBAC scope, even though the underlying gateway
+  connection is shared infrastructure.
+
+**E2E test (`e2e-phase6`)**: two Postgres roles with two different `CREATE USER
+MAPPING`s pointing at two different RBAC-scoped identities on the same cluster;
+assert role A can read/write only what its RBAC identity permits, role B is
+correctly denied (SQL error, not a crash) for out-of-scope resources; assert
+plaintext/non-mTLS connections to the gateway are rejected.
+
+---
+
+## Cross-cutting, applies to every phase
+
+- Every phase's E2E test must run unattended in CI against a real `kind` cluster —
+  no phase is "done" on the strength of manual testing alone.
+- Each new phase's CI job re-runs all previous phases' E2E tests as regressions
+  before declaring the new phase's own test authoritative.
+- Track the open risks from DESIGN.md §8 (CRD schema explosion, watch/informer
+  scaling, shared-memory eviction policy) as they become concretely testable —
+  Phase 4 is the natural point to revisit CRD schema explosion, Phase 5 for
+  informer scaling, and cache eviction should get its own task once a phase
+  exercises a high-object-count cluster (not yet scheduled — flag if that becomes a
+  near-term need rather than scheduling it speculatively now).
