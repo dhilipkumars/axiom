@@ -14,7 +14,7 @@ import (
 
 func TestRunRejectsMissingTLS(t *testing.T) {
 	t.Parallel()
-	err := run(context.Background(), []string{"-listen", "127.0.0.1:0"}, os.Stderr)
+	err := run(context.Background(), []string{"-listen", "127.0.0.1:0", "-no-cluster"}, os.Stderr)
 	if !errors.Is(err, tlsconfig.ErrMissingPath) {
 		t.Fatalf("err = %v, want ErrMissingPath (plaintext must be impossible)", err)
 	}
@@ -37,13 +37,22 @@ func TestRunRejectsBadFlag(t *testing.T) {
 	}
 }
 
+func TestRunRequiresClusterOrOptOut(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	certPath, keyPath := testcert.Write(t, t.TempDir())
+	err := run(context.Background(), []string{"-listen", "127.0.0.1:0", "-tls-cert", certPath, "-tls-key", keyPath}, os.Stderr)
+	if err == nil || !strings.Contains(err.Error(), "--no-cluster") {
+		t.Fatalf("err = %v, want cluster-config error mentioning --no-cluster", err)
+	}
+}
+
 func TestRunStopsOnContextCancel(t *testing.T) {
 	t.Parallel()
 	certPath, keyPath := testcert.Write(t, t.TempDir())
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, []string{"-listen", "127.0.0.1:0", "-tls-cert", certPath, "-tls-key", keyPath}, os.Stderr)
+		done <- run(ctx, []string{"-listen", "127.0.0.1:0", "-tls-cert", certPath, "-tls-key", keyPath, "-no-cluster"}, os.Stderr)
 	}()
 	time.Sleep(200 * time.Millisecond)
 	cancel()

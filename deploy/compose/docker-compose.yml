@@ -14,7 +14,9 @@ services:
     build:
       context: ../..
       dockerfile: gateway/Dockerfile
-    command: ["-listen", ":8443", "-tls-cert", "/certs/gateway.crt", "-tls-key", "/certs/gateway.key"]
+    # Base stack has no cluster (Phase 0 plumbing). The kind overlay
+    # (docker-compose.kind.yml) replaces this command with a kubeconfig.
+    command: ["-listen", ":8443", "-tls-cert", "/certs/gateway.crt", "-tls-key", "/certs/gateway.key", "-no-cluster"]
     volumes:
       - certs:/certs:ro
     depends_on:

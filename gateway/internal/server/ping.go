@@ -7,6 +7,8 @@ package server
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -14,6 +16,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	axiomv1 "github.com/dhilipkumars/axiom/gateway/gen/axiom/v1"
+	"github.com/dhilipkumars/axiom/gateway/internal/k8s"
 )
 
 // Clock returns the current time. It is injected so handlers are testable with
@@ -26,15 +29,25 @@ type Server struct {
 
 	version string
 	now     Clock
+	k8s     k8s.Client
+	log     *slog.Logger
 }
 
-// New returns a Server that reports version in Ping replies and uses now as
-// its clock. A nil now defaults to time.Now.
-func New(version string, now Clock) *Server {
+// New returns a Server that reports version in Ping replies, uses now as its
+// clock, serves reads from client, and logs to logger. nil now defaults to
+// time.Now; nil client defaults to k8s.Unconfigured (reads fail loudly); nil
+// logger discards.
+func New(version string, now Clock, client k8s.Client, logger *slog.Logger) *Server {
 	if now == nil {
 		now = time.Now
 	}
-	return &Server{version: version, now: now}
+	if client == nil {
+		client = k8s.Unconfigured{}
+	}
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	return &Server{version: version, now: now, k8s: client, log: logger}
 }
 
 // Ping echoes the caller's nonce and reports gateway version and clock.

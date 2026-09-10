@@ -1,0 +1,26 @@
+# Overlay for running the stack against a local kind cluster:
+#   docker compose -f docker-compose.yml -f docker-compose.kind.yml up
+# The gateway joins kind's docker network so it can reach the API server at
+# https://<cluster>-control-plane:6443, and reads a kubeconfig that e2e/lib/kind.sh
+# writes with a short-lived token for the least-privilege gateway ServiceAccount.
+services:
+  gateway:
+    command:
+      - -listen
+      - :8443
+      - -tls-cert
+      - /certs/gateway.crt
+      - -tls-key
+      - /certs/gateway.key
+      - -kubeconfig
+      - /kube/config
+    volumes:
+      - certs:/certs:ro
+      - ${E2E_KUBE_DIR:?set E2E_KUBE_DIR to the directory holding the gateway kubeconfig}:/kube:ro
+    networks:
+      - default
+      - kind
+
+networks:
+  kind:
+    external: true

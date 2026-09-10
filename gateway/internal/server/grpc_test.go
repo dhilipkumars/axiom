@@ -21,7 +21,7 @@ func TestPingOverGRPC(t *testing.T) {
 	t.Parallel()
 	lis := bufconn.Listen(1 << 20)
 	gs := grpc.NewServer()
-	axiomv1.RegisterGatewayServiceServer(gs, New("bufconn", nil))
+	axiomv1.RegisterGatewayServiceServer(gs, New("bufconn", nil, nil, nil))
 	go func() {
 		// Serve returns a non-nil error only if the listener fails; bufconn's
 		// Close during teardown makes that error expected and uninteresting.
