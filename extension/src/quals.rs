@@ -128,7 +128,7 @@ mod tests {
     fn contradictions_are_impossible() {
         let f = PodFilter::from_quals(&[q("name", "a"), q("name", "b")]);
         assert!(f.impossible);
-        assert!(f.estimated_rows() == 0.0);
+        assert!(f.estimated_rows().abs() < f64::EPSILON);
         let f = PodFilter::from_quals(&[q("name", "a"), q("name", "a")]);
         assert!(!f.impossible);
         assert_eq!(f.name.as_deref(), Some("a"));
