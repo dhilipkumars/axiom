@@ -20,14 +20,20 @@ brings both up, runs the phase's test, tears down. Each phase's E2E test is addi
 **Goal**: prove the gRPC-boundary shape works before any Kubernetes code exists.
 
 Tasks:
-- [ ] Scaffold pgrx extension crate (`cargo pgrx new axiom`), confirm it loads in a
+- [x] Scaffold pgrx extension crate (`cargo pgrx new axiom`), confirm it loads in a
   local Postgres (`CREATE EXTENSION axiom;`).
-- [ ] Scaffold Go gateway module, minimal `grpc-go` server with a `Ping` RPC.
-- [ ] Define `.proto` for `Ping` only; generate Rust (`tonic-build`) and Go stubs.
-- [ ] bgworker skeleton: starts on `_PG_init`, owns a tokio runtime, connects to the
+- [x] Scaffold Go gateway module, minimal `grpc-go` server with a `Ping` RPC.
+- [x] Define `.proto` for `Ping` only; generate Rust (`tonic-build`) and Go stubs.
+- [x] bgworker skeleton: starts on `_PG_init`, owns a tokio runtime, connects to the
   gateway's `Ping` RPC on a timer, logs success/failure via `elog`.
-- [ ] Docker Compose / `kind`-free local dev setup: gateway binary + Postgres +
+- [x] Docker Compose / `kind`-free local dev setup: gateway binary + Postgres +
   extension, one `docker-compose up` brings up both.
+
+Notes from implementation: the Postgres↔gateway hop is TLS from Phase 0 (RULES.md
+§3); the gateway has no plaintext mode. The bgworker takes a database-less backend
+connection so it is visible in `pg_stat_activity` and ready for Phase 3's `NOTIFY`.
+Static bgworker registration requires `shared_preload_libraries = 'axiom'`;
+`CREATE EXTENSION` alone warns loudly instead of silently running without a worker.
 
 **E2E test (`e2e-phase0`)**: start gateway + Postgres via compose, `CREATE EXTENSION
 axiom`, assert the bgworker's log shows a successful `Ping` round-trip within N

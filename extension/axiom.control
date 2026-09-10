@@ -1,0 +1,6 @@
+comment = 'Axiom: a Postgres foreign data wrapper for Kubernetes'
+default_version = '@CARGO_VERSION@'
+module_pathname = '$libdir/axiom'
+relocatable = false
+superuser = true
+trusted = false
