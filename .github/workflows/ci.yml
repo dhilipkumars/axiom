@@ -68,6 +68,9 @@ jobs:
   secret-scan:
     name: gitleaks
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read # gitleaks-action lists the PR's commits to scope the scan
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
