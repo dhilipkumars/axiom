@@ -58,7 +58,7 @@ What exists and is tested end to end:
 | Gateway (Go) | [gateway/](gateway/) | TLS-only gRPC server that answers `Ping`. There is deliberately no plaintext mode |
 | Extension (Rust, pgrx) | [extension/](extension/) | `axiom.*` settings plus a background worker that pings the gateway over TLS on a timer and logs the outcome |
 | Local stack | [deploy/compose/](deploy/compose/) | One `docker compose up` brings up gateway + Postgres with a throwaway CA |
-| E2E test | [e2e/phase0.sh](e2e/phase0.sh) | Starts the stack, runs `CREATE EXTENSION axiom`, asserts a `ping ok` round-trip and TLS 1.3 |
+| E2E test | [e2e/ping_test.sh](e2e/ping_test.sh) | Starts the stack via [e2e/lib/stack.sh](e2e/lib/stack.sh), runs `CREATE EXTENSION axiom`, asserts a `ping ok` round-trip and TLS 1.3 |
 
 The rest of this README walks you through building, running, and testing it.
 
@@ -119,7 +119,7 @@ git checkout phase-0      # until PR #3 is merged into main
 This is fully automated and needs only Docker:
 
 ```sh
-make e2e-phase0
+make e2e-ping        # alias: make e2e-phase0
 ```
 
 The first run builds two images and takes several minutes (it compiles
@@ -130,23 +130,25 @@ caches and take about a minute. You should see:
 ==> building and starting stack
 ==> CREATE EXTENSION axiom
 axiom_version() = 0.1.0
+==> asserting the worker reads the configured gateway endpoint
 ==> asserting background worker is registered
 ==> waiting up to 90s for a successful Ping round-trip
 postgres-1  | ... LOG:  axiom bgworker: ping ok endpoint=https://gateway:8443 gateway_version=dev
 ==> asserting the gateway serves TLS 1.3 with the generated CA
-==> PHASE 0 E2E PASSED
+==> PING E2E PASSED
 ==> tearing down
 ```
 
 Knobs: `E2E_TIMEOUT_SECS=120` to wait longer on a slow machine, `E2E_KEEP=1` to
-leave the stack running afterwards so you can poke at it (see next section).
+leave the stack running afterwards so you can poke at it (see next section),
+`E2E_NO_BUILD=1` to reuse already-built images.
 
 ## 4. Poke at the running stack by hand
 
 Bring the stack up and leave it running:
 
 ```sh
-make up          # or: E2E_KEEP=1 make e2e-phase0
+make up          # or: E2E_KEEP=1 make e2e-ping
 ```
 
 Open a SQL session inside the Postgres container:
@@ -283,8 +285,8 @@ proto/            axiom.v1 protobuf + buf config (Go stubs → gateway/gen, Rust
 gateway/          Go gateway: cmd/gateway, internal/server (RPC handlers), internal/tlsconfig
 extension/        pgrx crate: src/bgworker.rs (Postgres glue), src/{config,backoff,ping}.rs (pure, unit-tested)
 deploy/compose/   docker-compose.yml + cert generator for the local stack
-e2e/              phaseN.sh scripts, one per PLAN.md phase
-.github/          CI: proto drift, gateway, extension, gitleaks, e2e-phase0 as separate jobs
+e2e/              *_test.sh scripts (one per PLAN.md gate) + lib/stack.sh shared setup
+.github/          CI: proto drift, gateway, extension, gitleaks, e2e-ping as separate jobs
 docs/             DESIGN.md, PLAN.md, RULES.md
 ```
 

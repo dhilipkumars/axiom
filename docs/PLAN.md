@@ -34,6 +34,8 @@ Notes from implementation: the Postgres↔gateway hop is TLS from Phase 0 (RULES
 connection so it is visible in `pg_stat_activity` and ready for Phase 3's `NOTIFY`.
 Static bgworker registration requires `shared_preload_libraries = 'axiom'`;
 `CREATE EXTENSION` alone warns loudly instead of silently running without a worker.
+The E2E lives in `e2e/ping_test.sh` (`make e2e-ping`, aliased as `make e2e-phase0`) on
+top of the reusable compose setup library `e2e/lib/stack.sh`, which later phases share.
 
 **E2E test (`e2e-phase0`)**: start gateway + Postgres via compose, `CREATE EXTENSION
 axiom`, assert the bgworker's log shows a successful `Ping` round-trip within N

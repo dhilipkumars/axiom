@@ -8,7 +8,7 @@ PG ?= pg14
 COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 
 .PHONY: all proto proto-check gateway-build gateway-test gateway-lint gateway-vuln \
-        ext-build ext-test ext-lint ext-fmt ext-audit unit lint up down e2e-phase0 e2e
+        ext-build ext-test ext-lint ext-fmt ext-audit unit lint up down e2e-ping e2e-phase0 e2e
 
 all: lint unit
 
@@ -64,7 +64,11 @@ up:
 down:
 	$(COMPOSE) down -v --remove-orphans
 
-e2e-phase0:
-	./e2e/phase0.sh
+# Tests live in e2e/*_test.sh and share the setup library in e2e/lib/.
+e2e-ping:
+	./e2e/ping_test.sh
 
-e2e: e2e-phase0
+# PLAN.md name for the Phase 0 gate; the Ping test is that gate.
+e2e-phase0: e2e-ping
+
+e2e: e2e-ping
