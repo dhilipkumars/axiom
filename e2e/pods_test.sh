@@ -10,7 +10,8 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$here/lib/stack.sh"
 source "$here/lib/kind.sh"
 
-E2E_COMPOSE_OVERLAYS="$E2E_ROOT/deploy/compose/docker-compose.kind.yml"
+# Append the kind overlay to whatever the caller layered (e.g. docker-compose.dev.yml).
+E2E_COMPOSE_OVERLAYS="${E2E_COMPOSE_OVERLAYS:-} $E2E_ROOT/deploy/compose/docker-compose.kind.yml"
 NS="axiom-e2e"
 
 kind_up

@@ -1,0 +1,7 @@
+# Overlay for poking at the stack from the host: publishes Postgres on
+# 127.0.0.1:5432 (loopback only; dev password is in docker-compose.yml).
+#   psql "postgresql://axiom:axiom-dev@127.0.0.1:5432/axiom"
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:${AXIOM_PG_PORT:-5432}:5432"
