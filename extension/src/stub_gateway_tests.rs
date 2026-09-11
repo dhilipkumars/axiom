@@ -300,11 +300,11 @@ impl GatewayService for Stub {
                     initial.push(ev.clone());
                 }
             }
-            // As the real gateway does: a resumed watch is announced live with SYNCED.
+            // As the API server does for a caught-up watcher: a BOOKMARK after the backlog.
             initial.push(SubscribeResponse {
-                r#type: EvType::Synced as i32,
+                r#type: EvType::Bookmark as i32,
                 object: None,
-                resource_version: req.resource_version.clone(),
+                resource_version: self.0.rv(),
             });
         }
         let mut live = self.0.events.subscribe();

@@ -125,8 +125,13 @@ per read.
 
 Tasks:
 - [x] Gateway: `Subscribe(gvk, namespace_filter, resourceVersion?) ->
-  stream<WatchEvent>` server-streaming RPC backed by a `client-go` informer,
-  supporting resync-from-bookmark.
+  stream<WatchEvent>` server-streaming RPC, supporting resync-from-bookmark.
+  **Scope change (approved in review of PR #7):** implemented as a raw
+  `client-go` list+watch per stream rather than an informer. An informer's own
+  store would duplicate the extension's cache and its resync semantics hide the
+  resourceVersion bookkeeping the extension needs for honest tiers. Sharing one
+  upstream watch across subscribers to the same `(gvk, namespace)` (the
+  informer-factory fan-out concern, DESIGN.md §8) is Phase 5's job.
 - [x] Extension bgworker: opens one persistent `Subscribe` stream per configured
   cluster+GVK, reconnect/backoff on drop, relist on resume.
 - [x] Shared-memory cache (`dshash`) keyed `(cluster_id, gvk, namespace, name)`,
@@ -150,7 +155,12 @@ shared slot table and is served on demand; the background worker opens one
 `Subscribe` stream per slot, resumes from the stored bookmark after a loss, and
 relists only on `RESYNC_REQUIRED`. Staleness is never masked: a `DEGRADED`
 subscription is still served, with a `WARNING` on every scan, and
-`axiom_watch_status()` exposes state, object count, bookmark, ages, and reason.
+`axiom_watch_status()` exposes state, object count, bookmark, ages, and reason. A
+resumed stream stays `DEGRADED` until the API server's first `BOOKMARK` (which it
+only sends to a caught-up watcher) proves the backlog is delivered; there is no
+other honest "current again" signal on resume. Initial-listing events carry no
+resume point, so a stream dropped mid-listing relists rather than resuming from a
+partial cache.
 `NOTIFY axiom_events` carries a JSON payload `{server, resource, namespace, name,
 type}`; the worker connects to `axiom.notify_database` to send it. Cache memory is
 bounded by `axiom.cache_size_mb`; when exhausted the affected subscription becomes

@@ -40,7 +40,10 @@ pub const MAX_SUBS: usize = 64;
 const ENDPOINT_MAX: usize = 256;
 const CA_MAX: usize = 512;
 const NS_MAX: usize = 64;
-const RV_MAX: usize = 48;
+/// Kubernetes resourceVersions are opaque; in practice small decimal strings.
+/// A token that does not fit is never truncated: `set_bookmark` rejects it and
+/// the worker falls back to a full relist.
+const RV_MAX: usize = 128;
 const REASON_MAX: usize = 160;
 
 /// One subscription. All fields are plain data so the struct is valid when
@@ -284,10 +287,14 @@ pub fn lookup_or_request(
     let mut ctl = CONTROL.exclusive();
     let mut exact = None;
     let mut wide = None;
+    let want_ca = target.ca_cert_path.as_deref().unwrap_or("");
     for (i, s) in ctl.subs.iter().enumerate() {
+        // Identity is (endpoint, CA, kind): two servers with the same endpoint
+        // but different trust roots must never share a cache.
         if !s.in_use
             || s.kind != kind.index()
             || get(&s.endpoint, s.endpoint_len as usize) != target.endpoint
+            || get(&s.ca_path, s.ca_len as usize) != want_ca
         {
             continue;
         }
@@ -307,25 +314,31 @@ pub fn lookup_or_request(
     let Some(i) = ctl.subs.iter().position(|s| !s.in_use) else {
         return Err(ShmemError::Full);
     };
-    ctl.next_id = ctl.next_id.wrapping_add(1).max(1);
-    let id = ctl.next_id;
-    let now = now_us();
-    let s = &mut ctl.subs[i];
-    *s = SubSlot::default_zeroed();
-    s.in_use = true;
-    s.id = id;
-    s.kind = kind.index();
+    // Build the slot privately; publish only after every fallible copy succeeded,
+    // so a too-long endpoint/CA path can never leave a half-initialised slot.
+    let mut fresh = SubSlot::default_zeroed();
+    fresh.kind = kind.index();
     #[allow(
         clippy::cast_possible_truncation,
         reason = "put() bounds the length by the buffer size (<= 512)"
     )]
     {
-        s.endpoint_len = put(&mut s.endpoint, &target.endpoint)? as u16;
-        s.ca_len = put(&mut s.ca_path, target.ca_cert_path.as_deref().unwrap_or(""))? as u16;
-        s.ns_len = put(&mut s.namespace, namespace)? as u8;
+        fresh.endpoint_len = put(&mut fresh.endpoint, &target.endpoint)? as u16;
+        fresh.ca_len = put(&mut fresh.ca_path, want_ca)? as u16;
+        fresh.ns_len = put(&mut fresh.namespace, namespace)? as u8;
     }
-    s.rpc_timeout_secs = u32::try_from(rpc_timeout.as_secs()).unwrap_or(u32::MAX);
-    set_state_inner(s, SubState::Requested, "requested by a scan", now);
+    fresh.rpc_timeout_secs = u32::try_from(rpc_timeout.as_secs()).unwrap_or(u32::MAX);
+    ctl.next_id = ctl.next_id.wrapping_add(1).max(1);
+    let id = ctl.next_id;
+    fresh.id = id;
+    fresh.in_use = true;
+    set_state_inner(
+        &mut fresh,
+        SubState::Requested,
+        "requested by a scan",
+        now_us(),
+    );
+    ctl.subs[i] = fresh;
     Ok((i, id, SubState::Requested))
 }
 
@@ -388,8 +401,15 @@ pub fn set_state(slot: usize, id: u32, state: SubState, reason: &str) -> Result<
 }
 
 /// Records a resourceVersion bookmark (and, for a full sync, the sync time).
+///
+/// Returns `TooLarge("resourceVersion")` without changing the stored bookmark
+/// if the token exceeds the slot's capacity; callers must then treat the
+/// subscription as having no resume point (full relist), never truncate.
 pub fn set_bookmark(slot: usize, id: u32, rv: &str, full_sync: bool) -> Result<(), ShmemError> {
     ensure_available()?;
+    if rv.len() > RV_MAX {
+        return Err(ShmemError::TooLarge("resourceVersion"));
+    }
     let mut ctl = CONTROL.exclusive();
     let now = now_us();
     let s = ctl
@@ -397,15 +417,28 @@ pub fn set_bookmark(slot: usize, id: u32, rv: &str, full_sync: bool) -> Result<(
         .get_mut(slot)
         .filter(|s| s.in_use && s.id == id)
         .ok_or(ShmemError::SlotGone)?;
-    let n = rv.len().min(RV_MAX);
-    s.bookmark_rv[..n].copy_from_slice(&rv.as_bytes()[..n]);
-    #[allow(clippy::cast_possible_truncation, reason = "n <= RV_MAX = 48")]
-    let n8 = n as u8;
+    s.bookmark_rv[..rv.len()].copy_from_slice(rv.as_bytes());
+    #[allow(clippy::cast_possible_truncation, reason = "rv.len() <= RV_MAX = 128")]
+    let n8 = rv.len() as u8;
     s.rv_len = n8;
     s.last_event_us = now;
     if full_sync {
         s.last_full_list_us = now;
     }
+    Ok(())
+}
+
+/// Forgets the bookmark (e.g. when a token could not be stored) so a worker
+/// restart relists instead of resuming from a stale or missing point.
+pub fn clear_bookmark(slot: usize, id: u32) -> Result<(), ShmemError> {
+    ensure_available()?;
+    let mut ctl = CONTROL.exclusive();
+    let s = ctl
+        .subs
+        .get_mut(slot)
+        .filter(|s| s.in_use && s.id == id)
+        .ok_or(ShmemError::SlotGone)?;
+    s.rv_len = 0;
     Ok(())
 }
 
@@ -731,6 +764,11 @@ fn checked_slot(ctl: &mut Control, slot: usize, id: u32) -> Result<&mut SubSlot,
 }
 
 /// Inserts or replaces one object (worker side).
+///
+/// Allocation happens before the old entry is touched: if the cache is full,
+/// the previous version of the object stays in place and the error propagates
+/// (the worker degrades the subscription), so a stale cache never loses
+/// objects it already had.
 pub fn upsert(
     slot: usize,
     id: u32,
@@ -747,15 +785,19 @@ pub fn upsert(
         let now = now_us();
         let s = checked_slot(&mut ctl, slot, id)?;
         let hash = key_hash(ns, name);
-        if let Some((prev, p)) = find(area, s, hash, ns, name) {
-            unlink(area, s, prev, p);
-        }
         ensure_buckets(area, s)?;
+        let new_entry = alloc_entry(area, 0, hash, ns, name, rv, json, false, 0)?;
+        if let Some((prev, old)) = find(area, s, hash, ns, name) {
+            unlink(area, s, prev, old);
+        }
         #[allow(clippy::cast_possible_truncation, reason = "modulo nbuckets fits u32")]
         let b = (hash % u64::from(s.nbuckets)) as usize;
         let head = bucket_slice(area, s)[b];
-        let p = alloc_entry(area, head, hash, ns, name, rv, json, false, 0)?;
-        bucket_slice(area, s)[b] = p;
+        let base = pg_sys::dsa_get_address(area, new_entry).cast::<EntryHdr>();
+        let mut hdr = std::ptr::read_unaligned(base);
+        hdr.next = head;
+        std::ptr::write_unaligned(base, hdr);
+        bucket_slice(area, s)[b] = new_entry;
         s.live_count = s.live_count.saturating_add(1);
         s.object_count = s.live_count;
         s.last_event_us = now;

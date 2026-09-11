@@ -99,14 +99,17 @@ type GatewayServiceClient interface {
 	// is held open by the extension's background worker.
 	//
 	// Without resource_version the gateway performs a full LIST and emits every
-	// object as ADDED, then a SYNCED event carrying the list's resourceVersion,
-	// then live ADDED/MODIFIED/DELETED events and periodic BOOKMARK events. With
-	// a resource_version the gateway resumes the watch from that point and sends
-	// no initial listing, but still emits one SYNCED event (echoing the resume
-	// point) as soon as the watch is established, so the caller knows the stream
-	// is live again; if the API server no longer has that history (HTTP 410
-	// Gone) the gateway emits RESYNC_REQUIRED and ends the stream, and the caller
-	// must resubscribe without a resource_version and rebuild its cache.
+	// object as ADDED with an EMPTY resource_version (a partial listing is not a
+	// valid resume point), then a SYNCED event carrying the list's
+	// resourceVersion, then live ADDED/MODIFIED/DELETED events and BOOKMARK
+	// events. With a resource_version the gateway resumes the watch from that
+	// point and sends no initial listing and no SYNCED: the backlog since the
+	// bookmark is delivered as ordinary events, and the API server's first
+	// BOOKMARK (which it only sends once the watcher is caught up) is the
+	// caller's signal that the cache is current again. If the API server no
+	// longer has that history (HTTP 410 Gone) the gateway emits RESYNC_REQUIRED
+	// and ends the stream, and the caller must resubscribe without a
+	// resource_version and rebuild its cache.
 	//
 	// Errors: INVALID_ARGUMENT for unsupported gvk / invalid namespace;
 	// PERMISSION_DENIED / FAILED_PRECONDITION / UNAVAILABLE as for Get. Once
@@ -266,14 +269,17 @@ type GatewayServiceServer interface {
 	// is held open by the extension's background worker.
 	//
 	// Without resource_version the gateway performs a full LIST and emits every
-	// object as ADDED, then a SYNCED event carrying the list's resourceVersion,
-	// then live ADDED/MODIFIED/DELETED events and periodic BOOKMARK events. With
-	// a resource_version the gateway resumes the watch from that point and sends
-	// no initial listing, but still emits one SYNCED event (echoing the resume
-	// point) as soon as the watch is established, so the caller knows the stream
-	// is live again; if the API server no longer has that history (HTTP 410
-	// Gone) the gateway emits RESYNC_REQUIRED and ends the stream, and the caller
-	// must resubscribe without a resource_version and rebuild its cache.
+	// object as ADDED with an EMPTY resource_version (a partial listing is not a
+	// valid resume point), then a SYNCED event carrying the list's
+	// resourceVersion, then live ADDED/MODIFIED/DELETED events and BOOKMARK
+	// events. With a resource_version the gateway resumes the watch from that
+	// point and sends no initial listing and no SYNCED: the backlog since the
+	// bookmark is delivered as ordinary events, and the API server's first
+	// BOOKMARK (which it only sends once the watcher is caught up) is the
+	// caller's signal that the cache is current again. If the API server no
+	// longer has that history (HTTP 410 Gone) the gateway emits RESYNC_REQUIRED
+	// and ends the stream, and the caller must resubscribe without a
+	// resource_version and rebuild its cache.
 	//
 	// Errors: INVALID_ARGUMENT for unsupported gvk / invalid namespace;
 	// PERMISSION_DENIED / FAILED_PRECONDITION / UNAVAILABLE as for Get. Once

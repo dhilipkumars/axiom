@@ -106,6 +106,8 @@ pub enum StreamEvent {
     Opened,
     /// Initial listing complete.
     Synced,
+    /// API server bookmark: the watcher is caught up (activates a resumed stream).
+    Bookmark,
     /// Stream ended with an error / disconnect.
     Lost,
     /// Gateway said the resume point is gone; cache must be rebuilt.
@@ -115,15 +117,21 @@ pub enum StreamEvent {
 /// Next state for a subscription. Pure and total.
 ///
 /// `has_bookmark` says whether a resume point exists (the stream synced at
-/// least once). Losing the stream with a bookmark keeps the cache servable as
-/// `Degraded` and the bookmark for a resume; losing it without one means there
-/// is nothing to serve, so the slot goes back to `Requested` for a fresh list.
+/// least once). Opening a stream *with* a bookmark is a resume: the cache stays
+/// servable-but-stale (`Degraded`) until the API server's first BOOKMARK
+/// proves the backlog is delivered, because there is no other honest signal
+/// (a resume gets no SYNCED). Opening without one is a fresh listing
+/// (`Resyncing`, cache not served). Losing the stream with a bookmark keeps
+/// the cache servable as `Degraded`; without one there is nothing to serve, so
+/// the slot goes back to `Requested`.
 pub fn next_state(current: SubState, event: StreamEvent, has_bookmark: bool) -> SubState {
     match (current, event) {
         (SubState::Free, _) => SubState::Free,
+        // With a bookmark the cache stays servable-but-stale, whether the stream
+        // was just lost or is being resumed (until the first bookmark arrives).
+        (_, StreamEvent::Opened | StreamEvent::Lost) if has_bookmark => SubState::Degraded,
         (_, StreamEvent::Opened | StreamEvent::ResyncRequired) => SubState::Resyncing,
-        (_, StreamEvent::Synced) => SubState::Active,
-        (_, StreamEvent::Lost) if has_bookmark => SubState::Degraded,
+        (_, StreamEvent::Synced | StreamEvent::Bookmark) => SubState::Active,
         (_, StreamEvent::Lost) => SubState::Requested,
     }
 }
@@ -216,15 +224,20 @@ mod tests {
             next_state(SubState::Active, E::Lost, true),
             SubState::Degraded
         );
+        // A resume keeps serving stale until a bookmark proves the backlog is in.
         assert_eq!(
             next_state(SubState::Degraded, E::Opened, true),
-            SubState::Resyncing
-        );
-        // A failed reconnect attempt must not lose the bookmark's servability.
-        assert_eq!(
-            next_state(SubState::Resyncing, E::Lost, true),
             SubState::Degraded
         );
+        assert_eq!(
+            next_state(SubState::Degraded, E::Bookmark, true),
+            SubState::Active
+        );
+        assert_eq!(
+            next_state(SubState::Active, E::Bookmark, true),
+            SubState::Active
+        );
+        // A failed reconnect attempt must not lose the bookmark's servability.
         assert_eq!(
             next_state(SubState::Degraded, E::Lost, true),
             SubState::Degraded

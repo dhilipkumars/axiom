@@ -78,14 +78,17 @@ service GatewayService {
   // is held open by the extension's background worker.
   //
   // Without resource_version the gateway performs a full LIST and emits every
-  // object as ADDED, then a SYNCED event carrying the list's resourceVersion,
-  // then live ADDED/MODIFIED/DELETED events and periodic BOOKMARK events. With
-  // a resource_version the gateway resumes the watch from that point and sends
-  // no initial listing, but still emits one SYNCED event (echoing the resume
-  // point) as soon as the watch is established, so the caller knows the stream
-  // is live again; if the API server no longer has that history (HTTP 410
-  // Gone) the gateway emits RESYNC_REQUIRED and ends the stream, and the caller
-  // must resubscribe without a resource_version and rebuild its cache.
+  // object as ADDED with an EMPTY resource_version (a partial listing is not a
+  // valid resume point), then a SYNCED event carrying the list's
+  // resourceVersion, then live ADDED/MODIFIED/DELETED events and BOOKMARK
+  // events. With a resource_version the gateway resumes the watch from that
+  // point and sends no initial listing and no SYNCED: the backlog since the
+  // bookmark is delivered as ordinary events, and the API server's first
+  // BOOKMARK (which it only sends once the watcher is caught up) is the
+  // caller's signal that the cache is current again. If the API server no
+  // longer has that history (HTTP 410 Gone) the gateway emits RESYNC_REQUIRED
+  // and ends the stream, and the caller must resubscribe without a
+  // resource_version and rebuild its cache.
   //
   // Errors: INVALID_ARGUMENT for unsupported gvk / invalid namespace;
   // PERMISSION_DENIED / FAILED_PRECONDITION / UNAVAILABLE as for Get. Once
@@ -211,11 +214,12 @@ message SubscribeResponse {
     TYPE_MODIFIED = 2;
     // Object was deleted; `object` carries its last known state.
     TYPE_DELETED = 3;
-    // The stream is live: either the initial listing is complete
-    // (`resource_version` is the list's) or a resumed watch was established
-    // (`resource_version` echoes the resume point).
+    // The initial listing is complete and the cache is current;
+    // `resource_version` is the list's.
     TYPE_SYNCED = 4;
-    // No change; `resource_version` advances the resume point.
+    // No change; `resource_version` advances the resume point. The API server
+    // emits bookmarks only for a caught-up watcher, so on a resumed stream the
+    // first BOOKMARK also means "current again".
     TYPE_BOOKMARK = 5;
     // The requested resource_version is too old (410 Gone). The stream ends
     // after this event; resubscribe without a resource_version.
@@ -224,6 +228,8 @@ message SubscribeResponse {
   Type type = 1;
   // Present for TYPE_ADDED/TYPE_MODIFIED/TYPE_DELETED.
   Object object = 2;
-  // Present for TYPE_SYNCED/TYPE_BOOKMARK and, when known, for TYPE_RESYNC_REQUIRED.
+  // Present for TYPE_SYNCED/TYPE_BOOKMARK and, when known, for
+  // TYPE_RESYNC_REQUIRED, and for live TYPE_ADDED/MODIFIED/DELETED events.
+  // Empty on initial-listing TYPE_ADDED events: never resume from those.
   string resource_version = 3;
 }

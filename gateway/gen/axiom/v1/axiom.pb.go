@@ -40,11 +40,12 @@ const (
 	SubscribeResponse_TYPE_MODIFIED SubscribeResponse_Type = 2
 	// Object was deleted; `object` carries its last known state.
 	SubscribeResponse_TYPE_DELETED SubscribeResponse_Type = 3
-	// The stream is live: either the initial listing is complete
-	// (`resource_version` is the list's) or a resumed watch was established
-	// (`resource_version` echoes the resume point).
+	// The initial listing is complete and the cache is current;
+	// `resource_version` is the list's.
 	SubscribeResponse_TYPE_SYNCED SubscribeResponse_Type = 4
-	// No change; `resource_version` advances the resume point.
+	// No change; `resource_version` advances the resume point. The API server
+	// emits bookmarks only for a caught-up watcher, so on a resumed stream the
+	// first BOOKMARK also means "current again".
 	SubscribeResponse_TYPE_BOOKMARK SubscribeResponse_Type = 5
 	// The requested resource_version is too old (410 Gone). The stream ends
 	// after this event; resubscribe without a resource_version.
@@ -967,7 +968,9 @@ type SubscribeResponse struct {
 	Type  SubscribeResponse_Type `protobuf:"varint,1,opt,name=type,proto3,enum=axiom.v1.SubscribeResponse_Type" json:"type,omitempty"`
 	// Present for TYPE_ADDED/TYPE_MODIFIED/TYPE_DELETED.
 	Object *Object `protobuf:"bytes,2,opt,name=object,proto3" json:"object,omitempty"`
-	// Present for TYPE_SYNCED/TYPE_BOOKMARK and, when known, for TYPE_RESYNC_REQUIRED.
+	// Present for TYPE_SYNCED/TYPE_BOOKMARK and, when known, for
+	// TYPE_RESYNC_REQUIRED, and for live TYPE_ADDED/MODIFIED/DELETED events.
+	// Empty on initial-listing TYPE_ADDED events: never resume from those.
 	ResourceVersion string `protobuf:"bytes,3,opt,name=resource_version,json=resourceVersion,proto3" json:"resource_version,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache

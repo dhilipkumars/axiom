@@ -18,15 +18,19 @@ import (
 
 // Subscribe streams current state and live changes for one kind/namespace.
 //
-// Contract: see axiom.proto. This is list+watch with resume-from-bookmark:
-// the initial LIST (when no resource_version is given) is served straight
-// from the API server and logged as `subscribe_list`, so tests can assert that
-// cached reads issue no further LISTs. Transient watch closes are re-watched
-// from the last seen resourceVersion; a 410 Gone ends the stream after a
-// TYPE_RESYNC_REQUIRED event.
+// Contract: see axiom.proto. This is a raw list+watch with resume-from-bookmark
+// (not a client-go informer: an informer's cache would duplicate the
+// extension's, and its resync semantics hide the RV bookkeeping the extension
+// needs; docs/PLAN.md records this scope change). The initial LIST (when no
+// resource_version is given) is served straight from the API server and
+// logged as `subscribe_list`, so tests can assert that cached reads issue no
+// further LISTs. Transient watch closes are re-watched from the last seen
+// resourceVersion; a 410 Gone ends the stream after a TYPE_RESYNC_REQUIRED
+// event. A resume sends no SYNCED; the API server's first BOOKMARK tells the
+// caller it is current again.
 //
-// TODO(phase5): back this with a shared informer factory so N subscribers to
-// the same (gvk, namespace) share one upstream watch (docs/DESIGN.md §8).
+// TODO(phase5): de-duplicate upstream watches across subscribers to the same
+// (gvk, namespace) with a shared informer factory (docs/DESIGN.md §8).
 func (s *Server) Subscribe(req *axiomv1.SubscribeRequest, stream axiomv1.GatewayService_SubscribeServer) error {
 	if req == nil {
 		return status.Error(codes.InvalidArgument, "subscribe: request must not be nil")
@@ -62,7 +66,8 @@ func (s *Server) Subscribe(req *axiomv1.SubscribeRequest, stream axiomv1.Gateway
 			return toGRPC(err)
 		}
 		for i := range list.Items {
-			if err := send(axiomv1.SubscribeResponse_TYPE_ADDED, &list.Items[i], list.Items[i].GetResourceVersion()); err != nil {
+			// Empty stream RV: a partially delivered listing is not a resume point.
+			if err := send(axiomv1.SubscribeResponse_TYPE_ADDED, &list.Items[i], ""); err != nil {
 				return err
 			}
 		}
@@ -73,7 +78,6 @@ func (s *Server) Subscribe(req *axiomv1.SubscribeRequest, stream axiomv1.Gateway
 		}
 	}
 
-	resumed := req.GetResourceVersion() != ""
 	for {
 		w, err := s.k8s.Watch(ctx, gvk, ns, rv)
 		if err != nil {
@@ -85,14 +89,6 @@ func (s *Server) Subscribe(req *axiomv1.SubscribeRequest, stream axiomv1.Gateway
 				return nil
 			}
 			return toGRPC(err)
-		}
-		if resumed {
-			// A resume has no listing to complete; tell the caller the stream is live.
-			resumed = false
-			if err := send(axiomv1.SubscribeResponse_TYPE_SYNCED, nil, rv); err != nil {
-				w.Stop()
-				return err
-			}
 		}
 		next, err := s.pumpWatch(ctx, w, rv, send)
 		w.Stop()

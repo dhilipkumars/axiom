@@ -78,7 +78,9 @@ grep -qx "2" <<<"$out" || fail "stale read did not return the cached rows: $out"
 log "a change during the outage is picked up on resume from the bookmark, without a relist"
 run_pod watch-2
 compose start "$E2E_SVC_GATEWAY" >/dev/null 2>&1
-wait_state ACTIVE 120
+# The resumed stream is DEGRADED (served stale) until the API server's first
+# BOOKMARK for a caught-up watcher, which kind's apiserver sends within ~1 minute.
+wait_state ACTIVE 180
 wait_sql_names "seed-0,seed-1,watch-2" 60
 [[ "$(list_count)" == "$L0" ]] || fail "resume issued LISTs: $(list_count) != $L0"
 # `compose stop/start` keeps the container log, so the initial listing is still there: exactly one, no relist.

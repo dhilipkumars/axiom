@@ -277,14 +277,35 @@ fn notify(spec: &SubSpec, ty: &str, namespace: &str, name: &str) {
     }
 }
 
-/// Applies one stream event to the cache. Returns the new resume point if the
-/// event carried one, and whether the stream must be restarted with a relist.
+/// Applies one stream event to the cache. Updates `resume` only once the
+/// stream has proven itself current (`synced`): resource versions seen during
+/// a partial initial listing are never resume points. A bookmark that does not
+/// fit the slot clears the stored one so a restart relists rather than resumes
+/// from a corrupted token.
 fn apply_event(
     spec: &SubSpec,
     ev: SubscribeResponse,
     resume: &mut Option<String>,
+    synced: &mut bool,
 ) -> Result<EventAction, ShmemError> {
     let ty = EvType::try_from(ev.r#type).unwrap_or(EvType::Unspecified);
+    let record_bookmark = |rv: &str,
+                           full: bool,
+                           resume: &mut Option<String>|
+     -> Result<(), ShmemError> {
+        match shmem::set_bookmark(spec.slot, spec.id, rv, full) {
+            Ok(()) => {
+                *resume = Some(rv.to_owned());
+                Ok(())
+            }
+            Err(ShmemError::TooLarge(_)) => {
+                warning!("{WORKER_NAME}: resourceVersion {rv:?} too long to store; this watch will relist after a restart");
+                *resume = None;
+                shmem::clear_bookmark(spec.slot, spec.id)
+            }
+            Err(e) => Err(e),
+        }
+    };
     match ty {
         EvType::Added | EvType::Modified | EvType::Deleted => {
             let Some(obj) = ev.object else {
@@ -302,8 +323,8 @@ fn apply_event(
                     &obj.json,
                 )?;
             }
-            if !ev.resource_version.is_empty() {
-                *resume = Some(ev.resource_version);
+            if *synced && !ev.resource_version.is_empty() {
+                record_bookmark(&ev.resource_version, false, resume)?;
             }
             notify(
                 spec,
@@ -314,15 +335,18 @@ fn apply_event(
             Ok(EventAction::Continue)
         }
         EvType::Synced => {
-            shmem::set_bookmark(spec.slot, spec.id, &ev.resource_version, true)?;
+            *synced = true;
+            record_bookmark(&ev.resource_version, true, resume)?;
             shmem::set_state(spec.slot, spec.id, SubState::Active, "watch active")?;
-            *resume = Some(ev.resource_version);
             Ok(EventAction::Synced)
         }
         EvType::Bookmark => {
-            shmem::set_bookmark(spec.slot, spec.id, &ev.resource_version, false)?;
-            *resume = Some(ev.resource_version);
-            Ok(EventAction::Continue)
+            *synced = true;
+            record_bookmark(&ev.resource_version, false, resume)?;
+            // The API server only bookmarks a caught-up watcher: a resumed
+            // stream is current again.
+            shmem::set_state(spec.slot, spec.id, SubState::Active, "watch active")?;
+            Ok(EventAction::Synced)
         }
         EvType::ResyncRequired => {
             *resume = None;
@@ -434,16 +458,19 @@ async fn run_stream(
     let why = if rv.is_empty() {
         "listing"
     } else {
-        "resuming from bookmark"
+        "resuming from bookmark; stale until the first bookmark"
     };
     transition(spec, state, StreamEvent::Opened, resume.is_some(), why)
         .map_err(|e| e.to_string())?;
     if rv.is_empty() {
         shmem::clear(spec.slot, spec.id).map_err(|e| e.to_string())?;
     }
+    // A resumed stream is already "synced" for bookmark purposes: its events
+    // are live changes, not a partial listing.
+    let mut synced = !rv.is_empty();
     loop {
         match stream.message().await {
-            Ok(Some(ev)) => match apply_event(spec, ev, resume) {
+            Ok(Some(ev)) => match apply_event(spec, ev, resume, &mut synced) {
                 Ok(EventAction::Continue) => {}
                 Ok(EventAction::Synced) => {
                     backoff.on_success();

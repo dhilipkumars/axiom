@@ -60,12 +60,15 @@ func TestSubscribeListsThenStreams(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- srv.Subscribe(&axiomv1.SubscribeRequest{Gvk: podGVK, Namespace: "default"}, rec) }()
 
-	// Initial listing: two ADDED (namespace-scoped) then SYNCED.
+	// Initial listing: two ADDED (namespace-scoped) with no stream RV, then SYNCED.
 	seen := map[string]bool{}
 	for i := 0; i < 2; i++ {
 		ev := rec.next(t)
 		if ev.GetType() != axiomv1.SubscribeResponse_TYPE_ADDED {
 			t.Fatalf("event %d type = %v, want ADDED", i, ev.GetType())
+		}
+		if ev.GetResourceVersion() != "" {
+			t.Fatalf("initial ADDED must not carry a resume RV, got %q", ev.GetResourceVersion())
 		}
 		seen[ev.GetObject().GetName()] = true
 	}
@@ -210,14 +213,10 @@ func TestSubscribeWithResourceVersionSkipsList(t *testing.T) {
 	if c.lists != 0 {
 		t.Fatalf("resume issued %d LISTs, want 0", c.lists)
 	}
-	// Exactly one SYNCED echoing the resume point, nothing else.
-	ev := rec.next(t)
-	if ev.GetType() != axiomv1.SubscribeResponse_TYPE_SYNCED || ev.GetResourceVersion() != "42" {
-		t.Fatalf("resume event = %v rv=%q, want SYNCED 42", ev.GetType(), ev.GetResourceVersion())
-	}
+	// No listing and no SYNCED on resume: only backlog/live events would follow.
 	select {
 	case ev := <-rec.events:
-		t.Fatalf("unexpected extra event on resume: %v", ev.GetType())
+		t.Fatalf("unexpected event on resume: %v", ev.GetType())
 	default:
 	}
 }
