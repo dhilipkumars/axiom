@@ -175,22 +175,74 @@ leave the compose stack running afterwards so you can poke at it (see next secti
 
 ## 4. Poke at the running stack by hand
 
-Bring the stack up and leave it running. With the pods test you get a real
-cluster behind it:
+Bring up a stack and leave it running. The Phase 4 harness gives you the most to
+look at: a kind cluster, the test CRD with a couple of Widgets, and an already
+imported `k8s` schema.
 
 ```sh
-E2E_KEEP=1 E2E_KIND_KEEP=1 make e2e-pods
-# or, without a cluster (Ping only):
-make up
+E2E_KEEP=1 E2E_KIND_KEEP=1 make e2e-crd     # cluster + CRD + imported tables
+E2E_KEEP=1 E2E_KIND_KEEP=1 make e2e-pods    # cluster + pods only
+make up                                      # no cluster at all (Ping only)
 ```
 
-Open a SQL session inside the Postgres container:
+The test deletes its own Widgets on the way out, so put them back:
 
 ```sh
-docker compose -f deploy/compose/docker-compose.yml exec postgres psql -U axiom -d axiom
+export KUBECONFIG="$PWD/e2e/.kind/admin"
+kubectl apply -f e2e/fixtures/widgets.yaml
+kubectl -n axiom-e2e get widgets            # your oracle for comparing against SQL
 ```
 
-Things worth trying:
+### Talking to this stack with `docker compose`
+
+**Always pass the same `-f` files you started with.** The base compose file
+runs the gateway with `-no-cluster`; the kind overlay is what replaces that with
+a kubeconfig. Any `up` or `restart` that omits the overlay will quietly
+reconfigure the gateway to serve no cluster, and every query then fails with
+`gateway has no cluster credentials configured`. Set this once per shell:
+
+```sh
+export E2E_KUBE_DIR="$PWD/e2e/.kind"
+ac() { docker compose -f deploy/compose/docker-compose.yml \
+                     -f deploy/compose/docker-compose.kind.yml "$@"; }
+```
+
+`ac` stands in for that pair below. A function rather than an alias or a
+variable, because it behaves the same in bash and zsh and inside scripts.
+
+`make up` and `make down` deliberately use only the base file: `up` is the
+no-cluster Ping stack, and `down` removes containers regardless of overlays.
+
+### Connecting to Postgres
+
+Port 5432 is **not published to the host** — the compose file keeps it inside
+the compose network. The session that always works:
+
+```sh
+ac exec postgres psql -U axiom -d axiom
+```
+
+For a GUI client or a local `psql`, publish the port with a third overlay:
+
+```sh
+cat > /tmp/expose-pg.yml <<'YAML'
+services:
+  postgres:
+    ports:
+      - "55432:5432"
+YAML
+ac -f /tmp/expose-pg.yml up -d
+
+PGPASSWORD=axiom-dev psql -h 127.0.0.1 -p 55432 -U axiom -d axiom
+```
+
+Credentials are `axiom` / `axiom-dev`, database `axiom`, no SSL. Keep the
+overlay out of `deploy/compose/`: a file named `docker-compose.override.yml`
+there would be loaded automatically and would publish the port during E2E runs
+too. Note that recreating the Postgres container empties the shared-memory
+watch cache, so any `cache_mode 'watch'` table starts cold again.
+
+### Things worth trying
 
 ```sql
 -- Install the extension's SQL objects (idempotent)
@@ -199,57 +251,113 @@ SELECT axiom_version();
 
 -- The settings the background worker is using
 SHOW axiom.gateway_endpoint;
-SHOW axiom.gateway_ca_cert;
 SHOW axiom.ping_interval_secs;
-SHOW axiom.rpc_timeout_secs;
 
 -- The worker is a real Postgres process, visible like any backend
-SELECT pid, backend_type, backend_start FROM pg_stat_activity WHERE backend_type = 'axiom gateway pinger';
+SELECT pid, backend_type, backend_start FROM pg_stat_activity
+ WHERE backend_type = 'axiom gateway pinger';
+```
 
--- With the kind stack: query the cluster (the E2E already created server + table)
-SELECT name, phase, node FROM k8s_pods WHERE namespace = 'kube-system' ORDER BY 1;
-SELECT name, raw->'status'->>'podIP' FROM k8s_pods WHERE namespace = 'axiom-e2e' AND name = 'web-0';
-EXPLAIN SELECT name FROM k8s_pods WHERE namespace = 'axiom-e2e';   -- plans without contacting the gateway
+**Discovery and import.** The e2e already created the server and a `k8s`
+schema; this is how to do it yourself, and how to scope an import to one API
+group:
+
+```sql
+CREATE SERVER kind FOREIGN DATA WRAPPER axiom_fdw
+  OPTIONS (endpoint 'https://gateway:8443', ca_cert '/certs/ca.crt', rpc_timeout_secs '10');
+
+CREATE SCHEMA crds;
+IMPORT FOREIGN SCHEMA "example.com" FROM SERVER kind INTO crds;   -- just the CRD group
+\d crds.widgets                                                   -- columns discovery chose
+
+-- The generated DDL carries the resolved identity, which is why no scan needs discovery
+SELECT ftoptions FROM pg_foreign_table ft
+  JOIN pg_class c ON c.oid = ft.ftrelid WHERE c.relname = 'widgets';
+```
+
+**Read a CRD through the generic projection.** No Rust knows what a Widget is;
+`spec` and `status` are top-level fields matched by column name:
+
+```sql
+SELECT name, spec->>'size', spec->>'color', status->>'phase', labels
+  FROM k8s.widgets WHERE namespace = 'axiom-e2e' ORDER BY name;
+
+EXPLAIN SELECT name FROM k8s.widgets WHERE namespace = 'axiom-e2e';  -- plans without contacting the gateway
+```
+
+**Write to it**, and watch the guardrails:
+
+```sql
+INSERT INTO k8s.widgets (name, namespace, spec)
+  VALUES ('manual', 'axiom-e2e', '{"size":1,"color":"teal"}');
+UPDATE k8s.widgets SET spec = spec || '{"color":"pink"}' WHERE name = 'manual';
+
+UPDATE k8s.widgets SET uid = 'forged' WHERE name = 'manual';   -- 0A000: server-managed
+UPDATE k8s.widgets SET name = 'renamed' WHERE name = 'manual'; -- 0A000: identity is immutable
+DELETE FROM k8s.widgets WHERE name = 'manual';
+```
+
+Built-in kinds need no `group`/`version`/`kind`, so the Phase 1-3 spellings
+still work unchanged:
+
+```sql
+CREATE FOREIGN TABLE k8s_pods (name text, namespace text, phase text, node text, raw jsonb)
+  SERVER kind OPTIONS (resource 'pods');
+CREATE FOREIGN TABLE k8s_configmaps (name text, namespace text, data jsonb, raw jsonb)
+  SERVER kind OPTIONS (resource 'configmaps');
+
+SELECT name, phase, node FROM k8s_pods WHERE namespace = 'kube-system';
+INSERT INTO k8s_configmaps (name, namespace, data) VALUES ('app', 'default', '{"LOG_LEVEL":"info"}');
+UPDATE k8s_configmaps SET data = data || '{"LOG_LEVEL":"debug"}' WHERE namespace = 'default' AND name = 'app';
+DELETE FROM k8s_configmaps WHERE namespace = 'default' AND name = 'app';
 ```
 
 Watch the gateway log to see pushdown in action: each `List` logs the namespace
 and name filters it received:
 
 ```sh
-docker compose -f deploy/compose/docker-compose.yml logs -f gateway | grep '"msg":"list"'
+ac logs -f gateway | grep '"msg":"list"'
 ```
 
-Query a cluster. Point the stack at a kind cluster with the Phase 1/2 harness
-(`E2E_KEEP=1 E2E_KIND_KEEP=1 ./e2e/pods_test.sh` leaves everything running), then:
+**The allowlist is not discovery.** The gateway only offers what `--serve`
+names, which the kind overlay sets to `pods,configmaps,widgets.example.com`.
+Create a CRD outside that list and it stays invisible, and a hand-written table
+for it fails at scan with the same error as a kind that does not exist:
 
-```sql
-CREATE SERVER kind FOREIGN DATA WRAPPER axiom_fdw
-  OPTIONS (endpoint 'https://gateway:8443', ca_cert '/certs/ca.crt', rpc_timeout_secs '10');
-
-CREATE FOREIGN TABLE k8s_pods (name text, namespace text, phase text, node text, raw jsonb)
-  SERVER kind OPTIONS (resource 'pods');
-CREATE FOREIGN TABLE k8s_configmaps (name text, namespace text, data jsonb, raw jsonb)
-  SERVER kind OPTIONS (resource 'configmaps');
-
-SELECT name, phase, node FROM k8s_pods WHERE namespace = 'kube-system';          -- namespace/name are pushed down
-INSERT INTO k8s_configmaps (name, namespace, data) VALUES ('app', 'default', '{"LOG_LEVEL":"info"}');
-UPDATE k8s_configmaps SET data = data || '{"LOG_LEVEL":"debug"}' WHERE namespace = 'default' AND name = 'app';
-DELETE FROM k8s_configmaps WHERE namespace = 'default' AND name = 'app';
+```sh
+kubectl apply -f - <<'YAML'
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata: {name: gizmos.example.com}
+spec:
+  group: example.com
+  scope: Namespaced
+  names: {plural: gizmos, singular: gizmo, kind: Gizmo, listKind: GizmoList}
+  versions: [{name: v1, served: true, storage: true,
+              schema: {openAPIV3Schema: {type: object, properties: {spec: {type: object}}}}}]
+YAML
 ```
 
-Live tables. Add `cache_mode 'watch'` to serve a table from the shared-memory
-cache instead of an RPC per scan. The first scan is served on demand and starts
-the watch; once `axiom_watch_status()` shows `ACTIVE`, scans read the cache and
-kubectl-side changes appear within watch latency. If the gateway goes away the
-subscription turns `DEGRADED` and the cache is still served, with a `WARNING` on
-every scan; when it returns the stream resumes from its bookmark. Change
-notifications: `LISTEN axiom_events;` in the database named by
-`axiom.notify_database` (payload: `{"server","resource","namespace","name","type"}`).
+```sql
+CREATE SCHEMA late;
+IMPORT FOREIGN SCHEMA k8s FROM SERVER kind INTO late;   -- widgets yes, gizmos no
+```
+
+**Live tables.** Add `cache_mode 'watch'` to serve a table from the
+shared-memory cache instead of an RPC per scan. The first scan is served on
+demand and starts the watch; once `axiom_watch_status()` shows `ACTIVE`, scans
+read the cache and kubectl-side changes appear within watch latency. If the
+gateway goes away the subscription turns `DEGRADED` and the cache is still
+served, with a `WARNING` on every scan; when it returns the stream resumes from
+its bookmark. A resumed stream stays `DEGRADED` until the API server's first
+bookmark proves the backlog was delivered, which can take up to a minute.
+Change notifications: `LISTEN axiom_events;` in the database named by
+`axiom.notify_database` (payload: `{"server","resource","namespace","name","type"}`,
+where `resource` is the kubectl spelling, e.g. `widgets.example.com`).
 
 ```sql
-CREATE FOREIGN TABLE k8s_pods_live (name text, namespace text, phase text, node text, raw jsonb)
-  SERVER kind OPTIONS (resource 'pods', cache_mode 'watch');
-SELECT * FROM axiom_watch_status();
+SELECT count(*) FROM k8s.widgets_live;   -- first scan registers the subscription
+SELECT * FROM axiom_watch_status();      -- wait for ACTIVE
 ```
 
 Any subset of a kind's columns may be declared, but UPDATE/DELETE need the
@@ -263,18 +371,19 @@ runs and is not undone by `ROLLBACK`. Pods are read-only.
 Watch the worker's log lines from another terminal:
 
 ```sh
-docker compose -f deploy/compose/docker-compose.yml logs -f postgres | grep "axiom bgworker"
+ac logs -f postgres | grep "axiom bgworker"
 ```
 
 Now break things and watch it cope. Stop the gateway and you should see
 `ping failed ... code=Unavailable` at `WARNING` with the retry delay doubling
 from 1s up to 60s; start it again and the next attempt logs `ping ok` and the
-interval resets:
+interval resets. `stop`/`start` reuse the existing container, so they are safe
+without the overlays:
 
 ```sh
-docker compose -f deploy/compose/docker-compose.yml stop gateway
-# ...watch the warnings and backoff...
-docker compose -f deploy/compose/docker-compose.yml start gateway
+ac stop gateway
+# ...watch the warnings and backoff, and any watch table go DEGRADED...
+ac start gateway
 ```
 
 Settings are reloadable without a restart. For example, shrink the ping interval:
