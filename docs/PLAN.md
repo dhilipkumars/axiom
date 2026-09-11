@@ -85,16 +85,29 @@ path (`WHERE namespace = 'x' AND name = 'y'`) and a "pod doesn't exist" case.
 **Goal**: SQL DML actually mutates the cluster, with real conflict handling.
 
 Tasks:
-- [ ] Gateway: `Create`/`Update`/`Delete` RPCs against the API server, `Update`
+- [x] Gateway: `Create`/`Update`/`Delete` RPCs against the API server, `Update`
   requires a `resourceVersion` and surfaces 409s distinctly from other errors.
-- [ ] Extension: `ExecForeignInsert`/`ExecForeignUpdate`/`ExecForeignDelete` for
+- [x] Extension: `ExecForeignInsert`/`ExecForeignUpdate`/`ExecForeignDelete` for
   `k8s_pods` (or switch the demo resource to **ConfigMaps**, cheaper/safer to
   mutate in a shared test cluster than Pods).
-- [ ] Map a k8s 409 Conflict to a distinct SQL error (not a generic failure) —
+- [x] Map a k8s 409 Conflict to a distinct SQL error (not a generic failure) —
   e.g. `SQLSTATE` chosen for "serialization/concurrency conflict."
   the caller can catch/retry.
-- [ ] Guardrail: writes are never cache-served (already true by design, add a test
+- [x] Guardrail: writes are never cache-served (already true by design, add a test
   asserting the write path always calls the gateway even if a cache exists later).
+
+Notes from implementation: the demo resource is **ConfigMaps** (`resource
+'configmaps'`, columns `name, namespace, data jsonb, raw jsonb`); Pods stay
+read-only (`IsForeignRelUpdatable` returns 0). UPDATE/DELETE carry the row's
+`raw` column as a resjunk target, which supplies the identity and the
+`resourceVersion` read by the scan; the gateway sends it as the PUT precondition
+and maps a 409 to gRPC `ABORTED`, which the extension raises as SQLSTATE `40001`
+(`serialization_failure`). A stale write is therefore retryable with the same
+idiom as any Postgres serialization failure. Writes bypass everything but the
+gateway RPC by construction; the E2E asserts every DML shows up in the gateway's
+request log. Kubernetes has no transactions, so a write is durable at statement
+execution and not undone by ROLLBACK (DESIGN.md §2 non-goal). The E2E lives in
+`e2e/configmaps_test.sh` (`make e2e-configmaps`, alias `make e2e-phase2`).
 
 **E2E test (`e2e-phase2`)**: `INSERT INTO k8s_configmaps (...)` from Postgres, assert
 `kubectl get configmap` shows it; `UPDATE ... SET data = ...`, assert the cluster

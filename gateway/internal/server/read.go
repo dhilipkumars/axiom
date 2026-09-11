@@ -57,6 +57,11 @@ func toGRPC(err error) error {
 		return status.Error(codes.InvalidArgument, err.Error())
 	case apierrors.IsNotFound(err):
 		return status.Error(codes.NotFound, err.Error())
+	case apierrors.IsConflict(err):
+		// Stale resourceVersion on Update: distinct so callers can re-read and retry.
+		return status.Error(codes.Aborted, err.Error())
+	case apierrors.IsAlreadyExists(err):
+		return status.Error(codes.AlreadyExists, err.Error())
 	case apierrors.IsForbidden(err), apierrors.IsUnauthorized(err):
 		return status.Error(codes.PermissionDenied, err.Error())
 	case apierrors.IsInvalid(err), apierrors.IsBadRequest(err):

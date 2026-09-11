@@ -72,7 +72,7 @@ can_i() { kubectl_e2e --as="system:serviceaccount:$E2E_GATEWAY_SA_NS:$E2E_GATEWA
 log "gateway down: SELECT raises fdw_unable_to_establish_connection, then recovers"
 compose stop "$E2E_SVC_GATEWAY" >/dev/null 2>&1
 got="$(psql_axiom "DO \$\$ BEGIN PERFORM count(*) FROM k8s_pods WHERE namespace = '$NS'; RAISE EXCEPTION 'unexpected success';
-  EXCEPTION WHEN fdw_unable_to_establish_connection THEN RAISE NOTICE 'caught %', SQLSTATE; END \$\$;" 2>&1)"
+  EXCEPTION WHEN fdw_unable_to_establish_connection THEN RAISE NOTICE 'caught %', SQLSTATE; END \$\$;" 2>&1 || true)"
 grep -q "caught HV00N" <<<"$got" || fail "expected SQLSTATE HV00N with gateway down, got: $got"
 compose start "$E2E_SVC_GATEWAY" >/dev/null 2>&1
 deadline=$((SECONDS + 30))

@@ -1,7 +1,7 @@
 # Least-privilege identity for the Axiom gateway (docs/RULES.md §3).
-# Phase 1 serves read-only Pods, so exactly `get` and `list` on `pods`, cluster
-# wide. Later phases append verbs/resources here as they land (watch in Phase 3,
-# create/update/delete in Phase 2); nothing is ever granted ahead of need.
+# Phase 1: read-only Pods (`get`, `list`). Phase 2: read-write ConfigMaps
+# (`get`, `list`, `create`, `update`, `delete`). Later phases append verbs/
+# resources as they land (watch in Phase 3); nothing is granted ahead of need.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -21,6 +21,9 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "update", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

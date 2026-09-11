@@ -21,9 +21,9 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// Client is the read surface the gateway needs in Phase 1. Implementations
-// must return apimachinery StatusErrors (apierrors.IsNotFound etc.) so callers
-// can map them to gRPC codes.
+// Client is the gateway's cluster surface: reads (Phase 1) and writes
+// (Phase 2). Implementations must return apimachinery StatusErrors
+// (apierrors.IsNotFound, IsConflict, ...) so callers can map them to gRPC codes.
 type Client interface {
 	// Get returns one object. Namespace must be empty for cluster-scoped kinds.
 	Get(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) (*unstructured.Unstructured, error)
@@ -33,6 +33,13 @@ type Client interface {
 	// LIST, which scans the whole collection server-side) and a miss yields an
 	// empty list, not an error.
 	List(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) (*unstructured.UnstructuredList, error)
+	// Create creates obj. apiVersion/kind must already match gvk.
+	Create(ctx context.Context, gvk schema.GroupVersionKind, namespace string, obj *unstructured.Unstructured) (*unstructured.Unstructured, error)
+	// Update replaces obj (PUT). obj must carry metadata.resourceVersion; the
+	// API server returns a Conflict StatusError if it is stale.
+	Update(ctx context.Context, gvk schema.GroupVersionKind, namespace string, obj *unstructured.Unstructured) (*unstructured.Unstructured, error)
+	// Delete deletes by name.
+	Delete(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) error
 }
 
 // ErrUnsupportedKind is returned for a GVK the gateway does not serve.
@@ -47,11 +54,16 @@ type resource struct {
 	namespaced bool
 }
 
-// registry is the static set of kinds served. Phase 1 serves Pods only.
+// registry is the static set of kinds served: Pods (Phase 1, read-only at the
+// SQL layer) and ConfigMaps (Phase 2, read-write).
 // TODO(phase4): replace with RESTMapper-backed discovery so CRDs resolve.
 var registry = map[schema.GroupVersionKind]resource{
 	{Group: "", Version: "v1", Kind: "Pod"}: {
 		gvr:        schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"},
+		namespaced: true,
+	},
+	{Group: "", Version: "v1", Kind: "ConfigMap"}: {
+		gvr:        schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"},
 		namespaced: true,
 	},
 }
@@ -146,6 +158,37 @@ func (c *Dynamic) List(ctx context.Context, gvk schema.GroupVersionKind, namespa
 	return ri.List(ctx, metav1.ListOptions{})
 }
 
+// Create implements Client.
+func (c *Dynamic) Create(ctx context.Context, gvk schema.GroupVersionKind, namespace string, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	ri, err := c.resourceFor(gvk, namespace)
+	if err != nil {
+		return nil, err
+	}
+	return ri.Create(ctx, obj, metav1.CreateOptions{FieldManager: fieldManager})
+}
+
+// Update implements Client.
+func (c *Dynamic) Update(ctx context.Context, gvk schema.GroupVersionKind, namespace string, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	ri, err := c.resourceFor(gvk, namespace)
+	if err != nil {
+		return nil, err
+	}
+	return ri.Update(ctx, obj, metav1.UpdateOptions{FieldManager: fieldManager})
+}
+
+// Delete implements Client.
+func (c *Dynamic) Delete(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) error {
+	ri, err := c.resourceFor(gvk, namespace)
+	if err != nil {
+		return err
+	}
+	return ri.Delete(ctx, name, metav1.DeleteOptions{})
+}
+
+// fieldManager identifies Axiom's writes in managedFields so operators can
+// see which fields SQL last set.
+const fieldManager = "axiom"
+
 // Unconfigured is the Client used when the gateway was started without any
 // cluster credentials. Every read fails with ErrNoCluster so the condition is
 // loud rather than an empty result (docs/RULES.md §1, no silent degrade).
@@ -159,4 +202,19 @@ func (Unconfigured) Get(context.Context, schema.GroupVersionKind, string, string
 // List implements Client.
 func (Unconfigured) List(context.Context, schema.GroupVersionKind, string, string) (*unstructured.UnstructuredList, error) {
 	return nil, ErrNoCluster
+}
+
+// Create implements Client.
+func (Unconfigured) Create(context.Context, schema.GroupVersionKind, string, *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	return nil, ErrNoCluster
+}
+
+// Update implements Client.
+func (Unconfigured) Update(context.Context, schema.GroupVersionKind, string, *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	return nil, ErrNoCluster
+}
+
+// Delete implements Client.
+func (Unconfigured) Delete(context.Context, schema.GroupVersionKind, string, string) error {
+	return ErrNoCluster
 }

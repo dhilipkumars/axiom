@@ -6,6 +6,7 @@
 use std::fmt;
 use std::time::Duration;
 
+use crate::kinds::Kind;
 use crate::transport::{Target, TargetError};
 
 /// Which catalog an option list belongs to (mirrors the validator's `catalog`
@@ -22,24 +23,6 @@ pub enum Catalog {
     UserMapping,
 }
 
-/// Kinds the extension can expose as foreign tables. Phase 1: Pods only.
-/// TODO(phase4): replace with schema-discovered kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Resource {
-    /// core/v1 Pod.
-    Pods,
-}
-
-impl Resource {
-    /// Parses the `resource` table option.
-    pub fn parse(s: &str) -> Option<Self> {
-        match s.trim() {
-            "pods" => Some(Self::Pods),
-            _ => None,
-        }
-    }
-}
-
 /// Validated `CREATE SERVER` options.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerOptions {
@@ -53,7 +36,7 @@ pub struct ServerOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableOptions {
     /// Which kind this table maps to (`resource`).
-    pub resource: Resource,
+    pub resource: Kind,
 }
 
 /// Why an option list was rejected. Every variant names the offending option
@@ -91,7 +74,8 @@ impl fmt::Display for OptionsError {
             ),
             Self::Resource(v) => write!(
                 f,
-                "option \"resource\" {v:?} is not supported; valid values: pods"
+                "option \"resource\" {v:?} is not supported; valid values: {}",
+                Kind::NAMES.join(", ")
             ),
         }
     }
@@ -169,8 +153,7 @@ impl TableOptions {
     pub fn parse(opts: &[(String, String)]) -> Result<Self, OptionsError> {
         check_names(Catalog::Table, opts)?;
         let raw = get(opts, "resource").ok_or(OptionsError::Missing("resource"))?;
-        let resource =
-            Resource::parse(raw).ok_or_else(|| OptionsError::Resource(raw.to_owned()))?;
+        let resource = Kind::parse(raw).ok_or_else(|| OptionsError::Resource(raw.to_owned()))?;
         Ok(Self { resource })
     }
 }
@@ -259,7 +242,7 @@ mod tests {
         assert_eq!(
             TableOptions::parse(&o(&[("resource", "pods")])),
             Ok(TableOptions {
-                resource: Resource::Pods
+                resource: Kind::Pods
             })
         );
         assert_eq!(

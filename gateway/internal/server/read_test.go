@@ -150,6 +150,18 @@ func (e errClient) List(context.Context, schema.GroupVersionKind, string, string
 	return nil, e.err
 }
 
+func (e errClient) Create(context.Context, schema.GroupVersionKind, string, *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	return nil, e.err
+}
+
+func (e errClient) Update(context.Context, schema.GroupVersionKind, string, *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	return nil, e.err
+}
+
+func (e errClient) Delete(context.Context, schema.GroupVersionKind, string, string) error {
+	return e.err
+}
+
 func TestErrorMapping(t *testing.T) {
 	t.Parallel()
 	gr := schema.GroupResource{Resource: "pods"}
@@ -161,6 +173,8 @@ func TestErrorMapping(t *testing.T) {
 		{name: "forbidden", err: apierrors.NewForbidden(gr, "x", errors.New("rbac")), want: codes.PermissionDenied},
 		{name: "unauthorized", err: apierrors.NewUnauthorized("token"), want: codes.PermissionDenied},
 		{name: "not found", err: apierrors.NewNotFound(gr, "x"), want: codes.NotFound},
+		{name: "conflict is Aborted", err: apierrors.NewConflict(gr, "x", errors.New("rv stale")), want: codes.Aborted},
+		{name: "already exists", err: apierrors.NewAlreadyExists(gr, "x"), want: codes.AlreadyExists},
 		{name: "bad request", err: apierrors.NewBadRequest("bad"), want: codes.InvalidArgument},
 		{name: "server timeout", err: apierrors.NewServerTimeout(gr, "list", 1), want: codes.Unavailable},
 		{name: "service unavailable", err: apierrors.NewServiceUnavailable("down"), want: codes.Unavailable},
@@ -181,6 +195,18 @@ func TestErrorMapping(t *testing.T) {
 			_, err = srv.Get(context.Background(), &axiomv1.GetRequest{Gvk: podGVK, Namespace: "d", Name: "a"})
 			if got := status.Code(err); got != tc.want {
 				t.Fatalf("get code = %v, want %v (err=%v)", got, tc.want, err)
+			}
+			_, err = srv.Create(context.Background(), &axiomv1.CreateRequest{Gvk: cmGVK, Namespace: "d", Name: "a", Json: []byte(`{}`)})
+			if got := status.Code(err); got != tc.want {
+				t.Fatalf("create code = %v, want %v (err=%v)", got, tc.want, err)
+			}
+			_, err = srv.Update(context.Background(), &axiomv1.UpdateRequest{Gvk: cmGVK, Namespace: "d", Name: "a", ResourceVersion: "1", Json: []byte(`{}`)})
+			if got := status.Code(err); got != tc.want {
+				t.Fatalf("update code = %v, want %v (err=%v)", got, tc.want, err)
+			}
+			_, err = srv.Delete(context.Background(), &axiomv1.DeleteRequest{Gvk: cmGVK, Namespace: "d", Name: "a"})
+			if got := status.Code(err); got != tc.want {
+				t.Fatalf("delete code = %v, want %v (err=%v)", got, tc.want, err)
 			}
 		})
 	}

@@ -35,6 +35,13 @@ protoc-bin-vendored = "3"
 
 [dev-dependencies]
 pgrx-tests = "=0.12.9"
+# In-process stub gateway for integration tests (extension + real Postgres, no cluster).
+rcgen = "0.13"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+postgres = "0.19"
+eyre = "0.6"
+tempfile = "3"
+tokio-stream = { version = "0.1", features = ["net"] }
 
 [profile.dev]
 panic = "unwind"

@@ -1,7 +1,8 @@
-//! Foreign data wrapper glue: the Postgres FDW callbacks for read-only,
-//! on-demand scans (Phase 1). This file is deliberately thin. Everything
-//! decidable without Postgres (options, qual → filter, JSON → row, error
-//! classification) lives in the pure modules and is unit-tested there.
+//! Foreign data wrapper glue: the Postgres FDW callbacks for on-demand scans
+//! (Phase 1) and row-level writes (Phase 2). This file is deliberately thin.
+//! Everything decidable without Postgres (options, qual → filter, JSON → row,
+//! write-body construction, error classification) lives in the pure modules
+//! and is unit-tested there.
 //!
 //! Scan lifecycle:
 //! 1. `GetForeignRelSize`: validate options, derive the pushed-down filter
@@ -16,6 +17,21 @@
 //! 4. `IterateForeignScan`: first call issues one `List` RPC; subsequent
 //!    calls pop rows. Row datums live in the per-tuple context.
 //!
+//! Write lifecycle (writable kinds only, see `Kind::writable`):
+//! 1. `AddForeignUpdateTargets`: add the row's `raw` column as a resjunk
+//!    target (`axiom_raw`) so UPDATE/DELETE know the object's identity and
+//!    the `resourceVersion` it was read at. Tables without `raw` are
+//!    read-only for UPDATE/DELETE.
+//! 2. `BeginForeignModify`: resolve options, column map, junk attno.
+//! 3. `ExecForeignInsert/Update/Delete`: one unary RPC each, straight to the
+//!    gateway. Writes are never cache-served (docs/DESIGN.md §5.5). A stale
+//!    `resourceVersion` surfaces as SQLSTATE 40001 (`serialization_failure`)
+//!    so callers can re-read and retry.
+//!
+//! Transactions: like `postgres_fdw` against a remote with no 2PC, a write
+//! takes effect at the API server when the statement executes; a later
+//! ROLLBACK does not undo it (Kubernetes has no transactions, DESIGN.md §2).
+//!
 //! Errors: every failure is raised as a proper SQL error with an FDW SQLSTATE;
 //! nothing here panics on bad input.
 
@@ -25,10 +41,12 @@ use std::ffi::{c_char, c_int, c_void, CStr};
 use pgrx::prelude::*;
 use pgrx::{pg_sys, JsonB, PgList, PgMemoryContexts};
 
-use crate::client::{list_pods, ClientError, ErrorClass};
+use crate::client::{self, ClientError, ErrorClass};
+use crate::kinds::{
+    self, Cell, DecodeError, Kind, NewRow, Row, SqlType, WriteError, MAX_OBJECT_BYTES,
+};
 use crate::options::{self, Catalog, OptionsError, ServerOptions, TableOptions};
-use crate::pods::{PodColumn, PodError, PodRow, SqlType, MAX_OBJECT_BYTES};
-use crate::quals::{PodFilter, Qual};
+use crate::quals::{Filter, Qual};
 
 // --- SQL surface --------------------------------------------------------------
 
@@ -46,6 +64,14 @@ fn axiom_fdw_handler() -> PgBox<pg_sys::FdwRoutine> {
         routine.IterateForeignScan = Some(iterate_foreign_scan);
         routine.ReScanForeignScan = Some(rescan_foreign_scan);
         routine.EndForeignScan = Some(end_foreign_scan);
+        routine.IsForeignRelUpdatable = Some(is_foreign_rel_updatable);
+        routine.AddForeignUpdateTargets = Some(add_foreign_update_targets);
+        routine.PlanForeignModify = Some(plan_foreign_modify);
+        routine.BeginForeignModify = Some(begin_foreign_modify);
+        routine.ExecForeignInsert = Some(exec_foreign_insert);
+        routine.ExecForeignUpdate = Some(exec_foreign_update);
+        routine.ExecForeignDelete = Some(exec_foreign_delete);
+        routine.EndForeignModify = Some(end_foreign_modify);
         routine.into_pg_boxed()
     }
 }
@@ -109,10 +135,42 @@ fn client_sqlstate(e: &ClientError) -> PgSqlErrorCode {
     match e.class() {
         ErrorClass::Connection => PgSqlErrorCode::ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION,
         ErrorClass::Permission => PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,
+        // Stale resourceVersion: same class as a serialization failure, and
+        // equally retryable after re-reading the row.
+        ErrorClass::Conflict => PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE,
+        ErrorClass::AlreadyExists => PgSqlErrorCode::ERRCODE_UNIQUE_VIOLATION,
+        ErrorClass::NotFound => PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
         ErrorClass::InvalidRequest | ErrorClass::GatewayUnconfigured | ErrorClass::Internal => {
             PgSqlErrorCode::ERRCODE_FDW_ERROR
         }
     }
+}
+
+fn write_sqlstate(e: &WriteError) -> PgSqlErrorCode {
+    match e {
+        WriteError::ReadOnly(_) | WriteError::IdentityChange(_) => {
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
+        }
+        WriteError::MissingName | WriteError::MissingNamespace => {
+            PgSqlErrorCode::ERRCODE_NOT_NULL_VIOLATION
+        }
+        WriteError::InvalidName(..)
+        | WriteError::NotAnObject(_)
+        | WriteError::DataValueNotString(_) => PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+        WriteError::BadOldRaw(_) => PgSqlErrorCode::ERRCODE_FDW_ERROR,
+    }
+}
+
+/// Raises the SQL error for a failed gateway call.
+fn raise_client(op: &str, server: &ServerOptions, e: &ClientError) -> ! {
+    let msg = match e.class() {
+        ErrorClass::Conflict => format!(
+            "axiom: {op} rejected: object was modified concurrently (re-read the row and retry): {e}"
+        ),
+        ErrorClass::Connection => format!("axiom: cannot reach gateway {}: {e}", server.target.endpoint),
+        _ => format!("axiom: {op} failed: {e}"),
+    };
+    raise(client_sqlstate(e), msg);
 }
 
 // --- catalog access -------------------------------------------------------------
@@ -142,11 +200,7 @@ unsafe fn options_from_list(list: *mut pg_sys::List) -> Vec<(String, String)> {
 /// Everything a scan needs from the catalogs.
 struct ScanConfig {
     server: ServerOptions,
-    #[allow(
-        dead_code,
-        reason = "Phase 1 serves one resource; kept so the scan path is resource-aware from the start"
-    )]
-    table: TableOptions,
+    kind: Kind,
 }
 
 /// Loads and validates server + table options for a foreign table.
@@ -163,7 +217,10 @@ unsafe fn scan_config(foreigntableid: pg_sys::Oid) -> ScanConfig {
             Ok(s) => s,
             Err(e) => raise(options_sqlstate(&e), format!("foreign server: {e}")),
         };
-        ScanConfig { server, table }
+        ScanConfig {
+            server,
+            kind: table.resource,
+        }
     }
 }
 
@@ -296,7 +353,7 @@ unsafe extern "C" fn get_foreign_rel_size(
             i64::from((*baserel).relid),
             foreigntableid,
         );
-        let filter = PodFilter::from_quals(&quals);
+        let filter = Filter::from_quals(&quals);
         (*baserel).rows = filter.estimated_rows();
     }
 }
@@ -376,16 +433,17 @@ unsafe extern "C" fn get_foreign_plan(
 /// Per-scan state, allocated in the per-query memory context.
 struct ScanState {
     config: ScanConfig,
-    filter: PodFilter,
-    /// One entry per attribute of the scan tuple; `None` for dropped columns.
-    columns: Vec<Option<PodColumn>>,
+    filter: Filter,
+    /// One entry per attribute of the scan tuple: index into
+    /// `kind.columns()`, or `None` for dropped columns.
+    columns: Vec<Option<usize>>,
     /// `None` until the first `Iterate` fetches; then the remaining rows.
-    rows: Option<VecDeque<PodRow>>,
+    rows: Option<VecDeque<Row>>,
 }
 
-/// Builds the attribute → column map, validating names and types.
-unsafe fn column_map(tupdesc: pg_sys::TupleDesc) -> Vec<Option<PodColumn>> {
-    // SAFETY: called by the executor/planner with valid node pointers; see module docs.
+/// Builds the attribute → kind-column map, validating names and types.
+unsafe fn column_map(tupdesc: pg_sys::TupleDesc, kind: Kind) -> Vec<Option<usize>> {
+    // SAFETY: tupdesc is a live TupleDesc supplied by the executor.
     unsafe {
         let natts = usize::try_from((*tupdesc).natts).unwrap_or(0);
         let mut out = Vec::with_capacity(natts);
@@ -398,16 +456,17 @@ unsafe fn column_map(tupdesc: pg_sys::TupleDesc) -> Vec<Option<PodColumn>> {
             let name = CStr::from_ptr((*att).attname.data.as_ptr().cast::<c_char>())
                 .to_string_lossy()
                 .into_owned();
-            let Some(col) = PodColumn::from_name(&name) else {
+            let Some(idx) = kind.column_index(&name) else {
+                let supported: Vec<&str> = kind.columns().iter().map(|c| c.name).collect();
                 raise(
                     PgSqlErrorCode::ERRCODE_FDW_COLUMN_NAME_NOT_FOUND,
                     format!(
-                        "column {name:?} is not a Pod column; supported columns: {}",
-                        PodColumn::NAMES.join(", ")
+                        "column {name:?} is not a {kind:?} column; supported columns: {}",
+                        supported.join(", ")
                     ),
                 );
             };
-            let (want_oid, want_name) = match col.sql_type() {
+            let (want_oid, want_name) = match kind.columns()[idx].sql_type {
                 SqlType::Text => (pg_sys::TEXTOID, "text"),
                 SqlType::Jsonb => (pg_sys::JSONBOID, "jsonb"),
             };
@@ -417,10 +476,104 @@ unsafe fn column_map(tupdesc: pg_sys::TupleDesc) -> Vec<Option<PodColumn>> {
                     format!("column {name:?} must be of type {want_name}"),
                 );
             }
-            out.push(Some(col));
+            out.push(Some(idx));
         }
         out
     }
+}
+
+/// Decodes gateway JSON into rows, raising on malformed objects.
+fn decode_rows(kind: Kind, objects: &[Vec<u8>]) -> VecDeque<Row> {
+    let mut rows = VecDeque::with_capacity(objects.len());
+    for json in objects {
+        match kind.decode(json, MAX_OBJECT_BYTES) {
+            Ok(r) => rows.push_back(r),
+            Err(
+                e @ (DecodeError::TooLarge { .. } | DecodeError::Json(_) | DecodeError::Shape(_)),
+            ) => {
+                raise(
+                    PgSqlErrorCode::ERRCODE_FDW_INVALID_DATA_TYPE,
+                    format!("axiom: bad object from gateway: {e}"),
+                );
+            }
+        }
+    }
+    rows
+}
+
+/// Stores `row` into `slot` as a virtual tuple, allocating datums in `memcx`.
+unsafe fn store_row(
+    slot: *mut pg_sys::TupleTableSlot,
+    columns: &[Option<usize>],
+    row: &Row,
+    memcx: pg_sys::MemoryContext,
+) {
+    // SAFETY: slot is the executor's slot for this relation; columns matches its tupdesc.
+    unsafe {
+        if let Some(clear) = (*(*slot).tts_ops).clear {
+            clear(slot);
+        }
+        let natts = columns.len();
+        let values = std::slice::from_raw_parts_mut((*slot).tts_values, natts);
+        let isnull = std::slice::from_raw_parts_mut((*slot).tts_isnull, natts);
+        PgMemoryContexts::For(memcx).switch_to(|_| {
+            for (i, col) in columns.iter().enumerate() {
+                let datum = match col.and_then(|c| row.cells.get(c)).and_then(Option::as_ref) {
+                    Some(Cell::Text(s)) => s.clone().into_datum(),
+                    Some(Cell::Json(v)) => JsonB(v.clone()).into_datum(),
+                    None => None,
+                };
+                if let Some(d) = datum {
+                    values[i] = d;
+                    isnull[i] = false;
+                } else {
+                    values[i] = pg_sys::Datum::from(0);
+                    isnull[i] = true;
+                }
+            }
+        });
+        pg_sys::ExecStoreVirtualTuple(slot);
+    }
+}
+
+/// Reads attribute `attno` (1-based) of `slot` as a datum, materialising the
+/// slot if needed. `None` for SQL NULL.
+unsafe fn slot_datum(slot: *mut pg_sys::TupleTableSlot, attno: i16) -> Option<pg_sys::Datum> {
+    // SAFETY: executor-provided slot; attno validated by the caller against its tupdesc.
+    unsafe {
+        let n = usize::try_from(attno).ok().filter(|n| *n > 0)?;
+        if usize::try_from((*slot).tts_nvalid).unwrap_or(0) < n {
+            pg_sys::slot_getsomeattrs_int(slot, i32::from(attno));
+        }
+        if *(*slot).tts_isnull.add(n - 1) {
+            None
+        } else {
+            Some(*(*slot).tts_values.add(n - 1))
+        }
+    }
+}
+
+/// Reads the new tuple's columns into a [`NewRow`] aligned with `kind.columns()`.
+unsafe fn new_row_from_slot(
+    slot: *mut pg_sys::TupleTableSlot,
+    columns: &[Option<usize>],
+    kind: Kind,
+) -> NewRow {
+    let mut cells = vec![None; kind.columns().len()];
+    for (i, col) in columns.iter().enumerate() {
+        let Some(idx) = *col else { continue };
+        let attno = i16::try_from(i + 1).unwrap_or(0);
+        // SAFETY: attno is within the slot's tupdesc by construction of `columns`.
+        let Some(datum) = (unsafe { slot_datum(slot, attno) }) else {
+            continue;
+        };
+        cells[idx] = match kind.columns()[idx].sql_type {
+            // SAFETY: column types were checked against the tupdesc in column_map.
+            SqlType::Text => unsafe { String::from_datum(datum, false) }.map(Cell::Text),
+            SqlType::Jsonb => unsafe { JsonB::from_datum(datum, false) }.map(|j| Cell::Json(j.0)),
+        };
+    }
+    NewRow { cells }
 }
 
 #[pg_guard]
@@ -438,10 +591,12 @@ unsafe extern "C" fn begin_foreign_scan(node: *mut pg_sys::ForeignScanState, efl
             i64::from((*plan).scan.scanrelid),
             rel_oid,
         );
+        let config = scan_config(rel_oid);
+        let columns = column_map((*rel).rd_att, config.kind);
         let state = ScanState {
-            config: scan_config(rel_oid),
-            filter: PodFilter::from_quals(&quals),
-            columns: column_map((*rel).rd_att),
+            config,
+            filter: Filter::from_quals(&quals),
+            columns,
             rows: None,
         };
         // Dropped when the executor's per-query context is reset, error or not.
@@ -452,33 +607,14 @@ unsafe extern "C" fn begin_foreign_scan(node: *mut pg_sys::ForeignScanState, efl
 }
 
 /// Fetches all matching rows with one RPC (or none, for an impossible filter).
-fn fetch_rows(state: &ScanState) -> VecDeque<PodRow> {
+fn fetch_rows(state: &ScanState) -> VecDeque<Row> {
     if state.filter.impossible {
         return VecDeque::new();
     }
-    let objects = match list_pods(&state.config.server, &state.filter) {
-        Ok(o) => o,
-        Err(e) => raise(
-            client_sqlstate(&e),
-            format!(
-                "axiom: cannot reach gateway {}: {e}",
-                state.config.server.target.endpoint
-            ),
-        ),
-    };
-    let mut rows = VecDeque::with_capacity(objects.len());
-    for json in &objects {
-        match PodRow::from_json(json, MAX_OBJECT_BYTES) {
-            Ok(r) => rows.push_back(r),
-            Err(e @ (PodError::TooLarge { .. } | PodError::Json(_) | PodError::Shape(_))) => {
-                raise(
-                    PgSqlErrorCode::ERRCODE_FDW_INVALID_DATA_TYPE,
-                    format!("axiom: bad object from gateway: {e}"),
-                );
-            }
-        }
+    match client::list(&state.config.server, state.config.kind, &state.filter) {
+        Ok(objects) => decode_rows(state.config.kind, &objects),
+        Err(e) => raise_client("list", &state.config.server, &e),
     }
-    rows
 }
 
 #[pg_guard]
@@ -499,38 +635,18 @@ unsafe extern "C" fn iterate_foreign_scan(
         if state.rows.is_none() {
             state.rows = Some(fetch_rows(state));
         }
-        // Clear via the slot's own ops (ExecClearTuple is a static inline in C).
-        if let Some(clear) = (*(*slot).tts_ops).clear {
-            clear(slot);
-        }
         let Some(row) = state.rows.as_mut().and_then(VecDeque::pop_front) else {
-            return slot; // empty slot = end of scan
+            // End of scan: the executor stops only on an *empty* slot, so clear
+            // whatever the previous iteration stored (ExecClearTuple is a C
+            // static inline; call the slot's own clear op).
+            if let Some(clear) = (*(*slot).tts_ops).clear {
+                clear(slot);
+            }
+            return slot;
         };
-        let natts = state.columns.len();
-        let values = std::slice::from_raw_parts_mut((*slot).tts_values, natts);
-        let isnull = std::slice::from_raw_parts_mut((*slot).tts_isnull, natts);
         // Row datums belong to the per-tuple context, which ExecScan resets per row.
         let per_tuple = (*(*node).ss.ps.ps_ExprContext).ecxt_per_tuple_memory;
-        PgMemoryContexts::For(per_tuple).switch_to(|_| {
-            for (i, col) in state.columns.iter().enumerate() {
-                let datum = match col {
-                    None => None,
-                    Some(PodColumn::Raw) => JsonB(row.raw.clone()).into_datum(),
-                    Some(c) => row
-                        .text(*c)
-                        .map(str::to_owned)
-                        .and_then(IntoDatum::into_datum),
-                };
-                if let Some(d) = datum {
-                    values[i] = d;
-                    isnull[i] = false;
-                } else {
-                    values[i] = pg_sys::Datum::from(0);
-                    isnull[i] = true;
-                }
-            }
-        });
-        pg_sys::ExecStoreVirtualTuple(slot);
+        store_row(slot, &state.columns, &row, per_tuple);
         slot
     }
 }
@@ -550,4 +666,261 @@ unsafe extern "C" fn rescan_foreign_scan(node: *mut pg_sys::ForeignScanState) {
 #[pg_guard]
 unsafe extern "C" fn end_foreign_scan(_node: *mut pg_sys::ForeignScanState) {
     // State is owned by the per-query memory context (see begin_foreign_scan).
+}
+
+// --- modify callbacks ----------------------------------------------------------------
+
+/// Name of the resjunk column carrying the old `raw` value through UPDATE/DELETE plans.
+const JUNK_RAW: &CStr = c"axiom_raw";
+
+/// Per-statement modify state, allocated in the per-query memory context.
+struct ModifyState {
+    config: ScanConfig,
+    columns: Vec<Option<usize>>,
+    /// Attribute number of `axiom_raw` in the subplan's output (UPDATE/DELETE), else 0.
+    junk_raw_attno: i16,
+}
+
+/// Which DML a kind supports. Pods: none. `ConfigMaps`: all three.
+#[pg_guard]
+unsafe extern "C" fn is_foreign_rel_updatable(rel: pg_sys::Relation) -> c_int {
+    // SAFETY: rel is an open relation supplied by the planner/executor.
+    let cfg = unsafe { scan_config((*rel).rd_id) };
+    if cfg.kind.writable() {
+        (1 << pg_sys::CmdType::CMD_INSERT)
+            | (1 << pg_sys::CmdType::CMD_UPDATE)
+            | (1 << pg_sys::CmdType::CMD_DELETE)
+    } else {
+        0
+    }
+}
+
+/// Adds the row's `raw` column as a resjunk target so UPDATE/DELETE carry the
+/// object identity and the `resourceVersion` it was read at.
+#[pg_guard]
+unsafe extern "C" fn add_foreign_update_targets(
+    root: *mut pg_sys::PlannerInfo,
+    rtindex: pg_sys::Index,
+    _target_rte: *mut pg_sys::RangeTblEntry,
+    target_relation: pg_sys::Relation,
+) {
+    // SAFETY: planner-supplied pointers; tupdesc is live for the relation.
+    unsafe {
+        let tupdesc = (*target_relation).rd_att;
+        let natts = usize::try_from((*tupdesc).natts).unwrap_or(0);
+        let mut raw_attno: Option<i16> = None;
+        for i in 0..natts {
+            let att = (*tupdesc).attrs.as_ptr().add(i);
+            if (*att).attisdropped {
+                continue;
+            }
+            let name = CStr::from_ptr((*att).attname.data.as_ptr().cast::<c_char>());
+            if name.to_bytes() == b"raw" && (*att).atttypid == pg_sys::JSONBOID {
+                raw_attno = Some((*att).attnum);
+            }
+        }
+        let Some(attno) = raw_attno else {
+            raise(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                "UPDATE/DELETE on an axiom foreign table requires a \"raw jsonb\" column (it carries the object's identity and resourceVersion)".to_owned(),
+            );
+        };
+        // Var.varno is `Index` on pg14/15 and `int` on pg16+; makeVar follows suit.
+        #[cfg(any(feature = "pg14", feature = "pg15"))]
+        let varno = rtindex;
+        #[cfg(not(any(feature = "pg14", feature = "pg15")))]
+        let Ok(varno) = i32::try_from(rtindex) else {
+            raise(
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                format!("axiom: range table index {rtindex} out of range"),
+            );
+        };
+        let var = pg_sys::makeVar(varno, attno, pg_sys::JSONBOID, -1, pg_sys::InvalidOid, 0);
+        pg_sys::add_row_identity_var(root, var, rtindex, JUNK_RAW.as_ptr());
+    }
+}
+
+/// No private plan data: everything is re-derived from the catalogs at Begin.
+#[pg_guard]
+unsafe extern "C" fn plan_foreign_modify(
+    _root: *mut pg_sys::PlannerInfo,
+    _plan: *mut pg_sys::ModifyTable,
+    _result_relation: pg_sys::Index,
+    _subplan_index: c_int,
+) -> *mut pg_sys::List {
+    std::ptr::null_mut()
+}
+
+#[pg_guard]
+unsafe extern "C" fn begin_foreign_modify(
+    mtstate: *mut pg_sys::ModifyTableState,
+    rinfo: *mut pg_sys::ResultRelInfo,
+    _fdw_private: *mut pg_sys::List,
+    _subplan_index: c_int,
+    eflags: c_int,
+) {
+    // SAFETY: executor-supplied pointers, valid for the statement.
+    unsafe {
+        if eflags & pg_sys::EXEC_FLAG_EXPLAIN_ONLY.cast_signed() != 0 {
+            return;
+        }
+        let rel = (*rinfo).ri_RelationDesc;
+        let config = scan_config((*rel).rd_id);
+        if !config.kind.writable() {
+            raise(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                WriteError::ReadOnly(config.kind).to_string(),
+            );
+        }
+        let columns = column_map((*rel).rd_att, config.kind);
+        let mut junk_raw_attno: i16 = 0;
+        let op = (*mtstate).operation;
+        if op == pg_sys::CmdType::CMD_UPDATE || op == pg_sys::CmdType::CMD_DELETE {
+            let subplan = (*(*mtstate).ps.lefttree).plan;
+            junk_raw_attno =
+                pg_sys::ExecFindJunkAttributeInTlist((*subplan).targetlist, JUNK_RAW.as_ptr());
+            if junk_raw_attno <= 0 {
+                raise(
+                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                    "axiom: axiom_raw junk column missing from modify subplan".to_owned(),
+                );
+            }
+        }
+        let state = ModifyState {
+            config,
+            columns,
+            junk_raw_attno,
+        };
+        (*rinfo).ri_FdwState = PgMemoryContexts::CurrentMemoryContext
+            .leak_and_drop_on_delete(state)
+            .cast::<c_void>();
+    }
+}
+
+/// Returns the modify state stored by `begin_foreign_modify`.
+unsafe fn modify_state<'a>(rinfo: *mut pg_sys::ResultRelInfo) -> &'a ModifyState {
+    // SAFETY: ri_FdwState was set to a leaked ModifyState in begin_foreign_modify.
+    unsafe {
+        let p = (*rinfo).ri_FdwState.cast::<ModifyState>();
+        if p.is_null() {
+            raise(
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                "axiom: modify state missing".to_owned(),
+            );
+        }
+        &*p
+    }
+}
+
+/// Reads the old `raw` object from the subplan's junk column.
+unsafe fn old_raw(
+    state: &ModifyState,
+    plan_slot: *mut pg_sys::TupleTableSlot,
+) -> serde_json::Value {
+    // SAFETY: junk_raw_attno was located in this subplan's targetlist at Begin.
+    let datum = unsafe { slot_datum(plan_slot, state.junk_raw_attno) };
+    match datum.and_then(|d| unsafe { JsonB::from_datum(d, false) }) {
+        Some(j) => j.0,
+        None => raise(
+            PgSqlErrorCode::ERRCODE_FDW_ERROR,
+            WriteError::BadOldRaw("raw column is NULL").to_string(),
+        ),
+    }
+}
+
+/// Memory context for RETURNING datums: the per-tuple context of the modify node.
+unsafe fn per_tuple_memcx(estate: *mut pg_sys::EState) -> pg_sys::MemoryContext {
+    // SAFETY: estate is live for the statement; per-output-tuple context is reset per row.
+    unsafe { (*pg_sys::MakePerTupleExprContext(estate)).ecxt_per_tuple_memory }
+}
+
+#[pg_guard]
+unsafe extern "C" fn exec_foreign_insert(
+    estate: *mut pg_sys::EState,
+    rinfo: *mut pg_sys::ResultRelInfo,
+    slot: *mut pg_sys::TupleTableSlot,
+    _plan_slot: *mut pg_sys::TupleTableSlot,
+) -> *mut pg_sys::TupleTableSlot {
+    // SAFETY: executor-supplied pointers.
+    unsafe {
+        let state = modify_state(rinfo);
+        let kind = state.config.kind;
+        let new = new_row_from_slot(slot, &state.columns, kind);
+        let write = match kinds::insert_body(kind, &new) {
+            Ok(w) => w,
+            Err(e) => raise(write_sqlstate(&e), format!("axiom: INSERT: {e}")),
+        };
+        let json = match client::create(&state.config.server, kind, &write.identity, &write.body) {
+            Ok(j) => j,
+            Err(e) => raise_client("INSERT", &state.config.server, &e),
+        };
+        // Reflect the stored object (uid, resourceVersion, defaults) for RETURNING.
+        if let Some(row) = decode_rows(kind, &[json]).pop_front() {
+            store_row(slot, &state.columns, &row, per_tuple_memcx(estate));
+        }
+        slot
+    }
+}
+
+#[pg_guard]
+unsafe extern "C" fn exec_foreign_update(
+    estate: *mut pg_sys::EState,
+    rinfo: *mut pg_sys::ResultRelInfo,
+    slot: *mut pg_sys::TupleTableSlot,
+    plan_slot: *mut pg_sys::TupleTableSlot,
+) -> *mut pg_sys::TupleTableSlot {
+    // SAFETY: executor-supplied pointers.
+    unsafe {
+        let state = modify_state(rinfo);
+        let kind = state.config.kind;
+        let old = old_raw(state, plan_slot);
+        let new = new_row_from_slot(slot, &state.columns, kind);
+        let write = match kinds::update_body(kind, &old, &new) {
+            Ok(w) => w,
+            Err(e) => raise(write_sqlstate(&e), format!("axiom: UPDATE: {e}")),
+        };
+        let json = match client::update(&state.config.server, kind, &write.identity, &write.body) {
+            Ok(j) => j,
+            Err(e) => raise_client("UPDATE", &state.config.server, &e),
+        };
+        if let Some(row) = decode_rows(kind, &[json]).pop_front() {
+            store_row(slot, &state.columns, &row, per_tuple_memcx(estate));
+        }
+        slot
+    }
+}
+
+#[pg_guard]
+unsafe extern "C" fn exec_foreign_delete(
+    estate: *mut pg_sys::EState,
+    rinfo: *mut pg_sys::ResultRelInfo,
+    slot: *mut pg_sys::TupleTableSlot,
+    plan_slot: *mut pg_sys::TupleTableSlot,
+) -> *mut pg_sys::TupleTableSlot {
+    // SAFETY: executor-supplied pointers.
+    unsafe {
+        let state = modify_state(rinfo);
+        let kind = state.config.kind;
+        let old = old_raw(state, plan_slot);
+        let id = match kinds::identity_from_raw(&old) {
+            Ok(id) => id,
+            Err(e) => raise(write_sqlstate(&e), format!("axiom: DELETE: {e}")),
+        };
+        if let Err(e) = client::delete(&state.config.server, kind, &id) {
+            raise_client("DELETE", &state.config.server, &e);
+        }
+        // RETURNING sees the row as it was read.
+        if let Ok(row) = Row::from_value(kind, &old) {
+            store_row(slot, &state.columns, &row, per_tuple_memcx(estate));
+        }
+        slot
+    }
+}
+
+#[pg_guard]
+unsafe extern "C" fn end_foreign_modify(
+    _estate: *mut pg_sys::EState,
+    _rinfo: *mut pg_sys::ResultRelInfo,
+) {
+    // State is owned by the per-query memory context (see begin_foreign_modify).
 }

@@ -17,11 +17,13 @@ pub mod bgworker;
 pub mod client;
 pub mod config;
 pub mod fdw;
+pub mod kinds;
 pub mod options;
 pub mod ping;
-pub mod pods;
 pub mod proto;
 pub mod quals;
+#[cfg(test)]
+mod stub_gateway_tests;
 pub mod transport;
 
 ::pgrx::pg_module_magic!();
@@ -140,7 +142,9 @@ mod tests {
         Spi::run("CREATE SERVER gw FOREIGN DATA WRAPPER axiom_fdw").expect("should fail");
     }
 
-    #[pg_test(error = "option \"resource\" \"deployments\" is not supported; valid values: pods")]
+    #[pg_test(
+        error = "option \"resource\" \"deployments\" is not supported; valid values: pods, configmaps"
+    )]
     fn table_rejects_unknown_resource() {
         Spi::run(UNREACHABLE_SERVER).expect("server");
         Spi::run("CREATE FOREIGN TABLE t (name text) SERVER gw OPTIONS (resource 'deployments')")
@@ -212,7 +216,7 @@ mod tests {
     }
 
     #[pg_test(
-        error = "column \"labels\" is not a Pod column; supported columns: name, namespace, phase, node, raw"
+        error = "column \"labels\" is not a Pods column; supported columns: name, namespace, phase, node, raw"
     )]
     fn unknown_column_is_rejected_at_scan() {
         Spi::run(UNREACHABLE_SERVER).expect("server");
@@ -231,6 +235,103 @@ mod tests {
         )
         .expect("table");
         let _ = Spi::get_one::<i64>("SELECT count(*) FROM t WHERE name = 'impossible name'");
+    }
+
+    // --- Phase 2: write path without a real gateway ------------------------------
+
+    const CM_TABLE: &str =
+        "CREATE FOREIGN TABLE k8s_configmaps (name text, namespace text, data jsonb, raw jsonb) \
+        SERVER gw OPTIONS (resource 'configmaps')";
+
+    /// Writes always go to the gateway: with it unreachable, DML must fail with
+    /// the connection SQLSTATE rather than succeed or silently no-op.
+    #[pg_test]
+    fn insert_reaches_gateway_and_surfaces_connection_error() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run(CM_TABLE).expect("table");
+        Spi::run(
+            "DO $$ BEGIN INSERT INTO k8s_configmaps (name, namespace, data) VALUES ('a', 'b', '{\"k\":\"v\"}'); \
+             RAISE EXCEPTION 'insert unexpectedly succeeded'; \
+             EXCEPTION WHEN fdw_unable_to_establish_connection THEN \
+               CREATE TEMP TABLE caught AS SELECT SQLSTATE AS s, SQLERRM AS m; END $$",
+        )
+        .expect("HV00N must be raised");
+        assert_eq!(
+            Spi::get_one::<String>("SELECT s FROM caught"),
+            Ok(Some("HV00N".to_owned()))
+        );
+    }
+
+    /// Local validation runs before any RPC: these fail even though the gateway is down.
+    #[pg_test(error = "axiom: INSERT: column \"name\" is required and must not be NULL")]
+    fn insert_requires_name() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run(CM_TABLE).expect("table");
+        Spi::run("INSERT INTO k8s_configmaps (namespace) VALUES ('b')").expect("should fail");
+    }
+
+    #[pg_test(
+        error = "axiom: INSERT: \"Bad Name\" is not a valid Kubernetes name (lowercase DNS-1123 subdomain)"
+    )]
+    fn insert_rejects_invalid_name() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run(CM_TABLE).expect("table");
+        Spi::run("INSERT INTO k8s_configmaps (name, namespace) VALUES ('Bad Name', 'b')")
+            .expect("should fail");
+    }
+
+    #[pg_test(
+        error = "axiom: INSERT: data[\"k\"] must be a string (ConfigMap data values are strings)"
+    )]
+    fn insert_rejects_non_string_data() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run(CM_TABLE).expect("table");
+        Spi::run(
+            "INSERT INTO k8s_configmaps (name, namespace, data) VALUES ('a', 'b', '{\"k\": 1}')",
+        )
+        .expect("should fail");
+    }
+
+    /// Pods tables report no updatable operations, so Postgres rejects DML
+    /// before the FDW is even asked.
+    #[pg_test(error = "foreign table \"k8s_pods\" does not allow inserts")]
+    fn pods_are_read_only() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run(PODS_TABLE).expect("table");
+        Spi::run("INSERT INTO k8s_pods (name, namespace) VALUES ('a', 'b')").expect("should fail");
+    }
+
+    #[pg_test(
+        error = "UPDATE/DELETE on an axiom foreign table requires a \"raw jsonb\" column (it carries the object's identity and resourceVersion)"
+    )]
+    fn update_requires_raw_column() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run("CREATE FOREIGN TABLE cm (name text, namespace text, data jsonb) SERVER gw OPTIONS (resource 'configmaps')").expect("table");
+        Spi::run("UPDATE cm SET data = '{}' WHERE name = 'a'").expect("should fail");
+    }
+
+    /// An impossible WHERE means no rows to update: no scan RPC, no write RPC, success.
+    #[pg_test]
+    fn update_with_impossible_filter_touches_nothing() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run(CM_TABLE).expect("table");
+        Spi::run("UPDATE k8s_configmaps SET data = '{}' WHERE name = 'Not Valid'")
+            .expect("no rows, no RPC");
+        Spi::run("DELETE FROM k8s_configmaps WHERE namespace = 'a' AND namespace = 'b'")
+            .expect("no rows, no RPC");
+    }
+
+    #[pg_test]
+    fn explain_dml_does_not_contact_gateway() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run(CM_TABLE).expect("table");
+        let plan = Spi::get_one::<String>(
+            "EXPLAIN (FORMAT TEXT) UPDATE k8s_configmaps SET data = '{}' WHERE name = 'a'",
+        );
+        assert!(plan
+            .expect("explain")
+            .expect("row")
+            .contains("Update on k8s_configmaps"));
     }
 }
 

@@ -91,7 +91,7 @@ stack_up() {
 # psql_axiom SQL: run one statement as the app user, unaligned tuples-only
 # output, failing on the first SQL error.
 psql_axiom() {
-  compose exec -T "$E2E_SVC_POSTGRES" psql -v ON_ERROR_STOP=1 -U "$E2E_PG_USER" -d "$E2E_PG_DB" -At -c "$1"
+  compose exec -T "$E2E_SVC_POSTGRES" psql -q -v ON_ERROR_STOP=1 -U "$E2E_PG_USER" -d "$E2E_PG_DB" -At -c "$1"
 }
 
 # stack_logs SERVICE: full log of one service, never failing the caller.

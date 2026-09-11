@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -96,6 +97,60 @@ func TestDynamicList(t *testing.T) {
 	}
 }
 
+func cm(ns, name string, data map[string]string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{}
+	u.SetAPIVersion("v1")
+	u.SetKind("ConfigMap")
+	u.SetNamespace(ns)
+	u.SetName(name)
+	if data != nil {
+		m := map[string]any{}
+		for k, v := range data {
+			m[k] = v
+		}
+		_ = unstructured.SetNestedField(u.Object, m, "data") // static keys, cannot fail
+	}
+	return u
+}
+
+var cmGVK = schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}
+
+func TestDynamicWrites(t *testing.T) {
+	t.Parallel()
+	c := newFake(t)
+	ctx := context.Background()
+
+	created, err := c.Create(ctx, cmGVK, "default", cm("default", "app", map[string]string{"k": "v"}))
+	if err != nil || created.GetName() != "app" {
+		t.Fatalf("Create = %v, %v", created, err)
+	}
+	if _, err := c.Create(ctx, cmGVK, "default", cm("default", "app", nil)); !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("duplicate Create err = %v, want AlreadyExists", err)
+	}
+
+	created.Object["data"] = map[string]any{"k": "v2"}
+	updated, err := c.Update(ctx, cmGVK, "default", created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _, _ := unstructured.NestedString(updated.Object, "data", "k"); got != "v2" {
+		t.Fatalf("data.k after update = %q", got)
+	}
+	if _, err := c.Update(ctx, cmGVK, "default", cm("default", "ghost", nil)); !apierrors.IsNotFound(err) {
+		t.Fatalf("Update missing err = %v, want NotFound", err)
+	}
+
+	if err := c.Delete(ctx, cmGVK, "default", "app"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Delete(ctx, cmGVK, "default", "app"); !apierrors.IsNotFound(err) {
+		t.Fatalf("second Delete err = %v, want NotFound", err)
+	}
+	if _, err := c.Create(ctx, schema.GroupVersionKind{Kind: "Nope", Version: "v1"}, "default", cm("default", "x", nil)); !errors.Is(err, ErrUnsupportedKind) {
+		t.Fatalf("unsupported kind err = %v", err)
+	}
+}
+
 func TestUnconfigured(t *testing.T) {
 	t.Parallel()
 	var c Client = Unconfigured{}
@@ -104,6 +159,15 @@ func TestUnconfigured(t *testing.T) {
 	}
 	if _, err := c.List(context.Background(), podGVK, "", ""); !errors.Is(err, ErrNoCluster) {
 		t.Fatalf("List err = %v", err)
+	}
+	if _, err := c.Create(context.Background(), cmGVK, "d", cm("d", "a", nil)); !errors.Is(err, ErrNoCluster) {
+		t.Fatalf("Create err = %v", err)
+	}
+	if _, err := c.Update(context.Background(), cmGVK, "d", cm("d", "a", nil)); !errors.Is(err, ErrNoCluster) {
+		t.Fatalf("Update err = %v", err)
+	}
+	if err := c.Delete(context.Background(), cmGVK, "d", "a"); !errors.Is(err, ErrNoCluster) {
+		t.Fatalf("Delete err = %v", err)
 	}
 }
 
