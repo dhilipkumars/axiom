@@ -14,7 +14,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("cargo:rerun-if-changed={}", proto.display());
     tonic_build::configure()
-        .build_server(false)
+        // The server side is only used by the in-process stub gateway in tests,
+        // but generating it unconditionally keeps the build simple.
+        .build_server(true)
         .build_client(true)
         .compile_protos(&[proto], &[proto_root, include])?;
     Ok(())

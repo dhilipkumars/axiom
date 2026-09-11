@@ -131,7 +131,10 @@ git checkout phase-1      # until the Phase 1 PR is merged into main
 Both are fully automated. Phase 0 needs only Docker:
 
 ```sh
-make e2e-ping        # alias: make e2e-phase0
+make e2e-ping        # Phase 0 gate (alias: make e2e-phase0), Docker only
+make e2e-pods        # Phase 1 gate (alias: make e2e-phase1), needs kind + kubectl
+make e2e-configmaps  # Phase 2 gate (alias: make e2e-phase2), needs kind + kubectl
+make e2e             # all gates, oldest first
 ```
 
 Phase 1 also needs `kind` and `kubectl`; it creates a cluster named `axiom-e2e`,
@@ -215,6 +218,32 @@ and name filters it received:
 ```sh
 docker compose -f deploy/compose/docker-compose.yml logs -f gateway | grep '"msg":"list"'
 ```
+
+Query a cluster. Point the stack at a kind cluster with the Phase 1/2 harness
+(`E2E_KEEP=1 E2E_KIND_KEEP=1 ./e2e/pods_test.sh` leaves everything running), then:
+
+```sql
+CREATE SERVER kind FOREIGN DATA WRAPPER axiom_fdw
+  OPTIONS (endpoint 'https://gateway:8443', ca_cert '/certs/ca.crt', rpc_timeout_secs '10');
+
+CREATE FOREIGN TABLE k8s_pods (name text, namespace text, phase text, node text, raw jsonb)
+  SERVER kind OPTIONS (resource 'pods');
+CREATE FOREIGN TABLE k8s_configmaps (name text, namespace text, data jsonb, raw jsonb)
+  SERVER kind OPTIONS (resource 'configmaps');
+
+SELECT name, phase, node FROM k8s_pods WHERE namespace = 'kube-system';          -- namespace/name are pushed down
+INSERT INTO k8s_configmaps (name, namespace, data) VALUES ('app', 'default', '{"LOG_LEVEL":"info"}');
+UPDATE k8s_configmaps SET data = data || '{"LOG_LEVEL":"debug"}' WHERE namespace = 'default' AND name = 'app';
+DELETE FROM k8s_configmaps WHERE namespace = 'default' AND name = 'app';
+```
+
+Any subset of a kind's columns may be declared, but UPDATE/DELETE need the
+`raw jsonb` column: it carries the object's identity and the `resourceVersion`
+the row was read at. If the object changed between your read and your write,
+the statement fails with SQLSTATE `40001` (`serialization_failure`); re-read and
+retry, exactly as you would for a serialization failure on a local table.
+Kubernetes has no transactions, so a write takes effect when the statement
+runs and is not undone by `ROLLBACK`. Pods are read-only.
 
 Watch the worker's log lines from another terminal:
 

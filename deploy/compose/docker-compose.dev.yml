@@ -1,7 +1,12 @@
-# Overlay for poking at the stack from the host: publishes Postgres on
-# 127.0.0.1:5432 (loopback only; dev password is in docker-compose.yml).
-#   psql "postgresql://axiom:axiom-dev@127.0.0.1:5432/axiom"
+# Overlay for poking at the stack from the host, loopback only:
+#   Postgres  127.0.0.1:5432   psql "postgresql://axiom:axiom-dev@127.0.0.1:5432/axiom"
+#   Gateway   127.0.0.1:8443   (TLS; its cert is valid for "localhost", CA is /certs/ca.crt
+#                              inside the containers: `docker compose cp gateway:/certs/ca.crt .`)
+# Useful for pointing a host-installed Postgres with the extension at the gateway.
 services:
   postgres:
     ports:
       - "127.0.0.1:${AXIOM_PG_PORT:-5432}:5432"
+  gateway:
+    ports:
+      - "127.0.0.1:${AXIOM_GW_PORT:-8443}:8443"

@@ -1,4 +1,4 @@
-//! Per-backend gRPC client for on-demand FDW scans.
+//! Per-backend gRPC client for on-demand FDW scans and writes.
 //!
 //! Fork-safety: a Postgres backend is forked from the postmaster, so nothing
 //! here may be initialised at library load. The tokio runtime and channels
@@ -13,10 +13,13 @@ use std::time::Duration;
 
 use tonic::transport::Channel;
 
+use crate::kinds::{Identity, Kind};
 use crate::options::ServerOptions;
 use crate::proto::v1::gateway_service_client::GatewayServiceClient;
-use crate::proto::v1::{GroupVersionKind, ListRequest};
-use crate::quals::PodFilter;
+use crate::proto::v1::{
+    CreateRequest, DeleteRequest, GroupVersionKind, ListRequest, UpdateRequest,
+};
+use crate::quals::Filter;
 use crate::transport::{build_channel, ChannelError, Target};
 
 thread_local! {
@@ -56,6 +59,12 @@ pub enum ErrorClass {
     Permission,
     /// We sent something the gateway rejected (should not happen after local validation).
     InvalidRequest,
+    /// Optimistic-concurrency conflict: the object changed since it was read.
+    Conflict,
+    /// INSERT of an object that already exists.
+    AlreadyExists,
+    /// UPDATE/DELETE of an object that no longer exists.
+    NotFound,
     /// Gateway is up but has no cluster configured.
     GatewayUnconfigured,
     /// Anything else.
@@ -74,7 +83,10 @@ impl ClientError {
                     ErrorClass::Connection
                 }
                 Code::PermissionDenied | Code::Unauthenticated => ErrorClass::Permission,
-                Code::InvalidArgument | Code::NotFound => ErrorClass::InvalidRequest,
+                Code::InvalidArgument => ErrorClass::InvalidRequest,
+                Code::Aborted => ErrorClass::Conflict,
+                Code::AlreadyExists => ErrorClass::AlreadyExists,
+                Code::NotFound => ErrorClass::NotFound,
                 Code::FailedPrecondition => ErrorClass::GatewayUnconfigured,
                 _ => ErrorClass::Internal,
             },
@@ -123,37 +135,29 @@ fn channel_for(
     })
 }
 
-/// The Pod kind as the gateway names it.
-fn pod_gvk() -> GroupVersionKind {
+fn gvk_of(kind: Kind) -> GroupVersionKind {
+    let (group, version, k) = kind.gvk();
     GroupVersionKind {
-        group: String::new(),
-        version: "v1".into(),
-        kind: "Pod".into(),
+        group: group.to_owned(),
+        version: version.to_owned(),
+        kind: k.to_owned(),
     }
 }
 
-/// Lists Pods matching `filter` via one `List` RPC and returns each object's
-/// raw JSON. Never called when `filter.impossible` (the caller short-circuits).
-///
-/// Errors: see [`ClientError`]; a filter that matches nothing is `Ok(vec![])`.
-pub fn list_pods(server: &ServerOptions, filter: &PodFilter) -> Result<Vec<Vec<u8>>, ClientError> {
+/// Runs one RPC against `server` with the configured deadline, mapping a
+/// local timeout to `DeadlineExceeded`.
+fn call<T, F, Fut>(server: &ServerOptions, f: F) -> Result<T, ClientError>
+where
+    F: FnOnce(GatewayServiceClient<Channel>) -> Fut,
+    Fut: std::future::Future<Output = Result<tonic::Response<T>, tonic::Status>>,
+{
     let timeout = server.rpc_timeout;
-    let req = ListRequest {
-        gvk: Some(pod_gvk()),
-        namespace: filter.namespace.clone().unwrap_or_default(),
-        name: filter.name.clone().unwrap_or_default(),
-    };
     with_runtime(|rt| {
         let ch = channel_for(rt, server)?;
-        let mut client = GatewayServiceClient::new(ch);
+        let client = GatewayServiceClient::new(ch);
         rt.block_on(async {
-            match tokio::time::timeout(timeout, client.list(req)).await {
-                Ok(Ok(resp)) => Ok(resp
-                    .into_inner()
-                    .objects
-                    .into_iter()
-                    .map(|o| o.json)
-                    .collect()),
+            match tokio::time::timeout(timeout, f(client)).await {
+                Ok(Ok(resp)) => Ok(resp.into_inner()),
                 Ok(Err(status)) => Err(ClientError::Rpc(Box::new(status))),
                 Err(_elapsed) => Err(ClientError::Rpc(Box::new(
                     tonic::Status::deadline_exceeded(format!(
@@ -164,6 +168,69 @@ pub fn list_pods(server: &ServerOptions, filter: &PodFilter) -> Result<Vec<Vec<u
             }
         })
     })?
+}
+
+/// Lists objects of `kind` matching `filter` via one `List` RPC and returns
+/// each object's raw JSON. Never called when `filter.impossible` (the caller
+/// short-circuits). A filter that matches nothing is `Ok(vec![])`.
+pub fn list(
+    server: &ServerOptions,
+    kind: Kind,
+    filter: &Filter,
+) -> Result<Vec<Vec<u8>>, ClientError> {
+    let req = ListRequest {
+        gvk: Some(gvk_of(kind)),
+        namespace: filter.namespace.clone().unwrap_or_default(),
+        name: filter.name.clone().unwrap_or_default(),
+    };
+    call(server, |mut c| async move { c.list(req).await })
+        .map(|resp| resp.objects.into_iter().map(|o| o.json).collect())
+}
+
+/// Creates one object; returns the stored object's JSON (for RETURNING).
+pub fn create(
+    server: &ServerOptions,
+    kind: Kind,
+    id: &Identity,
+    body: &serde_json::Value,
+) -> Result<Vec<u8>, ClientError> {
+    let req = CreateRequest {
+        gvk: Some(gvk_of(kind)),
+        namespace: id.namespace.clone(),
+        name: id.name.clone(),
+        json: body.to_string().into_bytes(),
+    };
+    call(server, |mut c| async move { c.create(req).await })
+        .map(|resp| resp.object.map(|o| o.json).unwrap_or_default())
+}
+
+/// Replaces one object, sending `id.resource_version` as the concurrency
+/// token; a stale token is [`ErrorClass::Conflict`]. Returns the stored JSON.
+pub fn update(
+    server: &ServerOptions,
+    kind: Kind,
+    id: &Identity,
+    body: &serde_json::Value,
+) -> Result<Vec<u8>, ClientError> {
+    let req = UpdateRequest {
+        gvk: Some(gvk_of(kind)),
+        namespace: id.namespace.clone(),
+        name: id.name.clone(),
+        resource_version: id.resource_version.clone(),
+        json: body.to_string().into_bytes(),
+    };
+    call(server, |mut c| async move { c.update(req).await })
+        .map(|resp| resp.object.map(|o| o.json).unwrap_or_default())
+}
+
+/// Deletes one object by identity.
+pub fn delete(server: &ServerOptions, kind: Kind, id: &Identity) -> Result<(), ClientError> {
+    let req = DeleteRequest {
+        gvk: Some(gvk_of(kind)),
+        namespace: id.namespace.clone(),
+        name: id.name.clone(),
+    };
+    call(server, |mut c| async move { c.delete(req).await }).map(|_| ())
 }
 
 #[cfg(test)]
@@ -179,6 +246,9 @@ mod tests {
             (Code::PermissionDenied, ErrorClass::Permission),
             (Code::Unauthenticated, ErrorClass::Permission),
             (Code::InvalidArgument, ErrorClass::InvalidRequest),
+            (Code::Aborted, ErrorClass::Conflict),
+            (Code::AlreadyExists, ErrorClass::AlreadyExists),
+            (Code::NotFound, ErrorClass::NotFound),
             (Code::FailedPrecondition, ErrorClass::GatewayUnconfigured),
             (Code::Internal, ErrorClass::Internal),
         ];
@@ -206,11 +276,36 @@ mod tests {
             ("rpc_timeout_secs".to_owned(), "1".to_owned()),
         ])
         .expect("valid");
-        let err = list_pods(&server, &PodFilter::default()).expect_err("nothing listens on port 1");
+        let err =
+            list(&server, Kind::Pods, &Filter::default()).expect_err("nothing listens on port 1");
         assert_eq!(err.class(), ErrorClass::Connection, "{err}");
         // Second call reuses the cached channel and fails the same way.
-        let err = list_pods(&server, &PodFilter::default()).expect_err("still unreachable");
+        let err = list(&server, Kind::Pods, &Filter::default()).expect_err("still unreachable");
         assert_eq!(err.class(), ErrorClass::Connection, "{err}");
+        // Writes go through the same path and never succeed silently.
+        let id = Identity {
+            namespace: "d".into(),
+            name: "a".into(),
+            resource_version: "1".into(),
+        };
+        assert_eq!(
+            create(&server, Kind::ConfigMaps, &id, &serde_json::json!({}))
+                .expect_err("down")
+                .class(),
+            ErrorClass::Connection
+        );
+        assert_eq!(
+            update(&server, Kind::ConfigMaps, &id, &serde_json::json!({}))
+                .expect_err("down")
+                .class(),
+            ErrorClass::Connection
+        );
+        assert_eq!(
+            delete(&server, Kind::ConfigMaps, &id)
+                .expect_err("down")
+                .class(),
+            ErrorClass::Connection
+        );
     }
 
     #[test]
@@ -220,7 +315,7 @@ mod tests {
             ("ca_cert".to_owned(), "/definitely/missing.pem".to_owned()),
         ])
         .expect("valid");
-        let err = list_pods(&server, &PodFilter::default()).expect_err("ca missing");
+        let err = list(&server, Kind::Pods, &Filter::default()).expect_err("ca missing");
         assert!(
             matches!(err, ClientError::Channel(ChannelError::ReadCa(..))),
             "{err:?}"

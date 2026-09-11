@@ -1,8 +1,8 @@
 // Axiom gateway API, v1.
 //
-// Phase 0 defined the liveness surface (Ping). Phase 1 adds read-only, on-demand
-// access (Get/List). Later phases add Create/Update/Delete/Subscribe/
-// DiscoverSchema per docs/DESIGN.md §5.1. Credentials never appear as fields in
+// Phase 0 defined the liveness surface (Ping). Phase 1 added read-only, on-demand
+// access (Get/List). Phase 2 adds the write path (Create/Update/Delete). Later
+// phases add Subscribe/DiscoverSchema per docs/DESIGN.md §5.1. Credentials never appear as fields in
 // any message here: each side holds its own credentials locally (docs/RULES.md §3).
 syntax = "proto3";
 
@@ -41,6 +41,35 @@ service GatewayService {
   // Errors: as for Get, except that a filter matching nothing is an empty
   // response, not NOT_FOUND.
   rpc List(ListRequest) returns (ListResponse);
+
+  // Create creates one object from its JSON body. The gateway forces
+  // apiVersion/kind from gvk and requires body metadata.name/namespace (if
+  // present) to equal the request fields.
+  //
+  // Errors: INVALID_ARGUMENT for an unsupported gvk, invalid names, a body
+  // that is not a JSON object or whose identity disagrees with the request,
+  // or a body the API server rejects as invalid; ALREADY_EXISTS if an object
+  // with that name exists; PERMISSION_DENIED / FAILED_PRECONDITION /
+  // UNAVAILABLE as for Get.
+  rpc Create(CreateRequest) returns (CreateResponse);
+
+  // Update replaces one object (HTTP PUT) with optimistic concurrency: the
+  // request must carry the resource_version the caller last read, and the
+  // API server rejects the write if the object has changed since.
+  //
+  // Errors: INVALID_ARGUMENT if resource_version is empty or the body/identity
+  // is invalid (as for Create); ABORTED if the resource_version is stale
+  // (HTTP 409 Conflict) so callers can distinguish "retry after re-read" from
+  // every other failure; NOT_FOUND if the object no longer exists;
+  // PERMISSION_DENIED / FAILED_PRECONDITION / UNAVAILABLE as for Get.
+  rpc Update(UpdateRequest) returns (UpdateResponse);
+
+  // Delete deletes one object by name.
+  //
+  // Errors: INVALID_ARGUMENT for unsupported gvk / invalid names; NOT_FOUND
+  // if it does not exist; PERMISSION_DENIED / FAILED_PRECONDITION /
+  // UNAVAILABLE as for Get.
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
 }
 
 message PingRequest {
@@ -104,3 +133,39 @@ message ListResponse {
   // resourceVersion of the list itself, usable as a watch start point.
   string resource_version = 2;
 }
+
+message CreateRequest {
+  GroupVersionKind gvk = 1;
+  string namespace = 2;
+  string name = 3;
+  // Full object as JSON. apiVersion/kind are overwritten from gvk.
+  bytes json = 4;
+}
+
+message CreateResponse {
+  // The object as stored by the API server (with uid, resourceVersion, defaults).
+  Object object = 1;
+}
+
+message UpdateRequest {
+  GroupVersionKind gvk = 1;
+  string namespace = 2;
+  string name = 3;
+  // Required. The metadata.resourceVersion the caller last read.
+  string resource_version = 4;
+  // Full replacement object as JSON. metadata.resourceVersion inside the
+  // body, if present, must equal resource_version.
+  bytes json = 5;
+}
+
+message UpdateResponse {
+  Object object = 1;
+}
+
+message DeleteRequest {
+  GroupVersionKind gvk = 1;
+  string namespace = 2;
+  string name = 3;
+}
+
+message DeleteResponse {}
