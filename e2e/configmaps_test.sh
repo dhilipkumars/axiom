@@ -54,6 +54,20 @@ got="$(psql_axiom "DO \$\$ BEGIN UPDATE k8s_configmaps SET name = 'renamed' WHER
   EXCEPTION WHEN feature_not_supported THEN RAISE NOTICE 'caught %', SQLSTATE; END \$\$;" 2>&1 || true)"
 grep -q "caught 0A000" <<<"$got" || fail "renaming should raise 0A000, got: $got"
 
+log "UPDATE through raw (jsonb_set) changes data even though the typed data column is untouched"
+psql_axiom "UPDATE k8s_configmaps SET raw = jsonb_set(raw, '{data,VIA_RAW}', '\"1\"') WHERE namespace = '$NS' AND name = 'app-config';"
+want="$(kubectl_e2e -n "$NS" get configmap app-config -o jsonpath='{.data.LOG_LEVEL}|{.data.VIA_RAW}')"
+[[ "$want" == "warn|1" ]] || fail "cluster shows '$want' after raw jsonb_set, want 'warn|1'"
+
+log "SET data = NULL clears data; SET name = NULL is not_null_violation (23502)"
+psql_axiom "UPDATE k8s_configmaps SET data = NULL WHERE namespace = '$NS' AND name = 'app-config';"
+want="$(kubectl_e2e -n "$NS" get configmap app-config -o jsonpath='{.data}')"
+[[ -z "$want" || "$want" == "{}" ]] || fail "data not cleared: '$want'"
+got="$(psql_axiom "DO \$\$ BEGIN UPDATE k8s_configmaps SET name = NULL WHERE namespace = '$NS' AND name = 'app-config'; RAISE EXCEPTION 'unexpected success';
+  EXCEPTION WHEN not_null_violation THEN RAISE NOTICE 'caught %', SQLSTATE; END \$\$;" 2>&1 || true)"
+grep -q "caught 23502" <<<"$got" || fail "expected 23502, got: $got"
+psql_axiom "UPDATE k8s_configmaps SET data = '{\"LOG_LEVEL\":\"warn\"}' WHERE namespace = '$NS' AND name = 'app-config';"
+
 log "concurrent out-of-band change between read and write is serialization_failure (40001), not a silent overwrite"
 # pg_sleep in the WHERE runs after the row (and its resourceVersion) was read
 # but before ExecForeignUpdate sends it; kubectl changes the object meanwhile.

@@ -389,6 +389,47 @@ fn stub_gateway_scan_and_dml_round_trip() {
         );
     }
 
+    // --- review follow-ups: raw-only change keeps its data edit; NULL semantics ---
+    let row = tx
+        .query_one(
+            "UPDATE stub_cms SET raw = jsonb_set(raw, '{data,VIA_RAW}', '\"1\"') WHERE namespace = 'shop' AND name = 'app'
+             RETURNING data::text",
+            &[],
+        )
+        .expect("update via raw");
+    let data: serde_json::Value = serde_json::from_str(row.get::<_, &str>(0)).expect("json");
+    assert_eq!(
+        data,
+        json!({"LOG_LEVEL":"debug","VIA_RAW":"1"}),
+        "typed data must not clobber a raw edit"
+    );
+    let row = tx
+        .query_one("UPDATE stub_cms SET data = NULL WHERE namespace = 'shop' AND name = 'app' RETURNING data::text", &[])
+        .expect("clear data");
+    assert_eq!(row.get::<_, &str>(0), "{}");
+    let err = tx
+        .execute(
+            "UPDATE stub_cms SET name = NULL WHERE namespace = 'shop' AND name = 'app'",
+            &[],
+        )
+        .expect_err("null name");
+    assert_eq!(
+        sqlstate(&err),
+        SqlState::NOT_NULL_VIOLATION.code(),
+        "{}",
+        message(&err)
+    );
+    tx.rollback().expect("rollback");
+    let mut tx = pg.transaction().expect("begin");
+    tx.batch_execute(&format!(
+        "CREATE SERVER stub FOREIGN DATA WRAPPER axiom_fdw OPTIONS (endpoint 'https://localhost:{}', ca_cert '{ca}');
+         CREATE FOREIGN TABLE stub_cms (name text, namespace text, data jsonb, raw jsonb) SERVER stub OPTIONS (resource 'configmaps');",
+        stub.addr.port()
+    ))
+    .expect("ddl");
+    tx.execute("UPDATE stub_cms SET data = '{\"LOG_LEVEL\":\"debug\"}' WHERE namespace = 'shop' AND name = 'app'", &[])
+        .expect("restore data");
+
     // --- concurrent modification → 40001, and the write did not land ---
     stub.cluster
         .force_conflict_once

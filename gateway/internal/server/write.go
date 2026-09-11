@@ -58,6 +58,10 @@ func decodeBody(op string, id identity, body []byte) (*unstructured.Unstructured
 	if err := json.Unmarshal(body, &m); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "%s: json body is not a JSON object: %v", op, err)
 	}
+	if m == nil {
+		// `null` unmarshals into a nil map without error; assigning into it would panic.
+		return nil, status.Errorf(codes.InvalidArgument, "%s: json body must be a JSON object, got null", op)
+	}
 	u := &unstructured.Unstructured{Object: m}
 	if _, ok := m["metadata"]; !ok {
 		u.Object["metadata"] = map[string]any{}
