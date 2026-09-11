@@ -543,6 +543,25 @@ to alert on: `axiom bgworker: ping ok ...` at `LOG`, `axiom bgworker: ping faile
 - **`WARNING: axiom: not loaded via shared_preload_libraries`** after `CREATE
   EXTENSION`: expected if you did not preload the library; add it to
   `shared_preload_libraries` and restart Postgres.
+- **`invalid peer certificate: BadSignature`** on a stack that was working:
+  the gateway is serving a stale certificate. The `certs` service is a one-shot
+  that regenerates the CA and server cert on every `up`, but Compose only
+  recreates a container whose configuration changed, so a repeated `up` can
+  rewrite the volume while leaving a long-running gateway holding the cert it
+  loaded at startup. Restart the gateway so it re-reads them; rebuilding is not
+  needed.
+
+  ```sh
+  ac restart gateway
+  # confirm the gateway started after the certs were written:
+  docker inspect axiom-gateway-1 --format '{{.State.StartedAt}}'
+  docker inspect axiom-certs-1   --format '{{.State.FinishedAt}}'
+  ```
+- **`gateway has no cluster credentials configured`** on every query: the
+  gateway was recreated without the kind overlay and is running with
+  `-no-cluster`. Bring it back up with both `-f` files (see section 4);
+  `docker inspect axiom-gateway-1 --format '{{json .Args}}'` shows which
+  flags it actually has.
 
 ## 8. Repository layout
 
