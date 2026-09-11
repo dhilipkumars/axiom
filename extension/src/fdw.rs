@@ -729,12 +729,11 @@ unsafe extern "C" fn add_foreign_update_targets(
         #[cfg(any(feature = "pg14", feature = "pg15"))]
         let varno = rtindex;
         #[cfg(not(any(feature = "pg14", feature = "pg15")))]
-        let varno = match i32::try_from(rtindex) {
-            Ok(v) => v,
-            Err(_) => raise(
+        let Ok(varno) = i32::try_from(rtindex) else {
+            raise(
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
                 format!("axiom: range table index {rtindex} out of range"),
-            ),
+            );
         };
         let var = pg_sys::makeVar(varno, attno, pg_sys::JSONBOID, -1, pg_sys::InvalidOid, 0);
         pg_sys::add_row_identity_var(root, var, rtindex, JUNK_RAW.as_ptr());
