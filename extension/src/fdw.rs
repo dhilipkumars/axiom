@@ -663,12 +663,17 @@ fn fetch_from_cache(state: &ScanState) -> Option<VecDeque<Row>> {
         Ok(objects) => {
             if tier == Tier::Stale {
                 // Never mask staleness (docs/DESIGN.md §5.3): say so on every scan.
+                // `SubStatus::resource` is the kubectl spelling (`widgets.example.com`
+                // for a CRD, `pods` for a core kind), which is what `Resource`'s
+                // Display produces; matching on the bare plural would never find a
+                // CRD's row and the warning would lose its reason.
+                let want = state.config.resource.to_string();
                 let reason = shmem::status()
                     .ok()
                     .and_then(|rows| {
                         rows.into_iter().find(|r| {
                             r.endpoint == state.config.server.target.endpoint
-                                && r.resource == state.config.resource.plural.as_str()
+                                && r.resource == want
                                 && r.namespace == ns
                         })
                     })
