@@ -8,7 +8,7 @@ PG ?= pg14
 COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 
 .PHONY: all proto proto-check gateway-build gateway-test gateway-lint gateway-vuln \
-        ext-build ext-test ext-lint ext-fmt ext-audit unit lint up down e2e-ping e2e-phase0 e2e
+        ext-build ext-test ext-lint ext-fmt ext-audit unit lint up down e2e-ping e2e-phase0 e2e-pods e2e-phase1 e2e
 
 all: lint unit
 
@@ -71,4 +71,12 @@ e2e-ping:
 # PLAN.md name for the Phase 0 gate; the Ping test is that gate.
 e2e-phase0: e2e-ping
 
-e2e: e2e-ping
+# Needs kind + kubectl on PATH; creates/deletes a cluster named axiom-e2e.
+e2e-pods:
+	./e2e/pods_test.sh
+
+# PLAN.md name for the Phase 1 gate; the Pods test is that gate.
+e2e-phase1: e2e-pods
+
+# Every completed phase's gate, oldest first (regression order per RULES.md §4).
+e2e: e2e-ping e2e-pods

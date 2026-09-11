@@ -14,13 +14,14 @@ use pgrx::bgworkers::{
 };
 use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
 use pgrx::prelude::*;
-use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
+use tonic::transport::Channel;
 
 use crate::backoff::Backoff;
 use crate::config::Settings;
 use crate::ping::PingOutcome;
 use crate::proto::v1::gateway_service_client::GatewayServiceClient;
 use crate::proto::v1::PingRequest;
+use crate::transport::{build_channel, ChannelError};
 
 /// Human-readable worker name; also its `backend_type` in `pg_stat_activity`.
 pub const WORKER_NAME: &str = "axiom gateway pinger";
@@ -112,42 +113,6 @@ fn read_settings() -> Result<Settings, crate::config::ConfigError> {
     )
 }
 
-/// Errors while turning [`Settings`] into a connected-lazily gRPC channel.
-#[derive(Debug)]
-enum ChannelError {
-    ReadCa(String, std::io::Error),
-    Transport(tonic::transport::Error),
-}
-
-impl std::fmt::Display for ChannelError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ReadCa(path, e) => write!(f, "cannot read axiom.gateway_ca_cert {path:?}: {e}"),
-            Self::Transport(e) => write!(f, "cannot configure gateway channel: {e}"),
-        }
-    }
-}
-
-/// Builds a lazily-connecting TLS channel for `settings`. Pure w.r.t. the
-/// network (no connection attempted here); may read the CA file.
-fn build_channel(settings: &Settings) -> Result<Channel, ChannelError> {
-    let mut tls = ClientTlsConfig::new().domain_name(settings.tls_server_name.clone());
-    tls = match &settings.ca_cert_path {
-        Some(path) => {
-            let pem = std::fs::read(path).map_err(|e| ChannelError::ReadCa(path.clone(), e))?;
-            tls.ca_certificate(Certificate::from_pem(pem))
-        }
-        None => tls.with_webpki_roots(),
-    };
-    let endpoint = Endpoint::from_shared(settings.endpoint.clone())
-        .map_err(ChannelError::Transport)?
-        .tls_config(tls)
-        .map_err(ChannelError::Transport)?
-        .connect_timeout(settings.rpc_timeout)
-        .timeout(settings.rpc_timeout);
-    Ok(endpoint.connect_lazy())
-}
-
 /// Connection state carried across ticks so the channel is reused while the
 /// settings are unchanged.
 struct Conn {
@@ -226,11 +191,14 @@ pub extern "C" fn axiom_bgworker_main(_arg: pg_sys::Datum) {
             // the runtime context even though no I/O happens yet.
             let built = {
                 let _guard = rt.enter();
-                build_channel(&settings)
+                build_channel(&settings.target, settings.rpc_timeout)
             };
             match built {
                 Ok(ch) => {
-                    log!("{WORKER_NAME}: gateway endpoint {}", settings.endpoint);
+                    log!(
+                        "{WORKER_NAME}: gateway endpoint {}",
+                        settings.target.endpoint
+                    );
                     conn = Some(Conn {
                         client: GatewayServiceClient::new(ch),
                         settings,
@@ -238,7 +206,7 @@ pub extern "C" fn axiom_bgworker_main(_arg: pg_sys::Datum) {
                 }
                 Err(e) => {
                     conn = None;
-                    warning!("{WORKER_NAME}: {e}");
+                    warning!("{WORKER_NAME}: {}", ChannelError::to_string(&e));
                     wait = backoff.on_failure();
                     continue;
                 }
@@ -252,7 +220,7 @@ pub extern "C" fn axiom_bgworker_main(_arg: pg_sys::Datum) {
 
         nonce = nonce.wrapping_add(1).max(1);
         let outcome = ping_once(&rt, c, nonce);
-        let line = outcome.log_line(&c.settings.endpoint);
+        let line = outcome.log_line(&c.settings.target.endpoint);
         if outcome.is_success() {
             backoff.on_success();
             log!("{line}");

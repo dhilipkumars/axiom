@@ -1,8 +1,9 @@
 //! Axiom — a Postgres foreign data wrapper for Kubernetes.
 //!
-//! Phase 0 (see `docs/PLAN.md`): no FDW callbacks yet. The extension registers
-//! configuration GUCs and a background worker that pings the Go gateway over
-//! TLS on a timer, proving the Postgres↔gateway gRPC plumbing end to end.
+//! Phase 0 (see `docs/PLAN.md`) registers configuration GUCs and a background
+//! worker that pings the Go gateway over TLS on a timer. Phase 1 adds the
+//! `axiom_fdw` foreign data wrapper with read-only, on-demand scans of Pods
+//! (`fdw.rs`), backed by per-backend unary RPCs (`client.rs`).
 //!
 //! The background worker is only started when the library is listed in
 //! `shared_preload_libraries`; `CREATE EXTENSION axiom` alone installs the SQL
@@ -13,9 +14,15 @@ use pgrx::prelude::*;
 
 pub mod backoff;
 pub mod bgworker;
+pub mod client;
 pub mod config;
+pub mod fdw;
+pub mod options;
 pub mod ping;
+pub mod pods;
 pub mod proto;
+pub mod quals;
+pub mod transport;
 
 ::pgrx::pg_module_magic!();
 
@@ -83,6 +90,147 @@ mod tests {
             "SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'axiom gateway pinger'",
         );
         assert_eq!(n, Ok(Some(1)));
+    }
+
+    // --- Phase 1: FDW DDL and scan behaviour without a real gateway ------------
+
+    /// A server pointing at a port nothing listens on, with a short timeout.
+    const UNREACHABLE_SERVER: &str = "CREATE SERVER gw FOREIGN DATA WRAPPER axiom_fdw \
+        OPTIONS (endpoint 'https://127.0.0.1:1', rpc_timeout_secs '1')";
+    const PODS_TABLE: &str = "CREATE FOREIGN TABLE k8s_pods (name text, namespace text, phase text, node text, raw jsonb) \
+        SERVER gw OPTIONS (resource 'pods')";
+
+    #[pg_test]
+    fn fdw_is_installed() {
+        assert_eq!(
+            Spi::get_one::<i64>(
+                "SELECT count(*) FROM pg_foreign_data_wrapper WHERE fdwname = 'axiom_fdw'"
+            ),
+            Ok(Some(1))
+        );
+    }
+
+    #[pg_test]
+    fn server_and_table_ddl_accepts_valid_options() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run(PODS_TABLE).expect("table");
+        Spi::run("CREATE FOREIGN TABLE pods_min (name text) SERVER gw OPTIONS (resource 'pods')")
+            .expect("subset of columns");
+    }
+
+    #[pg_test(
+        error = "invalid option \"bogus\" for Server: valid options are endpoint, ca_cert, rpc_timeout_secs"
+    )]
+    fn server_rejects_unknown_option() {
+        Spi::run("CREATE SERVER gw FOREIGN DATA WRAPPER axiom_fdw OPTIONS (endpoint 'https://gw', bogus '1')").expect("should fail");
+    }
+
+    #[pg_test(
+        error = "option \"endpoint\": gateway endpoint must use https (got scheme \"http\"); plaintext gateway connections are not supported"
+    )]
+    fn server_rejects_plaintext_endpoint() {
+        Spi::run(
+            "CREATE SERVER gw FOREIGN DATA WRAPPER axiom_fdw OPTIONS (endpoint 'http://gw:8080')",
+        )
+        .expect("should fail");
+    }
+
+    #[pg_test(error = "required option \"endpoint\" is missing")]
+    fn server_requires_endpoint() {
+        Spi::run("CREATE SERVER gw FOREIGN DATA WRAPPER axiom_fdw").expect("should fail");
+    }
+
+    #[pg_test(error = "option \"resource\" \"deployments\" is not supported; valid values: pods")]
+    fn table_rejects_unknown_resource() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run("CREATE FOREIGN TABLE t (name text) SERVER gw OPTIONS (resource 'deployments')")
+            .expect("should fail");
+    }
+
+    #[pg_test(error = "invalid option \"password\" for UserMapping: no options are accepted")]
+    fn user_mapping_rejects_options_in_phase1() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run("CREATE USER MAPPING FOR CURRENT_USER SERVER gw OPTIONS (password 'x')")
+            .expect("should fail");
+    }
+
+    /// Gateway down must be a SQL error with the FDW connection SQLSTATE and a
+    /// stable message prefix, not a crash and not an empty result. Caught in
+    /// PL/pgSQL because the transport detail after the prefix varies.
+    #[pg_test]
+    fn scan_surfaces_unreachable_gateway_as_sql_error() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run(PODS_TABLE).expect("table");
+        Spi::run(
+            "DO $$ BEGIN PERFORM count(*) FROM k8s_pods; RAISE EXCEPTION 'scan unexpectedly succeeded'; \
+             EXCEPTION WHEN fdw_unable_to_establish_connection THEN \
+               CREATE TEMP TABLE caught AS SELECT SQLSTATE AS s, SQLERRM AS m; END $$",
+        )
+        .expect("error must be catchable as fdw_unable_to_establish_connection");
+        assert_eq!(
+            Spi::get_one::<String>("SELECT s FROM caught"),
+            Ok(Some("HV00N".to_owned()))
+        );
+        let msg = Spi::get_one::<String>("SELECT m FROM caught")
+            .expect("spi")
+            .expect("row");
+        assert!(
+            msg.starts_with("axiom: cannot reach gateway https://127.0.0.1:1: "),
+            "{msg}"
+        );
+    }
+
+    /// An impossible filter never contacts the gateway (which here would fail).
+    #[pg_test]
+    fn impossible_filter_returns_no_rows_without_rpc() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run(PODS_TABLE).expect("table");
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT count(*) FROM k8s_pods WHERE name = 'Not A Valid Name'"),
+            Ok(Some(0))
+        );
+        assert_eq!(
+            Spi::get_one::<i64>(
+                "SELECT count(*) FROM k8s_pods WHERE namespace = 'a' AND namespace = 'b'"
+            ),
+            Ok(Some(0))
+        );
+    }
+
+    /// Planning alone must not contact the gateway.
+    #[pg_test]
+    fn explain_does_not_contact_gateway() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run(PODS_TABLE).expect("table");
+        let plan = Spi::get_one::<String>(
+            "EXPLAIN (FORMAT TEXT) SELECT name FROM k8s_pods WHERE namespace = 'x'",
+        );
+        assert!(plan
+            .expect("explain")
+            .expect("row")
+            .contains("Foreign Scan on k8s_pods"));
+    }
+
+    #[pg_test(
+        error = "column \"labels\" is not a Pod column; supported columns: name, namespace, phase, node, raw"
+    )]
+    fn unknown_column_is_rejected_at_scan() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run(
+            "CREATE FOREIGN TABLE t (name text, labels text) SERVER gw OPTIONS (resource 'pods')",
+        )
+        .expect("table");
+        let _ = Spi::get_one::<i64>("SELECT count(*) FROM t WHERE name = 'impossible name'");
+    }
+
+    #[pg_test(error = "column \"phase\" must be of type text")]
+    fn wrong_column_type_is_rejected_at_scan() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run(
+            "CREATE FOREIGN TABLE t (name text, phase int) SERVER gw OPTIONS (resource 'pods')",
+        )
+        .expect("table");
+        let _ = Spi::get_one::<i64>("SELECT count(*) FROM t WHERE name = 'impossible name'");
     }
 }
 

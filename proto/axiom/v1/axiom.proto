@@ -1,9 +1,9 @@
 // Axiom gateway API, v1.
 //
-// Phase 0 defines only the liveness/plumbing surface. Later phases add the
-// Get/List/Create/Update/Delete/Subscribe/DiscoverSchema RPCs described in
-// docs/DESIGN.md §5.1. Credentials never appear as fields in any message here:
-// each side holds its own credentials locally (docs/RULES.md §3).
+// Phase 0 defined the liveness surface (Ping). Phase 1 adds read-only, on-demand
+// access (Get/List). Later phases add Create/Update/Delete/Subscribe/
+// DiscoverSchema per docs/DESIGN.md §5.1. Credentials never appear as fields in
+// any message here: each side holds its own credentials locally (docs/RULES.md §3).
 syntax = "proto3";
 
 package axiom.v1;
@@ -22,6 +22,25 @@ service GatewayService {
   // Errors: INVALID_ARGUMENT if the request nonce is zero (zero is reserved as
   // "unset" so accidental default-constructed requests are rejected loudly).
   rpc Ping(PingRequest) returns (PingResponse);
+
+  // Get fetches a single object by kind, namespace and name, straight from the
+  // API server (never from a cache).
+  //
+  // Errors: INVALID_ARGUMENT for an unsupported/malformed gvk or an invalid
+  // namespace/name; NOT_FOUND if the object does not exist; PERMISSION_DENIED
+  // if the gateway's own RBAC identity may not read it; FAILED_PRECONDITION if
+  // the gateway has no cluster configured; UNAVAILABLE if the API server cannot
+  // be reached.
+  rpc Get(GetRequest) returns (GetResponse);
+
+  // List fetches objects of one kind, optionally narrowed to a namespace and/or
+  // a single name. Filters are applied server-side (namespace scoping and a
+  // metadata.name field selector), never by fetching everything and filtering
+  // in the gateway.
+  //
+  // Errors: as for Get, except that a filter matching nothing is an empty
+  // response, not NOT_FOUND.
+  rpc List(ListRequest) returns (ListResponse);
 }
 
 message PingRequest {
@@ -36,4 +55,52 @@ message PingResponse {
   string gateway_version = 2;
   // Gateway wall-clock time at the moment the reply was built.
   google.protobuf.Timestamp server_time = 3;
+}
+
+// GroupVersionKind identifies a Kubernetes resource kind. Group is empty for
+// the core API group.
+message GroupVersionKind {
+  string group = 1;
+  string version = 2;
+  string kind = 3;
+}
+
+// Object is one Kubernetes object as returned by the API server.
+message Object {
+  // metadata.namespace; empty for cluster-scoped kinds.
+  string namespace = 1;
+  // metadata.name.
+  string name = 2;
+  // metadata.resourceVersion, opaque; carried for Phase 2 optimistic
+  // concurrency and Phase 3 watch bookmarks.
+  string resource_version = 3;
+  // The full object as JSON, exactly as serialised by the API server. The
+  // receiver must treat this as untrusted input and bounds-check it.
+  bytes json = 4;
+}
+
+message GetRequest {
+  GroupVersionKind gvk = 1;
+  // Required for namespaced kinds, must be empty for cluster-scoped kinds.
+  string namespace = 2;
+  string name = 3;
+}
+
+message GetResponse {
+  Object object = 1;
+}
+
+message ListRequest {
+  GroupVersionKind gvk = 1;
+  // Empty means all namespaces.
+  string namespace = 2;
+  // If non-empty, only the object with exactly this name is returned
+  // (server-side metadata.name field selector).
+  string name = 3;
+}
+
+message ListResponse {
+  repeated Object objects = 1;
+  // resourceVersion of the list itself, usable as a watch start point.
+  string resource_version = 2;
 }

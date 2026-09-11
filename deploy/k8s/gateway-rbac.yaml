@@ -1,0 +1,36 @@
+# Least-privilege identity for the Axiom gateway (docs/RULES.md §3).
+# Phase 1 serves read-only Pods, so exactly `get` and `list` on `pods`, cluster
+# wide. Later phases append verbs/resources here as they land (watch in Phase 3,
+# create/update/delete in Phase 2); nothing is ever granted ahead of need.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: axiom-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: axiom-gateway
+  namespace: axiom-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: axiom-gateway-read
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: axiom-gateway-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: axiom-gateway-read
+subjects:
+  - kind: ServiceAccount
+    name: axiom-gateway
+    namespace: axiom-system

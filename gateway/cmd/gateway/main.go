@@ -22,6 +22,7 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
 	axiomv1 "github.com/dhilipkumars/axiom/gateway/gen/axiom/v1"
+	"github.com/dhilipkumars/axiom/gateway/internal/k8s"
 	"github.com/dhilipkumars/axiom/gateway/internal/server"
 	"github.com/dhilipkumars/axiom/gateway/internal/tlsconfig"
 )
@@ -42,11 +43,34 @@ func run(ctx context.Context, args []string, stderr *os.File) error {
 	listen := fs.String("listen", ":8443", "TCP address to listen on")
 	certPath := fs.String("tls-cert", "", "path to PEM server certificate (required)")
 	keyPath := fs.String("tls-key", "", "path to PEM server private key (required)")
+	kubeconfig := fs.String("kubeconfig", "", "path to a kubeconfig; empty means in-cluster config")
+	noCluster := fs.Bool("no-cluster", false, "serve Ping only; Get/List fail with FAILED_PRECONDITION (Phase 0 plumbing mode)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	logger := slog.New(slog.NewJSONHandler(stderr, nil))
+
+	// Cluster access is explicit: either credentials load successfully or the
+	// operator opted into --no-cluster. A silently unconfigured gateway would
+	// turn every SELECT into a misleading error (docs/RULES.md §1).
+	var client k8s.Client
+	if *noCluster {
+		client = k8s.Unconfigured{}
+		logger.Warn("running with --no-cluster: Get/List will fail with FAILED_PRECONDITION")
+	} else {
+		cfg, err := k8s.Config(*kubeconfig)
+		if err != nil {
+			return fmt.Errorf("%w (pass --no-cluster to run without cluster access)", err)
+		}
+		// Never log the loaded config: it holds the bearer token / client key.
+		dyn, err := k8s.NewFromConfig(cfg)
+		if err != nil {
+			return err
+		}
+		client = dyn
+		logger.Info("kubernetes client configured", "api_server", cfg.Host)
+	}
 
 	tlsCfg, err := tlsconfig.Load(*certPath, *keyPath)
 	if err != nil {
@@ -59,7 +83,7 @@ func run(ctx context.Context, args []string, stderr *os.File) error {
 	}
 
 	gs := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsCfg)))
-	axiomv1.RegisterGatewayServiceServer(gs, server.New(version, nil))
+	axiomv1.RegisterGatewayServiceServer(gs, server.New(version, nil, client, logger))
 	hs := health.NewServer()
 	hs.SetServingStatus(axiomv1.GatewayService_ServiceDesc.ServiceName, healthpb.HealthCheckResponse_SERVING)
 	healthpb.RegisterHealthServer(gs, hs)

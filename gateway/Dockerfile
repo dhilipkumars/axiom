@@ -1,6 +1,6 @@
 # Build context: repository root (needs gateway/ only, kept root-relative so
 # both images build with the same `docker compose build`).
-FROM golang:1.25-bookworm AS build
+FROM golang:1.26-bookworm AS build
 WORKDIR /src
 COPY gateway/go.mod gateway/go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download

@@ -46,19 +46,30 @@ connectivity from the cluster.
  └──────────────────────────┘                   └────────────────────────────────┘
 ```
 
-## Current status: Phase 0 (skeleton and plumbing)
+## Current status: Phase 1 (read-only Pods, on-demand)
 
-Phase 0 proves the Postgres ↔ gateway boundary works before any Kubernetes code
-exists. There is no `kind` cluster, no foreign table, and no `client-go` yet.
-What exists and is tested end to end:
+Phase 0 proved the Postgres ↔ gateway boundary; Phase 1 puts the first real
+Kubernetes data behind SQL. There is no cache or watch yet (Phase 3) and no
+writes (Phase 2). What exists and is tested end to end:
 
 | Component | Path | What it does today |
 |---|---|---|
-| Protobuf API | [proto/axiom/v1/axiom.proto](proto/axiom/v1/axiom.proto) | `GatewayService.Ping` only |
-| Gateway (Go) | [gateway/](gateway/) | TLS-only gRPC server that answers `Ping`. There is deliberately no plaintext mode |
-| Extension (Rust, pgrx) | [extension/](extension/) | `axiom.*` settings plus a background worker that pings the gateway over TLS on a timer and logs the outcome |
-| Local stack | [deploy/compose/](deploy/compose/) | One `docker compose up` brings up gateway + Postgres with a throwaway CA |
-| E2E test | [e2e/ping_test.sh](e2e/ping_test.sh) | Starts the stack via [e2e/lib/stack.sh](e2e/lib/stack.sh), runs `CREATE EXTENSION axiom`, asserts a `ping ok` round-trip and TLS 1.3 |
+| Protobuf API | [proto/axiom/v1/axiom.proto](proto/axiom/v1/axiom.proto) | `Ping`, `Get`, `List` (generic GVK + raw object JSON) |
+| Gateway (Go) | [gateway/](gateway/) | TLS-only gRPC server; `Get`/`List` over `client-go`'s dynamic client behind a narrow interface; Pods only; runs under a least-privilege ServiceAccount ([deploy/k8s/gateway-rbac.yaml](deploy/k8s/gateway-rbac.yaml)) |
+| Extension (Rust, pgrx) | [extension/](extension/) | `axiom_fdw` foreign data wrapper: `CREATE SERVER` + `CREATE FOREIGN TABLE ... OPTIONS (resource 'pods')`, `namespace`/`name` qual pushdown, typed columns plus `raw jsonb`, FDW SQLSTATEs on failure; plus the Phase 0 background pinger |
+| Local stack | [deploy/compose/](deploy/compose/) | Base stack (no cluster) and a kind overlay that gives the gateway a kubeconfig |
+| E2E | [e2e/ping_test.sh](e2e/ping_test.sh), [e2e/pods_test.sh](e2e/pods_test.sh) | Phase 0 and Phase 1 gates on the shared setup libraries in [e2e/lib/](e2e/lib/) |
+
+```sql
+CREATE EXTENSION axiom;
+CREATE SERVER kind FOREIGN DATA WRAPPER axiom_fdw
+  OPTIONS (endpoint 'https://gateway:8443', ca_cert '/certs/ca.crt');
+CREATE FOREIGN TABLE k8s_pods (name text, namespace text, phase text, node text, raw jsonb)
+  SERVER kind OPTIONS (resource 'pods');
+
+SELECT name, phase, node FROM k8s_pods WHERE namespace = 'kube-system';
+SELECT raw->'metadata'->>'uid' FROM k8s_pods WHERE namespace = 'default' AND name = 'web-0';
+```
 
 The rest of this README walks you through building, running, and testing it.
 
@@ -71,13 +82,14 @@ the components natively you also need the Go and Rust toolchains.
 
 - Docker Desktop or Docker Engine with Compose v2 (`docker compose version`)
 - `bash`, `git`, `make`
+- For the Phase 1 test: [`kind`](https://kind.sigs.k8s.io) and `kubectl`
 
 ### Full developer setup
 
 **Go side**
 
 ```sh
-# Go 1.25+  (https://go.dev/dl)
+# Go 1.26+  (https://go.dev/dl); client-go v0.37 requires it
 go version
 
 # buf (proto lint + codegen) and golangci-lint v2
@@ -111,44 +123,62 @@ below take `PG=pg16` (or `pg14`, `pg15`, `pg17`) to match.
 ```sh
 git clone https://github.com/dhilipkumars/axiom.git
 cd axiom
-git checkout phase-0      # until PR #3 is merged into main
+git checkout phase-1      # until the Phase 1 PR is merged into main
 ```
 
-## 3. Run Phase 0 end to end (the thing to try first)
+## 3. Run the E2E gates (the thing to try first)
 
-This is fully automated and needs only Docker:
+Both are fully automated. Phase 0 needs only Docker:
 
 ```sh
 make e2e-ping        # alias: make e2e-phase0
 ```
 
+Phase 1 also needs `kind` and `kubectl`; it creates a cluster named `axiom-e2e`,
+applies the least-privilege RBAC and three fixture Pods, and deletes the
+cluster afterwards:
+
+```sh
+make e2e-pods        # alias: make e2e-phase1
+make e2e             # both gates, oldest first
+```
+
 The first run builds two images and takes several minutes (it compiles
 `cargo-pgrx` and the extension inside Docker). Subsequent runs reuse build
-caches and take about a minute. You should see:
+caches and take about a minute. You should see, for the pods test:
 
 ```
+==> creating kind cluster axiom-e2e
+==> applying least-privilege gateway RBAC
 ==> building and starting stack
-==> CREATE EXTENSION axiom
-axiom_version() = 0.1.0
-==> asserting the worker reads the configured gateway endpoint
-==> asserting background worker is registered
-==> waiting up to 90s for a successful Ping round-trip
-postgres-1  | ... LOG:  axiom bgworker: ping ok endpoint=https://gateway:8443 gateway_version=dev
-==> asserting the gateway serves TLS 1.3 with the generated CA
-==> PING E2E PASSED
-==> tearing down
+==> applying fixture pods and waiting for Ready
+==> defining server and foreign table
+==> namespace scan matches kubectl
+db-0|Running
+web-0|Running
+web-1|Running
+==> point get matches kubectl (name, node, uid via raw jsonb)
+==> quals were pushed down to the gateway (namespace + name), not filtered locally
+==> local (non-pushed) quals still apply: phase filter and label via raw
+==> nonexistent pod is an empty result, not an error
+==> RBAC is least-privilege: the gateway identity cannot read secrets or list namespaces
+==> gateway down: SELECT raises fdw_unable_to_establish_connection, then recovers
+==> PODS E2E PASSED
 ```
 
 Knobs: `E2E_TIMEOUT_SECS=120` to wait longer on a slow machine, `E2E_KEEP=1` to
-leave the stack running afterwards so you can poke at it (see next section),
-`E2E_NO_BUILD=1` to reuse already-built images.
+leave the compose stack running afterwards so you can poke at it (see next section),
+`E2E_KIND_KEEP=1` to keep the kind cluster, `E2E_NO_BUILD=1` to reuse already-built images.
 
 ## 4. Poke at the running stack by hand
 
-Bring the stack up and leave it running:
+Bring the stack up and leave it running. With the pods test you get a real
+cluster behind it:
 
 ```sh
-make up          # or: E2E_KEEP=1 make e2e-ping
+E2E_KEEP=1 E2E_KIND_KEEP=1 make e2e-pods
+# or, without a cluster (Ping only):
+make up
 ```
 
 Open a SQL session inside the Postgres container:
@@ -172,6 +202,18 @@ SHOW axiom.rpc_timeout_secs;
 
 -- The worker is a real Postgres process, visible like any backend
 SELECT pid, backend_type, backend_start FROM pg_stat_activity WHERE backend_type = 'axiom gateway pinger';
+
+-- With the kind stack: query the cluster (the E2E already created server + table)
+SELECT name, phase, node FROM k8s_pods WHERE namespace = 'kube-system' ORDER BY 1;
+SELECT name, raw->'status'->>'podIP' FROM k8s_pods WHERE namespace = 'axiom-e2e' AND name = 'web-0';
+EXPLAIN SELECT name FROM k8s_pods WHERE namespace = 'axiom-e2e';   -- plans without contacting the gateway
+```
+
+Watch the gateway log to see pushdown in action: each `List` logs the namespace
+and name filters it received:
+
+```sh
+docker compose -f deploy/compose/docker-compose.yml logs -f gateway | grep '"msg":"list"'
 ```
 
 Watch the worker's log lines from another terminal:
@@ -198,10 +240,12 @@ ALTER SYSTEM SET axiom.ping_interval_secs = 5;
 SELECT pg_reload_conf();
 ```
 
-Tear everything down (this also deletes the generated certificates):
+Tear everything down (this also deletes the generated certificates and, if you
+kept it, the kind cluster):
 
 ```sh
 make down
+kind delete cluster --name axiom-e2e
 ```
 
 ## 5. Build and test the components natively
@@ -245,7 +289,15 @@ cd gateway && go run ./cmd/gateway -listen 127.0.0.1:8443
 
 ## 6. Configuring the extension outside compose
 
-The background worker only starts when the library is preloaded. `CREATE
+**Foreign server and tables** are ordinary FDW DDL. Server options: `endpoint`
+(required, `https://` only), `ca_cert` (PEM path; default is the webpki root
+store), `rpc_timeout_secs` (default 30). Table options: `resource` (`pods`).
+Columns are matched by name from `name`, `namespace`, `phase`, `node` (all
+`text`) and `raw` (`jsonb`); you may declare any subset. Failures surface as
+SQL errors with FDW SQLSTATEs, e.g. `HV00N` (`fdw_unable_to_establish_connection`)
+when the gateway is unreachable, which PL/pgSQL can catch by name.
+
+**The background worker** only starts when the library is preloaded. `CREATE
 EXTENSION` alone installs the SQL objects and emits a WARNING telling you the
 worker is not running, rather than silently doing nothing.
 
@@ -282,11 +334,13 @@ to alert on: `axiom bgworker: ping ok ...` at `LOG`, `axiom bgworker: ping faile
 
 ```
 proto/            axiom.v1 protobuf + buf config (Go stubs → gateway/gen, Rust stubs via build.rs)
-gateway/          Go gateway: cmd/gateway, internal/server (RPC handlers), internal/tlsconfig
-extension/        pgrx crate: src/bgworker.rs (Postgres glue), src/{config,backoff,ping}.rs (pure, unit-tested)
+gateway/          Go gateway: cmd/gateway, internal/server (RPC handlers), internal/k8s (client-go behind an interface), internal/tlsconfig
+extension/        pgrx crate: src/{fdw,bgworker,client}.rs (Postgres/network glue),
+                  src/{options,quals,pods,transport,config,backoff,ping}.rs (pure, unit-tested)
 deploy/compose/   docker-compose.yml + cert generator for the local stack
-e2e/              *_test.sh scripts (one per PLAN.md gate) + lib/stack.sh shared setup
-.github/          CI: proto drift, gateway, extension, gitleaks, e2e-ping as separate jobs
+e2e/              *_test.sh scripts (one per PLAN.md gate) + lib/{stack,kind}.sh shared setup + fixtures/
+deploy/k8s/       least-privilege RBAC for the gateway ServiceAccount
+.github/          CI: proto drift, gateway, extension, gitleaks, e2e-ping, e2e-pods as separate jobs
 docs/             DESIGN.md, PLAN.md, RULES.md
 ```
 

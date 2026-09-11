@@ -49,17 +49,29 @@ seconds. Fully automated, no real cluster involved.
 no writes yet — prove the FDW scan → unary RPC → k8s API path end to end.
 
 Tasks:
-- [ ] Gateway: `List(gvk, namespace_filter)` and `Get(gvk, namespace, name)` RPCs,
+- [x] Gateway: `List(gvk, namespace_filter)` and `Get(gvk, namespace, name)` RPCs,
   backed by `client-go` against a real cluster (start with **Pods** only).
-- [ ] Extension: `GetForeignRelSize`/`GetForeignPaths`/`IterateForeignScan` for a
+- [x] Extension: `GetForeignRelSize`/`GetForeignPaths`/`IterateForeignScan` for a
   hardcoded `k8s_pods` foreign table (typed columns: name, namespace, phase, node,
   raw jsonb).
-- [ ] Qual pushdown: `namespace = X` and `name = Y` translated to RPC filters (not
+- [x] Qual pushdown: `namespace = X` and `name = Y` translated to RPC filters (not
   fetch-all-then-filter-in-Postgres).
-- [ ] `CREATE SERVER`/`CREATE FOREIGN TABLE` DDL for `k8s_pods` against one gateway
+- [x] `CREATE SERVER`/`CREATE FOREIGN TABLE` DDL for `k8s_pods` against one gateway
   endpoint.
-- [ ] Basic error surfacing: gateway unreachable / RPC error → SQL error, not a
+- [x] Basic error surfacing: gateway unreachable / RPC error → SQL error, not a
   crash or silent empty result.
+
+Notes from implementation: `List` with a name filter is served by the gateway as a
+point `Get` (cheaper for the API server than a field-selector LIST, and a miss is an
+empty list). The FDW re-derives the pushed-down filter from `plan.qual` at
+`BeginForeignScan` rather than serialising it through `fdw_private`, which keeps one
+code path across pg14–17 node layouts. All quals stay local so Postgres re-checks
+them; pushdown only narrows the fetch. Literals that cannot be Kubernetes names
+(`WHERE name = 'Foo'`) short-circuit to zero rows without an RPC instead of becoming
+a gateway `INVALID_ARGUMENT` error. The gateway runs under a pods-`get`/`list`-only
+ServiceAccount (`deploy/k8s/gateway-rbac.yaml`); the E2E asserts it cannot read
+secrets or delete pods. The E2E is `e2e/pods_test.sh` (`make e2e-pods`, aliased as
+`make e2e-phase1`) on `e2e/lib/stack.sh` + `e2e/lib/kind.sh`.
 
 **E2E test (`e2e-phase1`)**: `kind` cluster in CI, apply a few known Pods, run
 `SELECT name, phase FROM k8s_pods WHERE namespace = 'default'` from Postgres,

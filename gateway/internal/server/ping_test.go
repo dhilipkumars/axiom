@@ -14,7 +14,7 @@ import (
 func TestPing(t *testing.T) {
 	t.Parallel()
 	fixed := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
-	srv := New("test-version", func() time.Time { return fixed })
+	srv := New("test-version", func() time.Time { return fixed }, nil, nil)
 
 	tests := []struct {
 		name      string
@@ -55,7 +55,7 @@ func TestPing(t *testing.T) {
 
 func TestNewDefaultsClock(t *testing.T) {
 	t.Parallel()
-	srv := New("v", nil)
+	srv := New("v", nil, nil, nil)
 	before := time.Now().Add(-time.Second)
 	resp, err := srv.Ping(context.Background(), &axiomv1.PingRequest{Nonce: 1})
 	if err != nil {

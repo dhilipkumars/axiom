@@ -14,6 +14,7 @@
 #   E2E_TIMEOUT_SECS  overall wait budget for stack start / log waits (default 90)
 #   E2E_KEEP=1        leave the stack running after the test (skips teardown)
 #   E2E_NO_BUILD=1    skip `--build` on `up` (reuse existing images)
+#   E2E_COMPOSE_OVERLAYS  extra compose files layered over the base stack
 
 # Guard against double-sourcing.
 [[ -n "${_AXIOM_E2E_STACK_LIB:-}" ]] && return 0
@@ -21,6 +22,8 @@ _AXIOM_E2E_STACK_LIB=1
 
 E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 E2E_COMPOSE_FILE="${E2E_COMPOSE_FILE:-$E2E_ROOT/deploy/compose/docker-compose.yml}"
+# Space-separated extra compose files layered over the base (e.g. the kind overlay).
+E2E_COMPOSE_OVERLAYS="${E2E_COMPOSE_OVERLAYS:-}"
 E2E_TIMEOUT_SECS="${E2E_TIMEOUT_SECS:-90}"
 E2E_KEEP="${E2E_KEEP:-0}"
 E2E_NO_BUILD="${E2E_NO_BUILD:-0}"
@@ -41,7 +44,11 @@ fail() { printf '\nE2E FAILED: %s\n' "$*" >&2; stack_dump; exit 1; }
 
 # --- compose wrapper --------------------------------------------------------
 
-compose() { docker compose -f "$E2E_COMPOSE_FILE" "$@"; }
+compose() {
+  local files=(-f "$E2E_COMPOSE_FILE") f
+  for f in $E2E_COMPOSE_OVERLAYS; do files+=(-f "$f"); done
+  docker compose "${files[@]}" "$@"
+}
 
 # stack_dump: print gateway logs and the extension's Postgres log lines.
 stack_dump() {
@@ -57,11 +64,20 @@ stack_down() {
   compose down -v --remove-orphans >/dev/null 2>&1 || true
 }
 
+# Extra teardown commands registered by tests/libraries, run after stack_down.
+E2E_TEARDOWN_HOOKS=()
+e2e_on_teardown() { E2E_TEARDOWN_HOOKS+=("$1"); }
+e2e_teardown() {
+  stack_down
+  local h
+  for h in ${E2E_TEARDOWN_HOOKS[@]+"${E2E_TEARDOWN_HOOKS[@]}"}; do "$h"; done
+}
+
 # stack_up: build (unless E2E_NO_BUILD=1) and start the stack, waiting until
 # Postgres reports healthy. Registers stack_down to run on exit.
 stack_up() {
   # Preserve the script's exit status across teardown (bash 3.2 compatible).
-  trap 'rc=$?; stack_down; exit $rc' EXIT
+  trap 'rc=$?; e2e_teardown; exit $rc' EXIT
   local build="--build"
   [[ "$E2E_NO_BUILD" == "1" ]] && build=""
   log "building and starting stack"
