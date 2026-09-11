@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -40,6 +41,10 @@ type Client interface {
 	Update(ctx context.Context, gvk schema.GroupVersionKind, namespace string, obj *unstructured.Unstructured) (*unstructured.Unstructured, error)
 	// Delete deletes by name.
 	Delete(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) error
+	// Watch opens a watch from resourceVersion (empty = from now) with
+	// bookmarks enabled. The returned watcher's channel closes when the API
+	// server ends the watch; callers re-watch from the last seen version.
+	Watch(ctx context.Context, gvk schema.GroupVersionKind, namespace, resourceVersion string) (watch.Interface, error)
 }
 
 // ErrUnsupportedKind is returned for a GVK the gateway does not serve.
@@ -185,6 +190,15 @@ func (c *Dynamic) Delete(ctx context.Context, gvk schema.GroupVersionKind, names
 	return ri.Delete(ctx, name, metav1.DeleteOptions{})
 }
 
+// Watch implements Client.
+func (c *Dynamic) Watch(ctx context.Context, gvk schema.GroupVersionKind, namespace, resourceVersion string) (watch.Interface, error) {
+	ri, err := c.resourceFor(gvk, namespace)
+	if err != nil {
+		return nil, err
+	}
+	return ri.Watch(ctx, metav1.ListOptions{ResourceVersion: resourceVersion, AllowWatchBookmarks: true})
+}
+
 // fieldManager identifies Axiom's writes in managedFields so operators can
 // see which fields SQL last set.
 const fieldManager = "axiom"
@@ -217,4 +231,9 @@ func (Unconfigured) Update(context.Context, schema.GroupVersionKind, string, *un
 // Delete implements Client.
 func (Unconfigured) Delete(context.Context, schema.GroupVersionKind, string, string) error {
 	return ErrNoCluster
+}
+
+// Watch implements Client.
+func (Unconfigured) Watch(context.Context, schema.GroupVersionKind, string, string) (watch.Interface, error) {
+	return nil, ErrNoCluster
 }

@@ -6,6 +6,7 @@
 use std::fmt;
 use std::time::Duration;
 
+use crate::cache::CacheMode;
 use crate::kinds::Kind;
 use crate::transport::{Target, TargetError};
 
@@ -37,6 +38,8 @@ pub struct ServerOptions {
 pub struct TableOptions {
     /// Which kind this table maps to (`resource`).
     pub resource: Kind,
+    /// `cache_mode`: serve scans from the watch cache or always via RPC.
+    pub cache_mode: CacheMode,
 }
 
 /// Why an option list was rejected. Every variant names the offending option
@@ -55,6 +58,8 @@ pub enum OptionsError {
     Timeout(String),
     /// `resource` names a kind we do not serve.
     Resource(String),
+    /// `cache_mode` is not `on_demand` or `watch`.
+    CacheMode(String),
 }
 
 impl fmt::Display for OptionsError {
@@ -77,6 +82,10 @@ impl fmt::Display for OptionsError {
                 "option \"resource\" {v:?} is not supported; valid values: {}",
                 Kind::NAMES.join(", ")
             ),
+            Self::CacheMode(v) => write!(
+                f,
+                "option \"cache_mode\" {v:?} is not supported; valid values: on_demand, watch"
+            ),
         }
     }
 }
@@ -84,7 +93,7 @@ impl fmt::Display for OptionsError {
 impl std::error::Error for OptionsError {}
 
 const SERVER_OPTIONS: &[&str] = &["endpoint", "ca_cert", "rpc_timeout_secs"];
-const TABLE_OPTIONS: &[&str] = &["resource"];
+const TABLE_OPTIONS: &[&str] = &["resource", "cache_mode"];
 const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn allowed(catalog: Catalog) -> String {
@@ -154,7 +163,14 @@ impl TableOptions {
         check_names(Catalog::Table, opts)?;
         let raw = get(opts, "resource").ok_or(OptionsError::Missing("resource"))?;
         let resource = Kind::parse(raw).ok_or_else(|| OptionsError::Resource(raw.to_owned()))?;
-        Ok(Self { resource })
+        let cache_mode = match get(opts, "cache_mode") {
+            None => CacheMode::OnDemand,
+            Some(v) => CacheMode::parse(v).ok_or_else(|| OptionsError::CacheMode(v.to_owned()))?,
+        };
+        Ok(Self {
+            resource,
+            cache_mode,
+        })
     }
 }
 
@@ -242,7 +258,8 @@ mod tests {
         assert_eq!(
             TableOptions::parse(&o(&[("resource", "pods")])),
             Ok(TableOptions {
-                resource: Kind::Pods
+                resource: Kind::Pods,
+                cache_mode: CacheMode::OnDemand
             })
         );
         assert_eq!(
@@ -260,6 +277,20 @@ mod tests {
                 name: "schema".into()
             })
         );
+    }
+
+    #[test]
+    fn table_cache_mode() {
+        let t = TableOptions::parse(&o(&[("resource", "pods"), ("cache_mode", "watch")]))
+            .expect("valid");
+        assert_eq!(t.cache_mode, CacheMode::Watch);
+        assert_eq!(
+            TableOptions::parse(&o(&[("resource", "pods"), ("cache_mode", "live")])),
+            Err(OptionsError::CacheMode("live".into()))
+        );
+        assert!(OptionsError::CacheMode("x".into())
+            .to_string()
+            .contains("on_demand, watch"));
     }
 
     #[test]

@@ -41,12 +41,14 @@ use std::ffi::{c_char, c_int, c_void, CStr};
 use pgrx::prelude::*;
 use pgrx::{pg_sys, JsonB, PgList, PgMemoryContexts};
 
+use crate::cache::{decide_tier, CacheMode, Tier};
 use crate::client::{self, ClientError, ErrorClass};
 use crate::kinds::{
     self, Cell, DecodeError, Kind, NewCell, NewRow, Row, SqlType, WriteError, MAX_OBJECT_BYTES,
 };
 use crate::options::{self, Catalog, OptionsError, ServerOptions, TableOptions};
 use crate::quals::{Filter, Qual};
+use crate::shmem::{self, ShmemError};
 
 // --- SQL surface --------------------------------------------------------------
 
@@ -125,9 +127,10 @@ fn options_sqlstate(e: &OptionsError) -> PgSqlErrorCode {
             PgSqlErrorCode::ERRCODE_FDW_INVALID_OPTION_NAME
         }
         OptionsError::Missing(_) => PgSqlErrorCode::ERRCODE_FDW_OPTION_NAME_NOT_FOUND,
-        OptionsError::Endpoint(_) | OptionsError::Timeout(_) | OptionsError::Resource(_) => {
-            PgSqlErrorCode::ERRCODE_FDW_INVALID_ATTRIBUTE_VALUE
-        }
+        OptionsError::Endpoint(_)
+        | OptionsError::Timeout(_)
+        | OptionsError::Resource(_)
+        | OptionsError::CacheMode(_) => PgSqlErrorCode::ERRCODE_FDW_INVALID_ATTRIBUTE_VALUE,
     }
 }
 
@@ -201,6 +204,7 @@ unsafe fn options_from_list(list: *mut pg_sys::List) -> Vec<(String, String)> {
 struct ScanConfig {
     server: ServerOptions,
     kind: Kind,
+    cache_mode: CacheMode,
 }
 
 /// Loads and validates server + table options for a foreign table.
@@ -220,6 +224,7 @@ unsafe fn scan_config(foreigntableid: pg_sys::Oid) -> ScanConfig {
         ScanConfig {
             server,
             kind: table.resource,
+            cache_mode: table.cache_mode,
         }
     }
 }
@@ -608,10 +613,73 @@ unsafe extern "C" fn begin_foreign_scan(node: *mut pg_sys::ForeignScanState, efl
     }
 }
 
-/// Fetches all matching rows with one RPC (or none, for an impossible filter).
+/// Tries to serve a `cache_mode 'watch'` scan from the shared-memory cache.
+/// Returns `None` to fall through to an RPC: no subscription yet (one is
+/// requested), still syncing, or the cache infrastructure is unavailable
+/// (with a WARNING so the fallback is never silent).
+fn fetch_from_cache(state: &ScanState) -> Option<VecDeque<Row>> {
+    let ns = state.filter.namespace.as_deref().unwrap_or("");
+    let name = state.filter.name.as_deref().unwrap_or("");
+    let looked_up = shmem::lookup_or_request(
+        &state.config.server.target,
+        state.config.server.rpc_timeout,
+        state.config.kind,
+        ns,
+    );
+    let (slot, id, sub_state) = match looked_up {
+        Ok(x) => x,
+        Err(e @ (ShmemError::NotAvailable | ShmemError::Full)) => {
+            warning!("axiom: cache_mode 'watch' unavailable ({e}); serving this scan on demand");
+            return None;
+        }
+        Err(e) => {
+            warning!("axiom: watch lookup failed ({e}); serving this scan on demand");
+            return None;
+        }
+    };
+    let tier = decide_tier(CacheMode::Watch, Some(sub_state));
+    if tier == Tier::OnDemand {
+        return None;
+    }
+    match shmem::scan(slot, id, ns, name) {
+        Ok(objects) => {
+            if tier == Tier::Stale {
+                // Never mask staleness (docs/DESIGN.md §5.3): say so on every scan.
+                let reason = shmem::status()
+                    .ok()
+                    .and_then(|rows| {
+                        rows.into_iter().find(|r| {
+                            r.endpoint == state.config.server.target.endpoint
+                                && r.resource == state.config.kind.resource_name()
+                                && r.namespace == ns
+                        })
+                    })
+                    .map_or_else(String::new, |r| r.reason);
+                warning!(
+                    "axiom: serving STALE data for {} from the watch cache: the watch is DEGRADED ({reason}); see axiom_watch_status()",
+                    state.config.kind.resource_name()
+                );
+            }
+            Some(decode_rows(state.config.kind, &objects))
+        }
+        Err(e) => {
+            warning!("axiom: cache read failed ({e}); serving this scan on demand");
+            None
+        }
+    }
+}
+
+/// Fetches all matching rows: from the watch cache when the table is in
+/// `cache_mode 'watch'` and its subscription is servable, otherwise with one
+/// RPC (or none, for an impossible filter).
 fn fetch_rows(state: &ScanState) -> VecDeque<Row> {
     if state.filter.impossible {
         return VecDeque::new();
+    }
+    if state.config.cache_mode == CacheMode::Watch {
+        if let Some(rows) = fetch_from_cache(state) {
+            return rows;
+        }
     }
     match client::list(&state.config.server, state.config.kind, &state.filter) {
         Ok(objects) => decode_rows(state.config.kind, &objects),

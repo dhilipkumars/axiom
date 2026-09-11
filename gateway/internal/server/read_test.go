@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/watch"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/scheme"
 
@@ -160,6 +161,10 @@ func (e errClient) Update(context.Context, schema.GroupVersionKind, string, *uns
 
 func (e errClient) Delete(context.Context, schema.GroupVersionKind, string, string) error {
 	return e.err
+}
+
+func (e errClient) Watch(context.Context, schema.GroupVersionKind, string, string) (watch.Interface, error) {
+	return nil, e.err
 }
 
 func TestErrorMapping(t *testing.T) {

@@ -134,6 +134,7 @@ Both are fully automated. Phase 0 needs only Docker:
 make e2e-ping        # Phase 0 gate (alias: make e2e-phase0), Docker only
 make e2e-pods        # Phase 1 gate (alias: make e2e-phase1), needs kind + kubectl
 make e2e-configmaps  # Phase 2 gate (alias: make e2e-phase2), needs kind + kubectl
+make e2e-watch       # Phase 3 gate (alias: make e2e-phase3), needs kind + kubectl
 make e2e             # all gates, oldest first
 ```
 
@@ -237,6 +238,21 @@ UPDATE k8s_configmaps SET data = data || '{"LOG_LEVEL":"debug"}' WHERE namespace
 DELETE FROM k8s_configmaps WHERE namespace = 'default' AND name = 'app';
 ```
 
+Live tables. Add `cache_mode 'watch'` to serve a table from the shared-memory
+cache instead of an RPC per scan. The first scan is served on demand and starts
+the watch; once `axiom_watch_status()` shows `ACTIVE`, scans read the cache and
+kubectl-side changes appear within watch latency. If the gateway goes away the
+subscription turns `DEGRADED` and the cache is still served, with a `WARNING` on
+every scan; when it returns the stream resumes from its bookmark. Change
+notifications: `LISTEN axiom_events;` in the database named by
+`axiom.notify_database` (payload: `{"server","resource","namespace","name","type"}`).
+
+```sql
+CREATE FOREIGN TABLE k8s_pods_live (name text, namespace text, phase text, node text, raw jsonb)
+  SERVER kind OPTIONS (resource 'pods', cache_mode 'watch');
+SELECT * FROM axiom_watch_status();
+```
+
 Any subset of a kind's columns may be declared, but UPDATE/DELETE need the
 `raw jsonb` column: it carries the object's identity and the `resourceVersion`
 the row was read at. If the object changed between your read and your write,
@@ -337,9 +353,11 @@ axiom.gateway_endpoint   = 'https://gateway:8443'   # https only; embedded user:
 axiom.gateway_ca_cert    = '/certs/ca.crt'          # optional; default is the Mozilla webpki root store
 axiom.ping_interval_secs = 10                        # must exceed rpc_timeout_secs
 axiom.rpc_timeout_secs   = 5
+axiom.notify_database    = 'postgres'   # where the worker sends NOTIFY axiom_events
+axiom.cache_size_mb      = 256          # bound on the shared-memory watch cache
 ```
 
-All four are `SIGHUP`-reloadable. Log lines use a stable prefix so they are easy
+The first four are `SIGHUP`-reloadable; the last two apply at worker start. Log lines use a stable prefix so they are easy
 to alert on: `axiom bgworker: ping ok ...` at `LOG`, `axiom bgworker: ping failed
 ...` at `WARNING`.
 
