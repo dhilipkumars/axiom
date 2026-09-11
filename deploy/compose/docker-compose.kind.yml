@@ -16,7 +16,8 @@ services:
       - /kube/config
     volumes:
       - certs:/certs:ro
-      - ${E2E_KUBE_DIR:?set E2E_KUBE_DIR to the directory holding the gateway kubeconfig}:/kube:ro
+      # Mount only the gateway kubeconfig, never the admin one beside it.
+      - ${E2E_KUBE_DIR:?set E2E_KUBE_DIR to the directory holding the gateway kubeconfig}/config:/kube/config:ro
     networks:
       - default
       - kind

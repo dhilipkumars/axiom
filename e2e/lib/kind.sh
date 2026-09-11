@@ -41,7 +41,10 @@ kind_down() {
 kind_up() {
   command -v kind >/dev/null || fail "kind is not installed"
   command -v kubectl >/dev/null || fail "kubectl is not installed"
-  mkdir -p "$E2E_KUBE_DIR" && chmod 0700 "$E2E_KUBE_DIR"
+  # 0755: the gateway container runs as uid 65532 and must traverse this
+  # directory through the bind mount on Linux. Only the gateway kubeconfig is
+  # world-readable; the admin kubeconfig stays 0600.
+  mkdir -p "$E2E_KUBE_DIR" && chmod 0755 "$E2E_KUBE_DIR"
   if ! kind get clusters 2>/dev/null | grep -qx "$E2E_KIND_CLUSTER"; then
     log "creating kind cluster $E2E_KIND_CLUSTER"
     kind create cluster --name "$E2E_KIND_CLUSTER" --wait 120s >/dev/null || fail "kind create cluster failed"
@@ -68,7 +71,7 @@ kind_up() {
   kubectl --kubeconfig "$E2E_GATEWAY_KUBECONFIG" config use-context kind >/dev/null
   # Readable by the gateway container's non-root uid via bind mount. Test-only:
   # a 1h token for a pods-read-only ServiceAccount in a disposable cluster,
-  # inside a 0700 directory that is gitignored.
+  # inside a gitignored directory; only this file is mounted into the container.
   chmod 0644 "$E2E_GATEWAY_KUBECONFIG"
   rm -f "$ca"
   unset token
