@@ -16,7 +16,8 @@ use tonic::transport::Channel;
 use crate::options::ServerOptions;
 use crate::proto::v1::gateway_service_client::GatewayServiceClient;
 use crate::proto::v1::{
-    CreateRequest, DeleteRequest, GroupVersionKind, ListRequest, UpdateRequest,
+    CreateRequest, DeleteRequest, GroupVersionKind, KindSchema, ListKindsRequest, ListRequest,
+    UpdateRequest,
 };
 use crate::quals::Filter;
 use crate::resource::Resource;
@@ -223,6 +224,28 @@ pub fn update(
     };
     call(server, |mut c| async move { c.update(req).await })
         .map(|resp| resp.object.map(|o| o.json).unwrap_or_default())
+}
+
+/// Enumerates the kinds the gateway serves, for `IMPORT FOREIGN SCHEMA`.
+///
+/// `group` narrows to one API group when `Some` (the empty string being the
+/// core group, which is why this is an `Option` rather than a bare `&str`).
+/// `plurals` narrows to an explicit set; a name matching nothing is simply
+/// absent from the result rather than an error.
+///
+/// This is the only RPC the extension makes outside a scan or a write, and it
+/// happens at DDL time only: the generated tables carry their identity in
+/// options, so no later query depends on discovery.
+pub fn list_kinds(
+    server: &ServerOptions,
+    group: Option<&str>,
+    plurals: &[String],
+) -> Result<Vec<KindSchema>, ClientError> {
+    let req = ListKindsRequest {
+        group: group.map(ToOwned::to_owned),
+        plurals: plurals.to_vec(),
+    };
+    call(server, |mut c| async move { c.list_kinds(req).await }).map(|resp| resp.kinds)
 }
 
 /// Deletes one object by identity.

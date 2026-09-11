@@ -18,6 +18,7 @@ pub mod cache;
 pub mod client;
 pub mod config;
 pub mod fdw;
+pub mod import;
 pub mod options;
 pub mod ping;
 pub mod proto;

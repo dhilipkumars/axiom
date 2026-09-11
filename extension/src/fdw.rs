@@ -43,6 +43,7 @@ use pgrx::{pg_sys, JsonB, PgList, PgMemoryContexts};
 
 use crate::cache::{decide_tier, CacheMode, Tier};
 use crate::client::{self, ClientError, ErrorClass};
+use crate::import::{self, ImportColumn, ImportKind, ImportOptions};
 use crate::options::{self, Catalog, OptionsError, ServerOptions, TableOptions};
 use crate::quals::{Filter, Qual};
 use crate::resource::Resource;
@@ -76,6 +77,7 @@ fn axiom_fdw_handler() -> PgBox<pg_sys::FdwRoutine> {
         routine.ExecForeignUpdate = Some(exec_foreign_update);
         routine.ExecForeignDelete = Some(exec_foreign_delete);
         routine.EndForeignModify = Some(end_foreign_modify);
+        routine.ImportForeignSchema = Some(import_foreign_schema);
         routine.into_pg_boxed()
     }
 }
@@ -1025,4 +1027,208 @@ unsafe extern "C" fn end_foreign_modify(
     _rinfo: *mut pg_sys::ResultRelInfo,
 ) {
     // State is owned by the per-query memory context (see begin_foreign_modify).
+}
+
+// --- IMPORT FOREIGN SCHEMA ---------------------------------------------------------
+//
+// The only place the extension asks the gateway about schema. It runs at DDL
+// time and writes the resolved identity into each generated table's options, so
+// no scan ever needs discovery.
+
+/// Reads `IMPORT FOREIGN SCHEMA ... OPTIONS (...)`.
+///
+/// Accepts `cache_mode` (applied to every generated table that the API server
+/// will actually watch) and `prefix` (prepended to each table name, so two
+/// clusters can be imported into one schema).
+fn import_options(opts: &[(String, String)]) -> ImportOptions {
+    let mut out = ImportOptions::default();
+    for (k, v) in opts {
+        match k.as_str() {
+            "cache_mode" => match CacheMode::parse(v) {
+                Some(m) => out.cache_mode = m,
+                None => raise(
+                    PgSqlErrorCode::ERRCODE_FDW_INVALID_OPTION_NAME,
+                    format!("option \"cache_mode\" {v:?} is not supported; valid values: on_demand, watch"),
+                ),
+            },
+            "prefix" => {
+                if !v.is_empty() && !import::is_safe_ident(v) {
+                    raise(
+                        PgSqlErrorCode::ERRCODE_FDW_INVALID_OPTION_NAME,
+                        format!(
+                            "option \"prefix\" {v:?} is not a usable SQL identifier prefix \
+                             (lowercase letters, digits and underscores only)"
+                        ),
+                    );
+                }
+                out.prefix.clone_from(v);
+            }
+            other => raise(
+                PgSqlErrorCode::ERRCODE_FDW_INVALID_OPTION_NAME,
+                format!(
+                    "invalid option {other:?} for IMPORT FOREIGN SCHEMA: \
+                     valid options are cache_mode, prefix"
+                ),
+            ),
+        }
+    }
+    out
+}
+
+/// Converts one wire schema into the DDL generator's input.
+///
+/// The column type comes from the wire enum rather than from a name, so a
+/// gateway sending an unspecified type yields no column instead of a column
+/// Postgres would reject at `CREATE` time.
+fn import_kind_from_wire(k: &crate::proto::v1::KindSchema) -> Option<ImportKind> {
+    let gvk = k.gvk.as_ref()?;
+    let columns = k
+        .columns
+        .iter()
+        .filter_map(|c| {
+            let sql_type = match crate::proto::v1::SqlType::try_from(c.sql_type).ok()? {
+                crate::proto::v1::SqlType::Text => "text",
+                crate::proto::v1::SqlType::Jsonb => "jsonb",
+                crate::proto::v1::SqlType::Unspecified => return None,
+            };
+            Some(ImportColumn {
+                name: c.name.clone(),
+                sql_type,
+            })
+        })
+        .collect();
+    Some(ImportKind {
+        group: gvk.group.clone(),
+        version: gvk.version.clone(),
+        kind: gvk.kind.clone(),
+        plural: k.plural.clone(),
+        namespaced: k.namespaced,
+        writable: k.writable,
+        watchable: k.watchable,
+        columns,
+    })
+}
+
+/// Reads the `RangeVar` table names of a `LIMIT TO` / `EXCEPT` clause.
+unsafe fn table_names(list: *mut pg_sys::List) -> Vec<String> {
+    // SAFETY: the planner supplies a List of RangeVar for these clauses.
+    unsafe {
+        let mut out = Vec::new();
+        if list.is_null() {
+            return out;
+        }
+        let elems = (*list).elements;
+        for i in 0..usize::try_from((*list).length).unwrap_or(0) {
+            let node = (*elems.add(i)).ptr_value.cast::<pg_sys::RangeVar>();
+            if node.is_null() || (*node).relname.is_null() {
+                continue;
+            }
+            out.push(
+                CStr::from_ptr((*node).relname)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        out
+    }
+}
+
+/// Implements `IMPORT FOREIGN SCHEMA`.
+///
+/// The remote schema names an API group: `k8s` for everything this gateway
+/// serves, `core` or `v1` for the core group, or a group name verbatim. `LIMIT
+/// TO` is pushed to the gateway as a plural-name filter so the round-trip only
+/// carries what was asked for; `EXCEPT` is applied locally, since the gateway
+/// has no way to express a negative filter.
+///
+/// A kind that cannot be represented as a table is skipped with a `WARNING`
+/// naming it, and the rest of the import proceeds. Failing the whole statement
+/// because one CRD in the cluster has an unusable name would make IMPORT
+/// unusable on exactly the clusters it is most needed on.
+#[pg_guard]
+unsafe extern "C" fn import_foreign_schema(
+    stmt: *mut pg_sys::ImportForeignSchemaStmt,
+    server_oid: pg_sys::Oid,
+) -> *mut pg_sys::List {
+    // SAFETY: the planner supplies a valid statement node and server OID.
+    unsafe {
+        let server = pg_sys::GetForeignServer(server_oid);
+        let server_opts = match ServerOptions::parse(&options_from_list((*server).options)) {
+            Ok(s) => s,
+            Err(e) => raise(options_sqlstate(&e), format!("foreign server: {e}")),
+        };
+        let server_name = CStr::from_ptr((*server).servername)
+            .to_string_lossy()
+            .into_owned();
+        let remote_schema = CStr::from_ptr((*stmt).remote_schema)
+            .to_string_lossy()
+            .into_owned();
+        let local_schema = CStr::from_ptr((*stmt).local_schema)
+            .to_string_lossy()
+            .into_owned();
+        let opts = import_options(&options_from_list((*stmt).options));
+
+        let requested = table_names((*stmt).table_list);
+        let limit_to =
+            (*stmt).list_type == pg_sys::ImportForeignSchemaType::FDW_IMPORT_SCHEMA_LIMIT_TO;
+        let except = (*stmt).list_type == pg_sys::ImportForeignSchemaType::FDW_IMPORT_SCHEMA_EXCEPT;
+
+        let group = import::group_filter(&remote_schema);
+        let plurals: Vec<String> = if limit_to {
+            requested.clone()
+        } else {
+            Vec::new()
+        };
+        let kinds = match client::list_kinds(&server_opts, group.as_deref(), &plurals) {
+            Ok(k) => k,
+            Err(e) => raise_client("list_kinds", &server_opts, &e),
+        };
+
+        let mut statements = Vec::with_capacity(kinds.len());
+        for wire in &kinds {
+            let Some(kind) = import_kind_from_wire(wire) else {
+                continue;
+            };
+            if except && requested.contains(&kind.plural) {
+                continue;
+            }
+            match import::create_table_sql(&kind, &server_name, &local_schema, &opts) {
+                Ok((sql, dropped)) => {
+                    if !dropped.is_empty() {
+                        pgrx::warning!(
+                            "axiom: {} column(s) of {} were skipped and are reachable only \
+                             through \"raw\": {}",
+                            dropped.len(),
+                            kind.plural,
+                            dropped.join(", ")
+                        );
+                    }
+                    statements.push(sql);
+                }
+                Err(reason) => pgrx::warning!(
+                    "axiom: skipping {}: {reason}",
+                    if kind.plural.is_empty() {
+                        "an unnamed resource".to_owned()
+                    } else {
+                        kind.plural.clone()
+                    }
+                ),
+            }
+        }
+
+        if statements.is_empty() {
+            pgrx::warning!(
+                "axiom: no foreign tables were created for remote schema {remote_schema:?}; \
+                 the gateway serves nothing matching it (its --serve allowlist bounds what \
+                 it offers)"
+            );
+        }
+
+        let mut list: *mut pg_sys::List = std::ptr::null_mut();
+        for sql in statements {
+            let c = std::ffi::CString::new(sql).unwrap_or_default();
+            list = pg_sys::lappend(list, pg_sys::pstrdup(c.as_ptr()).cast());
+        }
+        list
+    }
 }

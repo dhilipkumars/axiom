@@ -950,3 +950,186 @@ fn stub_gateway_watch_cache_live_degraded_resync() {
     pg.batch_execute("DROP SERVER stub_w CASCADE")
         .expect("cleanup");
 }
+
+/// `IMPORT FOREIGN SCHEMA` against the stub: the generated DDL must define
+/// usable tables, and the tables it defines must then scan without any further
+/// discovery. This is the Phase 4 claim in one test.
+#[test]
+fn import_foreign_schema_generates_usable_tables() {
+    let stub = start_stub();
+    let mut pg = pg_client();
+    let ca = stub.ca_path.display();
+    let port = stub.addr.port();
+    let mut tx = pg.transaction().expect("begin");
+    tx.batch_execute(&format!(
+        "CREATE SERVER imp FOREIGN DATA WRAPPER axiom_fdw \
+           OPTIONS (endpoint 'https://localhost:{port}', ca_cert '{ca}', rpc_timeout_secs '5');
+         CREATE SCHEMA k8s;
+         IMPORT FOREIGN SCHEMA k8s FROM SERVER imp INTO k8s;"
+    ))
+    .expect("import");
+
+    // Every kind the stub serves became a table, named by its plural.
+    let tables: Vec<String> = tx
+        .query(
+            "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname = 'k8s' AND c.relkind = 'f' ORDER BY 1",
+            &[],
+        )
+        .expect("catalog")
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert_eq!(tables, vec!["configmaps", "pods", "widgets"]);
+
+    // The CRD's table carries the resolved identity, so a scan needs no discovery.
+    let opts: Vec<String> = tx
+        .query(
+            "SELECT unnest(ftoptions) FROM pg_foreign_table ft
+               JOIN pg_class c ON c.oid = ft.ftrelid
+               JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname = 'k8s' AND c.relname = 'widgets' ORDER BY 1",
+            &[],
+        )
+        .expect("options")
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert!(opts.contains(&"group=example.com".to_owned()), "{opts:?}");
+    assert!(opts.contains(&"kind=Widget".to_owned()), "{opts:?}");
+    assert!(opts.contains(&"version=v1".to_owned()), "{opts:?}");
+    assert!(opts.contains(&"resource=widgets".to_owned()), "{opts:?}");
+
+    // The promoted metadata columns and the kind's own top-level fields are there.
+    let cols: Vec<String> = tx
+        .query(
+            "SELECT a.attname FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+               JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname = 'k8s' AND c.relname = 'widgets' AND a.attnum > 0
+              ORDER BY a.attnum",
+            &[],
+        )
+        .expect("columns")
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert_eq!(
+        cols,
+        vec![
+            "name",
+            "namespace",
+            "uid",
+            "resource_version",
+            "creation_timestamp",
+            "labels",
+            "annotations",
+            "spec",
+            "status",
+            "raw"
+        ]
+    );
+
+    // An imported table scans through the ordinary path. The stub serves pods,
+    // so this exercises generated DDL end to end rather than only its text.
+    let n: i64 = tx
+        .query_one(
+            "SELECT count(*) FROM k8s.pods WHERE namespace = 'shop'",
+            &[],
+        )
+        .expect("scan imported table")
+        .get(0);
+    assert_eq!(
+        n, 2,
+        "the imported pods table must scan like a hand-written one"
+    );
+
+    tx.rollback().expect("rollback");
+}
+
+/// LIMIT TO, EXCEPT, and the import options.
+#[test]
+fn import_foreign_schema_filters_and_options() {
+    let stub = start_stub();
+    let mut pg = pg_client();
+    let ca = stub.ca_path.display();
+    let port = stub.addr.port();
+    let mut tx = pg.transaction().expect("begin");
+    tx.batch_execute(&format!(
+        "CREATE SERVER imp2 FOREIGN DATA WRAPPER axiom_fdw \
+           OPTIONS (endpoint 'https://localhost:{port}', ca_cert '{ca}', rpc_timeout_secs '5');
+         CREATE SCHEMA only_pods;
+         CREATE SCHEMA not_pods;
+         CREATE SCHEMA prefixed;
+         IMPORT FOREIGN SCHEMA k8s LIMIT TO (pods) FROM SERVER imp2 INTO only_pods;
+         IMPORT FOREIGN SCHEMA k8s EXCEPT (pods, configmaps) FROM SERVER imp2 INTO not_pods;
+         IMPORT FOREIGN SCHEMA k8s FROM SERVER imp2 INTO prefixed
+           OPTIONS (prefix 'c1_', cache_mode 'watch');"
+    ))
+    .expect("imports");
+
+    let names = |tx: &mut postgres::Transaction<'_>, schema: &str| -> Vec<String> {
+        tx.query(
+            "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname = $1 AND c.relkind = 'f' ORDER BY 1",
+            &[&schema],
+        )
+        .expect("catalog")
+        .iter()
+        .map(|r| r.get(0))
+        .collect()
+    };
+    assert_eq!(names(&mut tx, "only_pods"), vec!["pods"]);
+    assert_eq!(names(&mut tx, "not_pods"), vec!["widgets"]);
+    assert_eq!(
+        names(&mut tx, "prefixed"),
+        vec!["c1_configmaps", "c1_pods", "c1_widgets"],
+        "the prefix renames tables so two clusters can share a schema"
+    );
+
+    let opts: Vec<String> = tx
+        .query(
+            "SELECT unnest(ftoptions) FROM pg_foreign_table ft
+               JOIN pg_class c ON c.oid = ft.ftrelid
+               JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname = 'prefixed' AND c.relname = 'c1_pods'",
+            &[],
+        )
+        .expect("options")
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert!(opts.contains(&"cache_mode=watch".to_owned()), "{opts:?}");
+    assert!(
+        opts.contains(&"resource=pods".to_owned()),
+        "the prefix must not leak into the resource option: {opts:?}"
+    );
+
+    tx.rollback().expect("rollback");
+}
+
+/// An import option that is not understood must fail the statement rather than
+/// silently producing tables configured differently than asked.
+#[test]
+fn import_foreign_schema_rejects_unknown_options() {
+    let stub = start_stub();
+    let mut pg = pg_client();
+    let ca = stub.ca_path.display();
+    let port = stub.addr.port();
+    let mut tx = pg.transaction().expect("begin");
+    tx.batch_execute(&format!(
+        "CREATE SERVER imp3 FOREIGN DATA WRAPPER axiom_fdw \
+           OPTIONS (endpoint 'https://localhost:{port}', ca_cert '{ca}', rpc_timeout_secs '5');
+         CREATE SCHEMA bad;"
+    ))
+    .expect("ddl");
+    let err = tx
+        .batch_execute("IMPORT FOREIGN SCHEMA k8s FROM SERVER imp3 INTO bad OPTIONS (nonsense 'x')")
+        .expect_err("unknown option should fail");
+    let msg = err
+        .as_db_error()
+        .map_or_else(|| err.to_string(), |e| e.message().to_owned());
+    assert!(
+        msg.contains("nonsense") && msg.contains("cache_mode, prefix"),
+        "the error should name the offending option and the valid ones: {msg}"
+    );
+}
