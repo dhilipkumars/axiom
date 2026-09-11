@@ -124,21 +124,40 @@ assert it's gone cluster-side.
 per read.
 
 Tasks:
-- [ ] Gateway: `Subscribe(gvk, namespace_filter, resourceVersion?) ->
+- [x] Gateway: `Subscribe(gvk, namespace_filter, resourceVersion?) ->
   stream<WatchEvent>` server-streaming RPC backed by a `client-go` informer,
   supporting resync-from-bookmark.
-- [ ] Extension bgworker: opens one persistent `Subscribe` stream per configured
+- [x] Extension bgworker: opens one persistent `Subscribe` stream per configured
   cluster+GVK, reconnect/backoff on drop, relist on resume.
-- [ ] Shared-memory cache (`dshash`) keyed `(cluster_id, gvk, namespace, name)`,
+- [x] Shared-memory cache (`dshash`) keyed `(cluster_id, gvk, namespace, name)`,
   populated by the bgworker from stream events; tombstone-and-sweep for deletes.
-- [ ] Subscription/consistency-tier state tracked per `(cluster_id, gvk,
+- [x] Subscription/consistency-tier state tracked per `(cluster_id, gvk,
   namespace_filter)`: `ACTIVE` / `RESYNCING` / `DEGRADED`.
-- [ ] `IterateForeignScan` updated to serve from cache when `ACTIVE`, fall through
+- [x] `IterateForeignScan` updated to serve from cache when `ACTIVE`, fall through
   to direct RPC when no subscription exists yet (`cache_mode 'on_demand'` default
   for tables not yet touched), and surface staleness when `DEGRADED` (a
   `k8s_watch_status('k8s_pods')` helper function, or a hidden `_stale_since`
   column).
-- [ ] `LISTEN`/`NOTIFY` emitted by the bgworker on cache changes.
+- [x] `LISTEN`/`NOTIFY` emitted by the bgworker on cache changes.
+
+Notes from implementation: the cache is a **DSA-backed hash index managed by the
+extension** rather than `dshash`: pgrx exposes DSA but not dshash, and dshash's
+parameter struct changed layout in pg17; one `LWLock` guards the whole cache,
+which is adequate here (partitioned locking is revisited in Phase 5 once
+contention is measurable). Subscriptions are **requested by scans**: the first
+scan of a `cache_mode 'watch'` table registers `(server, kind, namespace)` in a
+shared slot table and is served on demand; the background worker opens one
+`Subscribe` stream per slot, resumes from the stored bookmark after a loss, and
+relists only on `RESYNC_REQUIRED`. Staleness is never masked: a `DEGRADED`
+subscription is still served, with a `WARNING` on every scan, and
+`axiom_watch_status()` exposes state, object count, bookmark, ages, and reason.
+`NOTIFY axiom_events` carries a JSON payload `{server, resource, namespace, name,
+type}`; the worker connects to `axiom.notify_database` to send it. Cache memory is
+bounded by `axiom.cache_size_mb`; when exhausted the affected subscription becomes
+`DEGRADED` instead of evicting (eviction policy remains an open item, DESIGN.md §8).
+The in-process stub gateway test drives the full lifecycle without a cluster:
+warm → ACTIVE → live events → DEGRADED (stale serve) → resume with replay, no relist.
+The E2E lives in `e2e/watch_test.sh` (`make e2e-watch`, alias `make e2e-phase3`).
 
 **E2E test (`e2e-phase3`)**: run a `SELECT` to warm the watch on `k8s_pods`, then
 create/delete Pods via `kubectl` directly (not through Postgres) and assert a

@@ -48,6 +48,10 @@ services:
       - axiom.ping_interval_secs=2
       - -c
       - axiom.rpc_timeout_secs=1
+      - -c
+      - axiom.notify_database=axiom
+      - -c
+      - axiom.cache_size_mb=64
     volumes:
       - certs:/certs:ro
     depends_on:

@@ -14,6 +14,7 @@ use pgrx::prelude::*;
 
 pub mod backoff;
 pub mod bgworker;
+pub mod cache;
 pub mod client;
 pub mod config;
 pub mod fdw;
@@ -22,6 +23,8 @@ pub mod options;
 pub mod ping;
 pub mod proto;
 pub mod quals;
+pub mod shmem;
+pub mod status;
 #[cfg(test)]
 mod stub_gateway_tests;
 pub mod transport;
@@ -48,6 +51,7 @@ pub extern "C" fn _PG_init() {
     // `_PG_init` and never mutates concurrently with it.
     let preloading = unsafe { pg_sys::process_shared_preload_libraries_in_progress };
     if preloading {
+        shmem::init();
         bgworker::register();
     } else {
         warning!(
@@ -235,6 +239,54 @@ mod tests {
         )
         .expect("table");
         let _ = Spi::get_one::<i64>("SELECT count(*) FROM t WHERE name = 'impossible name'");
+    }
+
+    // --- Phase 3: watch cache plumbing without a real gateway ----------------------
+
+    #[pg_test]
+    fn watch_status_is_queryable() {
+        // The harness preloads the library, so the function returns a (possibly empty) set.
+        let n = Spi::get_one::<i64>("SELECT count(*) FROM axiom_watch_status()");
+        assert!(n.expect("spi").expect("row") >= 0);
+    }
+
+    #[pg_test(
+        error = "option \"cache_mode\" \"bogus\" is not supported; valid values: on_demand, watch"
+    )]
+    fn table_rejects_unknown_cache_mode() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run("CREATE FOREIGN TABLE t (name text) SERVER gw OPTIONS (resource 'pods', cache_mode 'bogus')").expect("should fail");
+    }
+
+    /// A watch table with no active subscription falls through to the RPC path,
+    /// so an unreachable gateway is still a loud connection error.
+    #[pg_test]
+    fn watch_table_falls_through_to_rpc_before_sync() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run(
+            "CREATE FOREIGN TABLE live (name text, namespace text, phase text, node text, raw jsonb) \
+             SERVER gw OPTIONS (resource 'pods', cache_mode 'watch')",
+        )
+        .expect("table");
+        Spi::run(
+            "DO $$ BEGIN PERFORM count(*) FROM live WHERE namespace = 'x'; RAISE EXCEPTION 'unexpected success'; \
+             EXCEPTION WHEN fdw_unable_to_establish_connection THEN \
+               CREATE TEMP TABLE caught AS SELECT SQLSTATE AS s; END $$",
+        )
+        .expect("HV00N");
+        assert_eq!(
+            Spi::get_one::<String>("SELECT s FROM caught"),
+            Ok(Some("HV00N".to_owned()))
+        );
+        // The scan requested a subscription; it is visible and not ACTIVE.
+        let state = Spi::get_one::<String>(
+            "SELECT state FROM axiom_watch_status() WHERE server = 'https://127.0.0.1:1' AND namespace = 'x'",
+        )
+        .expect("spi");
+        assert!(
+            matches!(state.as_deref(), Some("REQUESTED" | "RESYNCING")),
+            "{state:?}"
+        );
     }
 
     // --- Phase 2: write path without a real gateway ------------------------------

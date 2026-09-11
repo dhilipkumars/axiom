@@ -1,8 +1,9 @@
 // Axiom gateway API, v1.
 //
 // Phase 0 defined the liveness surface (Ping). Phase 1 added read-only, on-demand
-// access (Get/List). Phase 2 adds the write path (Create/Update/Delete). Later
-// phases add Subscribe/DiscoverSchema per docs/DESIGN.md §5.1. Credentials never appear as fields in
+// access (Get/List). Phase 2 added the write path (Create/Update/Delete). Phase 3
+// adds the watch stream (Subscribe). Phase 4 adds DiscoverSchema per
+// docs/DESIGN.md §5.1. Credentials never appear as fields in
 // any message here: each side holds its own credentials locally (docs/RULES.md §3).
 syntax = "proto3";
 
@@ -70,6 +71,28 @@ service GatewayService {
   // if it does not exist; PERMISSION_DENIED / FAILED_PRECONDITION /
   // UNAVAILABLE as for Get.
   rpc Delete(DeleteRequest) returns (DeleteResponse);
+
+  // Subscribe streams the current state and then live changes of one kind,
+  // optionally narrowed to a namespace. This is the feed behind the
+  // extension's shared-memory cache; one stream per (cluster, kind, namespace)
+  // is held open by the extension's background worker.
+  //
+  // Without resource_version the gateway performs a full LIST and emits every
+  // object as ADDED, then a SYNCED event carrying the list's resourceVersion,
+  // then live ADDED/MODIFIED/DELETED events and periodic BOOKMARK events. With
+  // a resource_version the gateway resumes the watch from that point and sends
+  // no initial listing, but still emits one SYNCED event (echoing the resume
+  // point) as soon as the watch is established, so the caller knows the stream
+  // is live again; if the API server no longer has that history (HTTP 410
+  // Gone) the gateway emits RESYNC_REQUIRED and ends the stream, and the caller
+  // must resubscribe without a resource_version and rebuild its cache.
+  //
+  // Errors: INVALID_ARGUMENT for unsupported gvk / invalid namespace;
+  // PERMISSION_DENIED / FAILED_PRECONDITION / UNAVAILABLE as for Get. Once
+  // streaming, transient watch drops are handled inside the gateway by
+  // re-watching from the last seen resourceVersion; the stream only ends on
+  // RESYNC_REQUIRED, a non-retryable error, or client cancellation.
+  rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
 }
 
 message PingRequest {
@@ -169,3 +192,38 @@ message DeleteRequest {
 }
 
 message DeleteResponse {}
+
+message SubscribeRequest {
+  GroupVersionKind gvk = 1;
+  // Empty means all namespaces.
+  string namespace = 2;
+  // Empty means "list everything first"; otherwise resume the watch from here.
+  string resource_version = 3;
+}
+
+// SubscribeResponse is one watch event.
+message SubscribeResponse {
+  enum Type {
+    TYPE_UNSPECIFIED = 0;
+    // Object exists (initial listing) or was created.
+    TYPE_ADDED = 1;
+    // Object changed.
+    TYPE_MODIFIED = 2;
+    // Object was deleted; `object` carries its last known state.
+    TYPE_DELETED = 3;
+    // The stream is live: either the initial listing is complete
+    // (`resource_version` is the list's) or a resumed watch was established
+    // (`resource_version` echoes the resume point).
+    TYPE_SYNCED = 4;
+    // No change; `resource_version` advances the resume point.
+    TYPE_BOOKMARK = 5;
+    // The requested resource_version is too old (410 Gone). The stream ends
+    // after this event; resubscribe without a resource_version.
+    TYPE_RESYNC_REQUIRED = 6;
+  }
+  Type type = 1;
+  // Present for TYPE_ADDED/TYPE_MODIFIED/TYPE_DELETED.
+  Object object = 2;
+  // Present for TYPE_SYNCED/TYPE_BOOKMARK and, when known, for TYPE_RESYNC_REQUIRED.
+  string resource_version = 3;
+}

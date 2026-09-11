@@ -65,7 +65,7 @@ log "RBAC is least-privilege: the gateway identity cannot read secrets or delete
 can_i() { kubectl_e2e --as="system:serviceaccount:$E2E_GATEWAY_SA_NS:$E2E_GATEWAY_SA" auth can-i "$1" "$2" -n "$NS" 2>/dev/null || true; }
 [[ "$(can_i get secrets)" == "no" ]]  || fail "gateway SA can read secrets"
 [[ "$(can_i delete pods)" == "no" ]]  || fail "gateway SA can delete pods"
-[[ "$(can_i watch pods)" == "no" ]]   || fail "gateway SA can watch pods (not granted until Phase 3)"
+[[ "$(can_i watch pods)" == "yes" ]]  || fail "gateway SA cannot watch pods (needed for the Phase 3 Subscribe stream)"
 [[ "$(can_i list pods)" == "yes" ]]   || fail "gateway SA cannot list pods"
 [[ "$(can_i get pods)" == "yes" ]]    || fail "gateway SA cannot get pods"
 

@@ -76,6 +76,31 @@ impl Kind {
     /// Valid `resource` option values, for error messages.
     pub const NAMES: &'static [&'static str] = &["pods", "configmaps"];
 
+    /// Stable small integer for shared-memory records.
+    pub fn index(self) -> u8 {
+        match self {
+            Self::Pods => 0,
+            Self::ConfigMaps => 1,
+        }
+    }
+
+    /// Inverse of [`Kind::index`].
+    pub fn from_index(i: u8) -> Option<Self> {
+        match i {
+            0 => Some(Self::Pods),
+            1 => Some(Self::ConfigMaps),
+            _ => None,
+        }
+    }
+
+    /// The `resource` option value.
+    pub fn resource_name(self) -> &'static str {
+        match self {
+            Self::Pods => "pods",
+            Self::ConfigMaps => "configmaps",
+        }
+    }
+
     /// `(group, version, kind)` as the gateway names it.
     pub fn gvk(self) -> (&'static str, &'static str, &'static str) {
         match self {
@@ -593,6 +618,15 @@ mod tests {
     )]
     fn t(s: &str) -> Option<Cell> {
         Some(Cell::Text(s.into()))
+    }
+
+    #[test]
+    fn index_round_trips() {
+        for k in [Kind::Pods, Kind::ConfigMaps] {
+            assert_eq!(Kind::from_index(k.index()), Some(k));
+            assert_eq!(Kind::parse(k.resource_name()), Some(k));
+        }
+        assert_eq!(Kind::from_index(200), None);
     }
 
     #[test]

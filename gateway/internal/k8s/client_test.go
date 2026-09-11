@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -168,6 +169,42 @@ func TestUnconfigured(t *testing.T) {
 	}
 	if err := c.Delete(context.Background(), cmGVK, "d", "a"); !errors.Is(err, ErrNoCluster) {
 		t.Fatalf("Delete err = %v", err)
+	}
+	if _, err := c.Watch(context.Background(), podGVK, "", ""); !errors.Is(err, ErrNoCluster) {
+		t.Fatalf("Watch err = %v", err)
+	}
+}
+
+func TestDynamicWatch(t *testing.T) {
+	t.Parallel()
+	c := newFake(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w, err := c.Watch(ctx, podGVK, "default", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Stop()
+	if _, err := c.Create(ctx, podGVK, "default", func() *unstructured.Unstructured {
+		u := &unstructured.Unstructured{}
+		u.SetAPIVersion("v1")
+		u.SetKind("Pod")
+		u.SetNamespace("default")
+		u.SetName("new-pod")
+		return u
+	}()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case ev := <-w.ResultChan():
+		if ev.Type != "ADDED" {
+			t.Fatalf("event type = %s, want ADDED", ev.Type)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no watch event")
+	}
+	if _, err := c.Watch(ctx, schema.GroupVersionKind{Kind: "Nope", Version: "v1"}, "", ""); !errors.Is(err, ErrUnsupportedKind) {
+		t.Fatalf("unsupported kind err = %v", err)
 	}
 }
 

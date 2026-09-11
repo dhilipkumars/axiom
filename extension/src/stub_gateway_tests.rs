@@ -21,25 +21,94 @@ use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
 
 use crate::proto::v1::gateway_service_server::{GatewayService, GatewayServiceServer};
+use crate::proto::v1::subscribe_response::Type as EvType;
 use crate::proto::v1::{
     CreateRequest, CreateResponse, DeleteRequest, DeleteResponse, GetRequest, GetResponse,
     ListRequest, ListResponse, Object, PingRequest, PingResponse, UpdateRequest, UpdateResponse,
 };
+use crate::proto::v1::{SubscribeRequest, SubscribeResponse};
 
 /// In-memory "cluster": `ConfigMaps` keyed by (namespace, name), plus counters
 /// and a switch to force the next Update to conflict (as if something changed
 /// the object out-of-band between our read and our write).
-#[derive(Default)]
 struct Cluster {
     configmaps: Mutex<BTreeMap<(String, String), Value>>,
+    pods: Mutex<Vec<Value>>,
     next_rv: AtomicUsize,
     list_calls: AtomicUsize,
+    subscribe_calls: AtomicUsize,
     force_conflict_once: AtomicBool,
+    /// While set, Subscribe is refused with UNAVAILABLE (gateway "down").
+    refuse_subscribe: AtomicBool,
+    /// Live watch feed: every Subscribe stream forwards these after its initial listing.
+    events: tokio::sync::broadcast::Sender<SubscribeResponse>,
+    /// Every emitted event with its resourceVersion, so a resume replays what
+    /// a subscriber missed (as the API server does within its history window).
+    event_log: Mutex<Vec<(u64, SubscribeResponse)>>,
+    /// Bumping this ends every open Subscribe stream (simulates losing the gateway).
+    stream_generation: tokio::sync::watch::Sender<u64>,
+}
+
+impl Default for Cluster {
+    fn default() -> Self {
+        let (events, _) = tokio::sync::broadcast::channel(256);
+        let (stream_generation, _) = tokio::sync::watch::channel(0);
+        Self {
+            configmaps: Mutex::new(BTreeMap::new()),
+            pods: Mutex::new(vec![
+                pod("shop", "web-0", "Running", "n1"),
+                pod("shop", "web-1", "Pending", ""),
+                pod("other", "db", "Running", "n2"),
+            ]),
+            next_rv: AtomicUsize::new(0),
+            list_calls: AtomicUsize::new(0),
+            subscribe_calls: AtomicUsize::new(0),
+            force_conflict_once: AtomicBool::new(false),
+            refuse_subscribe: AtomicBool::new(false),
+            events,
+            event_log: Mutex::new(Vec::new()),
+            stream_generation,
+        }
+    }
 }
 
 impl Cluster {
     fn rv(&self) -> String {
         (self.next_rv.fetch_add(1, Ordering::SeqCst) + 1).to_string()
+    }
+
+    /// Emits a live watch event for a pod (also updating the stub's own state).
+    fn emit_pod(&self, ty: EvType, mut p: Value) {
+        p["metadata"]["resourceVersion"] = Value::String(self.rv());
+        {
+            let mut pods = self.pods.lock().expect("lock");
+            pods.retain(|x| {
+                !(x["metadata"]["namespace"] == p["metadata"]["namespace"]
+                    && x["metadata"]["name"] == p["metadata"]["name"])
+            });
+            if ty != EvType::Deleted {
+                pods.push(p.clone());
+            }
+        }
+        let rv = p["metadata"]["resourceVersion"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        let ev = SubscribeResponse {
+            r#type: ty as i32,
+            object: Some(to_object(&p)),
+            resource_version: rv.clone(),
+        };
+        self.event_log
+            .lock()
+            .expect("lock")
+            .push((rv.parse().unwrap_or(0), ev.clone()));
+        let _ = self.events.send(ev);
+    }
+
+    /// Ends every open stream, as if the gateway died.
+    fn drop_streams(&self) {
+        self.stream_generation.send_modify(|g| *g += 1);
     }
 }
 
@@ -179,6 +248,95 @@ impl GatewayService for Stub {
         Ok(Response::new(UpdateResponse {
             object: Some(to_object(&body)),
         }))
+    }
+
+    type SubscribeStream = std::pin::Pin<
+        Box<dyn tokio_stream::Stream<Item = Result<SubscribeResponse, Status>> + Send>,
+    >;
+
+    async fn subscribe(
+        &self,
+        req: Request<SubscribeRequest>,
+    ) -> Result<Response<Self::SubscribeStream>, Status> {
+        self.0.subscribe_calls.fetch_add(1, Ordering::SeqCst);
+        if self.0.refuse_subscribe.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("stub: gateway is down"));
+        }
+        let req = req.into_inner();
+        let kind = req.gvk.map(|g| g.kind).unwrap_or_default();
+        if kind != "Pod" {
+            return Err(Status::invalid_argument(
+                "stub: only Pod subscriptions are supported",
+            ));
+        }
+        let ns = req.namespace.clone();
+        let mut initial: Vec<SubscribeResponse> = Vec::new();
+        if req.resource_version.is_empty() {
+            for p in self
+                .0
+                .pods
+                .lock()
+                .expect("lock")
+                .iter()
+                .filter(|p| ns.is_empty() || p["metadata"]["namespace"] == ns)
+            {
+                initial.push(SubscribeResponse {
+                    r#type: EvType::Added as i32,
+                    object: Some(to_object(p)),
+                    resource_version: String::new(),
+                });
+            }
+            initial.push(SubscribeResponse {
+                r#type: EvType::Synced as i32,
+                object: None,
+                resource_version: self.0.rv(),
+            });
+        } else {
+            // Resume: replay everything after the caller's bookmark (no listing).
+            let since: u64 = req.resource_version.parse().unwrap_or(0);
+            for (rv, ev) in self.0.event_log.lock().expect("lock").iter() {
+                let keep = ns.is_empty() || ev.object.as_ref().is_some_and(|o| o.namespace == ns);
+                if *rv > since && keep {
+                    initial.push(ev.clone());
+                }
+            }
+            // As the real gateway does: a resumed watch is announced live with SYNCED.
+            initial.push(SubscribeResponse {
+                r#type: EvType::Synced as i32,
+                object: None,
+                resource_version: req.resource_version.clone(),
+            });
+        }
+        let mut live = self.0.events.subscribe();
+        let mut generation = self.0.stream_generation.subscribe();
+        let start_gen = *generation.borrow();
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move {
+            for ev in initial {
+                if tx.send(Ok(ev)).await.is_err() {
+                    return;
+                }
+            }
+            loop {
+                tokio::select! {
+                    changed = generation.changed() => {
+                        // Stream ends: the gateway "died".
+                        if changed.is_err() || *generation.borrow() != start_gen { return; }
+                    }
+                    ev = live.recv() => match ev {
+                        Ok(ev) => {
+                            let keep = ns.is_empty() || ev.object.as_ref().is_some_and(|o| o.namespace == ns);
+                            if keep && tx.send(Ok(ev)).await.is_err() { return; }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(_) => return,
+                    },
+                }
+            }
+        });
+        Ok(Response::new(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        )))
     }
 
     async fn delete(
@@ -496,4 +654,199 @@ fn stub_gateway_scan_and_dml_round_trip() {
     assert_eq!(n, 0);
     assert!(stub.cluster.configmaps.lock().expect("lock").is_empty());
     tx.rollback().expect("rollback");
+}
+
+// --- Phase 3: watch-driven cache -----------------------------------------------------
+
+/// Polls `f` until it returns Some, or fails after `secs`.
+fn wait_for<T>(secs: u64, what: &str, mut f: impl FnMut() -> Option<T>) -> T {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        if let Some(v) = f() {
+            return v;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+fn watch_state(pg: &mut postgres::Client, port: u16) -> Option<(String, i64, String)> {
+    pg.query_opt(
+        "SELECT state, objects, reason FROM axiom_watch_status() WHERE server = $1 AND resource = 'pods' AND namespace = 'shop'",
+        &[&format!("https://localhost:{port}")],
+    )
+    .expect("status")
+    .map(|r| (r.get(0), r.get(1), r.get(2)))
+}
+
+fn shop_count(pg: &mut postgres::Client) -> i64 {
+    pg.query_one(
+        "SELECT count(*) FROM live_pods WHERE namespace = 'shop'",
+        &[],
+    )
+    .expect("count")
+    .get(0)
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear scenario: warm, live, degrade, resync"
+)]
+fn stub_gateway_watch_cache_live_degraded_resync() {
+    let stub = start_stub();
+    let mut pg = pg_client();
+    let port = stub.addr.port();
+    let ca = stub.ca_path.display();
+    // Not in a transaction: the subscription outlives any statement and the
+    // background worker must see the table's server while we poll.
+    pg.batch_execute(&format!(
+        "DROP SERVER IF EXISTS stub_w CASCADE;
+         CREATE SERVER stub_w FOREIGN DATA WRAPPER axiom_fdw OPTIONS (endpoint 'https://localhost:{port}', ca_cert '{ca}', rpc_timeout_secs '5');
+         CREATE FOREIGN TABLE live_pods (name text, namespace text, phase text, node text, raw jsonb)
+           SERVER stub_w OPTIONS (resource 'pods', cache_mode 'watch');"
+    ))
+    .expect("ddl");
+
+    // 1. First scan: no subscription yet → on-demand RPC, and a watch is requested.
+    assert_eq!(shop_count(&mut pg), 2);
+    assert_eq!(stub.cluster.list_calls.load(Ordering::SeqCst), 1);
+    let (state, _, _) = watch_state(&mut pg, port).expect("subscription requested");
+    assert!(
+        matches!(state.as_str(), "REQUESTED" | "RESYNCING" | "ACTIVE"),
+        "{state}"
+    );
+
+    // 2. The worker opens the stream and syncs.
+    wait_for(15, "watch ACTIVE", || {
+        watch_state(&mut pg, port).filter(|(s, _, _)| s == "ACTIVE")
+    });
+    assert_eq!(stub.cluster.subscribe_calls.load(Ordering::SeqCst), 1);
+
+    // 3. Cached scans issue no RPCs.
+    assert_eq!(shop_count(&mut pg), 2);
+    assert_eq!(shop_count(&mut pg), 2);
+    assert_eq!(
+        stub.cluster.list_calls.load(Ordering::SeqCst),
+        1,
+        "cached scans must not LIST"
+    );
+
+    // 4. Live events flow into the cache.
+    stub.cluster
+        .emit_pod(EvType::Added, pod("shop", "web-2", "Running", "n3"));
+    wait_for(10, "ADDED reflected", || {
+        (shop_count(&mut pg) == 3).then_some(())
+    });
+    let node: String = pg
+        .query_one(
+            "SELECT node FROM live_pods WHERE namespace = 'shop' AND name = 'web-2'",
+            &[],
+        )
+        .expect("row")
+        .get(0);
+    assert_eq!(node, "n3");
+    stub.cluster
+        .emit_pod(EvType::Modified, pod("shop", "web-2", "Running", "n4"));
+    wait_for(10, "MODIFIED reflected", || {
+        pg.query_one(
+            "SELECT node FROM live_pods WHERE namespace = 'shop' AND name = 'web-2'",
+            &[],
+        )
+        .ok()
+        .filter(|r| r.get::<_, String>(0) == "n4")
+        .map(|_| ())
+    });
+    stub.cluster
+        .emit_pod(EvType::Deleted, pod("shop", "web-1", "Pending", ""));
+    wait_for(10, "DELETED reflected", || {
+        (shop_count(&mut pg) == 2).then_some(())
+    });
+    assert_eq!(
+        stub.cluster.list_calls.load(Ordering::SeqCst),
+        1,
+        "still no LIST after live events"
+    );
+
+    // 5. Gateway dies: DEGRADED, cache still served (stale), no crash.
+    stub.cluster.drop_streams();
+    wait_for(15, "watch DEGRADED", || {
+        watch_state(&mut pg, port).filter(|(s, _, _)| s == "DEGRADED")
+    });
+    assert_eq!(shop_count(&mut pg), 2, "stale cache is still served");
+    assert_eq!(
+        stub.cluster.list_calls.load(Ordering::SeqCst),
+        1,
+        "stale reads do not LIST either"
+    );
+
+    // 5b. Reconnect attempts that fail while the gateway is down must keep the
+    //     subscription DEGRADED (servable, bookmark kept), never drop to REQUESTED.
+    stub.cluster.refuse_subscribe.store(true, Ordering::SeqCst);
+    stub.cluster.drop_streams();
+    wait_for(15, "watch DEGRADED (refusing)", || {
+        watch_state(&mut pg, port).filter(|(s, _, _)| s == "DEGRADED")
+    });
+    let calls_before = stub.cluster.subscribe_calls.load(Ordering::SeqCst);
+    wait_for(20, "a refused reconnect attempt", || {
+        (stub.cluster.subscribe_calls.load(Ordering::SeqCst) > calls_before).then_some(())
+    });
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    let (state, _, _) = watch_state(&mut pg, port).expect("status");
+    assert_eq!(
+        state, "DEGRADED",
+        "a failed reconnect must not demote the subscription"
+    );
+    assert_eq!(shop_count(&mut pg), 2, "still served from the stale cache");
+    stub.cluster.refuse_subscribe.store(false, Ordering::SeqCst);
+
+    // 6. A change while disconnected must be picked up on resume, without a relist.
+    stub.cluster
+        .emit_pod(EvType::Added, pod("shop", "web-3", "Running", "n5"));
+    wait_for(30, "watch ACTIVE again", || {
+        watch_state(&mut pg, port).filter(|(s, _, _)| s == "ACTIVE")
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while shop_count(&mut pg) != 3 {
+        if std::time::Instant::now() >= deadline {
+            let names: Vec<String> = pg
+                .query(
+                    "SELECT name FROM live_pods WHERE namespace = 'shop' ORDER BY 1",
+                    &[],
+                )
+                .expect("names")
+                .iter()
+                .map(|r| r.get(0))
+                .collect();
+            let log: Vec<(u64, i32, Option<String>)> = stub
+                .cluster
+                .event_log
+                .lock()
+                .expect("lock")
+                .iter()
+                .map(|(rv, e)| (*rv, e.r#type, e.object.as_ref().map(|o| o.name.clone())))
+                .collect();
+            panic!(
+                "missed event not replayed: names={names:?} status={:?} subscribe_calls={} log={log:?}",
+                watch_state(&mut pg, port),
+                stub.cluster.subscribe_calls.load(Ordering::SeqCst),
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        stub.cluster.subscribe_calls.load(Ordering::SeqCst) >= 2,
+        "reconnected"
+    );
+    assert_eq!(
+        stub.cluster.list_calls.load(Ordering::SeqCst),
+        1,
+        "resume must not LIST"
+    );
+
+    pg.batch_execute("DROP SERVER stub_w CASCADE")
+        .expect("cleanup");
 }
