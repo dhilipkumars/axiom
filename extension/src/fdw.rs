@@ -43,7 +43,7 @@ use pgrx::{pg_sys, JsonB, PgList, PgMemoryContexts};
 
 use crate::client::{self, ClientError, ErrorClass};
 use crate::kinds::{
-    self, Cell, DecodeError, Kind, NewRow, Row, SqlType, WriteError, MAX_OBJECT_BYTES,
+    self, Cell, DecodeError, Kind, NewCell, NewRow, Row, SqlType, WriteError, MAX_OBJECT_BYTES,
 };
 use crate::options::{self, Catalog, OptionsError, ServerOptions, TableOptions};
 use crate::quals::{Filter, Qual};
@@ -151,7 +151,7 @@ fn write_sqlstate(e: &WriteError) -> PgSqlErrorCode {
         WriteError::ReadOnly(_) | WriteError::IdentityChange(_) => {
             PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
         }
-        WriteError::MissingName | WriteError::MissingNamespace => {
+        WriteError::MissingName | WriteError::MissingNamespace | WriteError::NullNotAllowed(_) => {
             PgSqlErrorCode::ERRCODE_NOT_NULL_VIOLATION
         }
         WriteError::InvalidName(..)
@@ -559,21 +559,23 @@ unsafe fn new_row_from_slot(
     columns: &[Option<usize>],
     kind: Kind,
 ) -> NewRow {
-    let mut cells = vec![None; kind.columns().len()];
+    let mut row = NewRow::undeclared(kind);
     for (i, col) in columns.iter().enumerate() {
         let Some(idx) = *col else { continue };
         let attno = i16::try_from(i + 1).unwrap_or(0);
         // SAFETY: attno is within the slot's tupdesc by construction of `columns`.
         let Some(datum) = (unsafe { slot_datum(slot, attno) }) else {
+            row.cells[idx] = NewCell::Null;
             continue;
         };
-        cells[idx] = match kind.columns()[idx].sql_type {
+        let value = match kind.columns()[idx].sql_type {
             // SAFETY: column types were checked against the tupdesc in column_map.
             SqlType::Text => unsafe { String::from_datum(datum, false) }.map(Cell::Text),
             SqlType::Jsonb => unsafe { JsonB::from_datum(datum, false) }.map(|j| Cell::Json(j.0)),
         };
+        row.cells[idx] = value.map_or(NewCell::Null, NewCell::Value);
     }
-    NewRow { cells }
+    row
 }
 
 #[pg_guard]
@@ -831,7 +833,16 @@ unsafe fn old_raw(
 /// Memory context for RETURNING datums: the per-tuple context of the modify node.
 unsafe fn per_tuple_memcx(estate: *mut pg_sys::EState) -> pg_sys::MemoryContext {
     // SAFETY: estate is live for the statement; per-output-tuple context is reset per row.
-    unsafe { (*pg_sys::MakePerTupleExprContext(estate)).ecxt_per_tuple_memory }
+    unsafe {
+        // Mirror the C `GetPerTupleExprContext` macro: reuse the statement's
+        // context, creating it only once. Calling MakePerTupleExprContext on
+        // every row would register a fresh context per row until statement end.
+        let mut ctx = (*estate).es_per_tuple_exprcontext;
+        if ctx.is_null() {
+            ctx = pg_sys::MakePerTupleExprContext(estate);
+        }
+        (*ctx).ecxt_per_tuple_memory
+    }
 }
 
 #[pg_guard]

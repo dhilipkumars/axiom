@@ -102,6 +102,7 @@ func TestWriteValidation(t *testing.T) {
 		{name: "bad name", req: &axiomv1.CreateRequest{Gvk: cmGVK, Namespace: "d", Name: "A/b", Json: []byte(`{}`)}, want: codes.InvalidArgument},
 		{name: "empty body", req: &axiomv1.CreateRequest{Gvk: cmGVK, Namespace: "d", Name: "a"}, want: codes.InvalidArgument, msg: "json body is required"},
 		{name: "not json", req: &axiomv1.CreateRequest{Gvk: cmGVK, Namespace: "d", Name: "a", Json: []byte(`[1,2]`)}, want: codes.InvalidArgument, msg: "not a JSON object"},
+		{name: "null body must not panic", req: &axiomv1.CreateRequest{Gvk: cmGVK, Namespace: "d", Name: "a", Json: []byte(`null`)}, want: codes.InvalidArgument, msg: "got null"},
 		{name: "metadata not object", req: &axiomv1.CreateRequest{Gvk: cmGVK, Namespace: "d", Name: "a", Json: []byte(`{"metadata":"x"}`)}, want: codes.InvalidArgument, msg: "metadata must be an object"},
 		{name: "name mismatch", req: &axiomv1.CreateRequest{Gvk: cmGVK, Namespace: "d", Name: "a", Json: []byte(`{"metadata":{"name":"b"}}`)}, want: codes.InvalidArgument, msg: "does not match request name"},
 		{name: "namespace mismatch", req: &axiomv1.CreateRequest{Gvk: cmGVK, Namespace: "d", Name: "a", Json: []byte(`{"metadata":{"namespace":"e"}}`)}, want: codes.InvalidArgument, msg: "does not match request namespace"},
@@ -129,6 +130,7 @@ func TestWriteValidation(t *testing.T) {
 		{name: "nil", req: nil},
 		{name: "missing resource_version", req: &axiomv1.UpdateRequest{Gvk: cmGVK, Namespace: "d", Name: "a", Json: []byte(`{}`)}, msg: "resource_version is required"},
 		{name: "body rv mismatch", req: &axiomv1.UpdateRequest{Gvk: cmGVK, Namespace: "d", Name: "a", ResourceVersion: "7", Json: []byte(`{"metadata":{"resourceVersion":"6"}}`)}, msg: "does not match request resource_version"},
+		{name: "null body must not panic", req: &axiomv1.UpdateRequest{Gvk: cmGVK, Namespace: "d", Name: "a", ResourceVersion: "7", Json: []byte(`null`)}, msg: "got null"},
 		{name: "missing name", req: &axiomv1.UpdateRequest{Gvk: cmGVK, Namespace: "d", ResourceVersion: "7", Json: []byte(`{}`)}, msg: "name is required"},
 	}
 	for _, tc := range updates {

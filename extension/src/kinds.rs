@@ -230,13 +230,36 @@ impl Row {
 
 // --- write path -------------------------------------------------------------------
 
+/// One SQL-side column value for a write. Distinguishes a column the foreign
+/// table does not declare from an explicit SQL NULL: `SET data = NULL` must
+/// mean "clear", and `SET name = NULL` must be an error, not "keep the old".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum NewCell {
+    /// The foreign table has no such column.
+    #[default]
+    Undeclared,
+    /// Declared, and SQL supplied NULL.
+    Null,
+    /// Declared, with a value.
+    Value(Cell),
+}
+
 /// Column values supplied by SQL for an INSERT, or the full new tuple of an
 /// UPDATE (Postgres fills untouched columns from the old row), aligned with
 /// [`Kind::columns`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NewRow {
-    /// One entry per column; `None` = SQL NULL.
-    pub cells: Vec<Option<Cell>>,
+    /// One entry per column of the kind.
+    pub cells: Vec<NewCell>,
+}
+
+impl NewRow {
+    /// A row with every column undeclared.
+    pub fn undeclared(kind: Kind) -> Self {
+        Self {
+            cells: vec![NewCell::Undeclared; kind.columns().len()],
+        }
+    }
 }
 
 /// Identity of an existing object, taken from its `raw` column as last read.
@@ -269,6 +292,8 @@ pub enum WriteError {
     MissingName,
     /// `namespace` is NULL or missing on INSERT.
     MissingNamespace,
+    /// A column that cannot be NULL was set to NULL.
+    NullNotAllowed(&'static str),
     /// A name/namespace is not a valid Kubernetes name.
     InvalidName(&'static str, String),
     /// UPDATE tried to change `name` or `namespace`.
@@ -289,6 +314,7 @@ impl fmt::Display for WriteError {
             Self::MissingNamespace => {
                 write!(f, "column \"namespace\" is required and must not be NULL")
             }
+            Self::NullNotAllowed(col) => write!(f, "column \"{col}\" cannot be set to NULL"),
             Self::InvalidName(col, v) => write!(
                 f,
                 "{v:?} is not a valid Kubernetes {col} (lowercase DNS-1123 subdomain)"
@@ -309,26 +335,29 @@ impl fmt::Display for WriteError {
 
 impl std::error::Error for WriteError {}
 
-fn cell_text<'a>(kind: Kind, new: &'a NewRow, column: &str) -> Option<&'a str> {
-    match kind
-        .column_index(column)
+fn cell<'a>(kind: Kind, new: &'a NewRow, column: &str) -> &'a NewCell {
+    static UNDECLARED: NewCell = NewCell::Undeclared;
+    kind.column_index(column)
         .and_then(|i| new.cells.get(i))
-        .and_then(Option::as_ref)
-    {
-        Some(Cell::Text(s)) => Some(s.as_str()),
+        .unwrap_or(&UNDECLARED)
+}
+
+fn cell_text<'a>(kind: Kind, new: &'a NewRow, column: &str) -> Option<&'a str> {
+    match cell(kind, new, column) {
+        NewCell::Value(Cell::Text(s)) => Some(s.as_str()),
         _ => None,
     }
 }
 
 fn cell_json<'a>(kind: Kind, new: &'a NewRow, column: &str) -> Option<&'a serde_json::Value> {
-    match kind
-        .column_index(column)
-        .and_then(|i| new.cells.get(i))
-        .and_then(Option::as_ref)
-    {
-        Some(Cell::Json(v)) => Some(v),
+    match cell(kind, new, column) {
+        NewCell::Value(Cell::Json(v)) => Some(v),
         _ => None,
     }
+}
+
+fn is_null(kind: Kind, new: &NewRow, column: &str) -> bool {
+    matches!(cell(kind, new, column), NewCell::Null)
 }
 
 /// Validates a `ConfigMap` `data` value: an object whose values are all strings.
@@ -356,38 +385,49 @@ pub fn identity_from_raw(raw: &serde_json::Value) -> Result<Identity, WriteError
     })
 }
 
-/// Applies the SQL-visible columns of `new` onto `base` for `kind`, returning
-/// the object body. Shared by insert and update.
-fn apply_columns(
-    kind: Kind,
-    base: serde_json::Value,
-    new: &NewRow,
+/// What SQL asked to do with one jsonb column of a write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Change<'a> {
+    /// Leave whatever the base object has.
+    Keep,
+    /// Replace with this value.
+    Set(&'a serde_json::Value),
+    /// Clear (SQL NULL).
+    Clear,
+}
+
+/// Builds a `ConfigMap` body from a base object plus per-column changes.
+fn configmap_body(
+    base: &serde_json::Value,
+    raw: Change<'_>,
+    data: Change<'_>,
 ) -> Result<serde_json::Value, WriteError> {
-    // If SQL supplied `raw`, it is the whole object; typed columns then overlay it.
-    let mut body = match cell_json(kind, new, "raw") {
-        Some(r) => {
+    let mut body = match raw {
+        Change::Set(r) => {
             if !r.is_object() {
                 return Err(WriteError::NotAnObject("raw"));
             }
             r.clone()
         }
-        None => base,
+        Change::Clear => return Err(WriteError::NullNotAllowed("raw")),
+        Change::Keep => base.clone(),
     };
     if !body.is_object() {
         body = serde_json::json!({});
     }
-    match kind {
-        Kind::ConfigMaps => {
-            if let Some(data) = cell_json(kind, new, "data") {
-                check_configmap_data(data)?;
-                body["data"] = data.clone();
-            } else if body.get("data").is_none() {
+    match data {
+        Change::Set(d) => {
+            check_configmap_data(d)?;
+            body["data"] = d.clone();
+        }
+        Change::Clear => body["data"] = serde_json::json!({}),
+        Change::Keep => {
+            if body.get("data").is_none() {
                 body["data"] = serde_json::json!({});
             } else {
                 check_configmap_data(&body["data"])?;
             }
         }
-        Kind::Pods => return Err(WriteError::ReadOnly(kind)),
     }
     Ok(body)
 }
@@ -422,14 +462,11 @@ pub fn insert_body(kind: Kind, new: &NewRow) -> Result<WriteBody, WriteError> {
     if !kind.writable() {
         return Err(WriteError::ReadOnly(kind));
     }
-    let raw_name = str_at(
-        cell_json(kind, new, "raw").unwrap_or(&serde_json::Value::Null),
-        "/metadata/name",
-    );
-    let raw_ns = str_at(
-        cell_json(kind, new, "raw").unwrap_or(&serde_json::Value::Null),
-        "/metadata/namespace",
-    );
+    // On INSERT a NULL `raw` is the same as not providing one: there is no
+    // existing object it could be clearing.
+    let raw = cell_json(kind, new, "raw");
+    let raw_name = raw.and_then(|r| str_at(r, "/metadata/name"));
+    let raw_ns = raw.and_then(|r| str_at(r, "/metadata/namespace"));
     let name = cell_text(kind, new, "name")
         .or(raw_name)
         .ok_or(WriteError::MissingName)?
@@ -449,7 +486,17 @@ pub fn insert_body(kind: Kind, new: &NewRow) -> Result<WriteBody, WriteError> {
         name,
         resource_version: String::new(),
     };
-    let mut body = apply_columns(kind, serde_json::json!({}), new)?;
+    let raw_change = raw.map_or(Change::Keep, Change::Set);
+    // NULL data on INSERT means "no data", i.e. an empty map.
+    let data_change = match cell(kind, new, "data") {
+        NewCell::Value(Cell::Json(d)) => Change::Set(d),
+        NewCell::Null => Change::Clear,
+        _ => Change::Keep,
+    };
+    let mut body = match kind {
+        Kind::ConfigMaps => configmap_body(&serde_json::json!({}), raw_change, data_change)?,
+        Kind::Pods => return Err(WriteError::ReadOnly(kind)),
+    };
     set_identity(&mut body, kind, &id);
     Ok(WriteBody { identity: id, body })
 }
@@ -457,7 +504,14 @@ pub fn insert_body(kind: Kind, new: &NewRow) -> Result<WriteBody, WriteError> {
 /// Builds the body for `UPDATE`: the old object (from the `raw` junk column as
 /// last read) with the new tuple's columns applied, carrying the old
 /// `resourceVersion` so the gateway can detect concurrent modification.
-/// Changing `name` or `namespace` is rejected.
+///
+/// Postgres hands the *full* new tuple, so "did SQL change this column" is
+/// decided by comparing against the old object: a typed column equal to its
+/// old value is left alone, which is what lets `SET raw = jsonb_set(raw, ...)`
+/// change `data` inside `raw` without the untouched typed `data` column
+/// overwriting it. Explicit NULLs are honoured: `SET data = NULL` clears,
+/// `SET name/namespace/raw = NULL` is an error. Changing `name` or `namespace`
+/// is rejected.
 pub fn update_body(
     kind: Kind,
     old_raw: &serde_json::Value,
@@ -467,35 +521,36 @@ pub fn update_body(
         return Err(WriteError::ReadOnly(kind));
     }
     let id = identity_from_raw(old_raw)?;
-    if let Some(n) = cell_text(kind, new, "name") {
-        if n != id.name {
-            return Err(WriteError::IdentityChange("name"));
+    for col in ["name", "namespace"] {
+        if is_null(kind, new, col) {
+            return Err(WriteError::NullNotAllowed(col));
         }
     }
-    if let Some(ns) = cell_text(kind, new, "namespace") {
-        if ns != id.namespace {
-            return Err(WriteError::IdentityChange("namespace"));
-        }
+    if cell_text(kind, new, "name").is_some_and(|n| n != id.name) {
+        return Err(WriteError::IdentityChange("name"));
     }
-    // A `raw` equal to the old one means "not changed"; only a differing raw replaces the object.
-    let new_for_apply = match cell_json(kind, new, "raw") {
-        Some(r) if r == old_raw => NewRow {
-            cells: new
-                .cells
-                .iter()
-                .enumerate()
-                .map(|(i, c)| {
-                    if Some(i) == kind.column_index("raw") {
-                        None
-                    } else {
-                        c.clone()
-                    }
-                })
-                .collect(),
-        },
-        _ => new.clone(),
+    if cell_text(kind, new, "namespace").is_some_and(|ns| ns != id.namespace) {
+        return Err(WriteError::IdentityChange("namespace"));
+    }
+    let raw_change = match cell(kind, new, "raw") {
+        NewCell::Value(Cell::Json(r)) if r != old_raw => Change::Set(r),
+        NewCell::Null => Change::Clear,
+        _ => Change::Keep,
     };
-    let mut body = apply_columns(kind, old_raw.clone(), &new_for_apply)?;
+    let empty = serde_json::json!({});
+    let old_data = old_raw
+        .get("data")
+        .filter(|d| d.is_object())
+        .unwrap_or(&empty);
+    let data_change = match cell(kind, new, "data") {
+        NewCell::Value(Cell::Json(d)) if d != old_data => Change::Set(d),
+        NewCell::Null => Change::Clear,
+        _ => Change::Keep,
+    };
+    let mut body = match kind {
+        Kind::ConfigMaps => configmap_body(old_raw, raw_change, data_change)?,
+        Kind::Pods => return Err(WriteError::ReadOnly(kind)),
+    };
     set_identity(&mut body, kind, &id);
     Ok(WriteBody { identity: id, body })
 }
@@ -513,12 +568,23 @@ mod tests {
                "data":{"LOG_LEVEL":"info"}})
     }
 
+    /// Builds a row where listed columns are declared (`Some` = value, `None` = SQL NULL)
+    /// and everything else is undeclared.
     fn new_row(kind: Kind, pairs: &[(&str, Option<Cell>)]) -> NewRow {
-        let mut cells = vec![None; kind.columns().len()];
+        let mut row = NewRow::undeclared(kind);
         for (col, cell) in pairs {
-            cells[kind.column_index(col).expect("column")] = cell.clone();
+            row.cells[kind.column_index(col).expect("column")] =
+                cell.clone().map_or(NewCell::Null, NewCell::Value);
         }
-        NewRow { cells }
+        row
+    }
+
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "mirrors the Option<Cell> fixture shape (None = SQL NULL)"
+    )]
+    fn j(v: serde_json::Value) -> Option<Cell> {
+        Some(Cell::Json(v))
     }
 
     #[allow(
@@ -830,6 +896,135 @@ mod tests {
                 name: "app".into(),
                 resource_version: "9".into()
             }
+        );
+    }
+
+    // --- review follow-ups: NULL handling and change detection -------------------
+
+    #[test]
+    fn update_via_raw_jsonb_set_changes_data_when_typed_data_untouched() {
+        // SET raw = jsonb_set(raw, '{data,VIA_RAW}', '"1"'): the new tuple's `data`
+        // still holds the OLD value; it must not overwrite the raw change.
+        let mut raw2 = cm_raw();
+        raw2["data"]["VIA_RAW"] = json!("1");
+        let new = new_row(
+            Kind::ConfigMaps,
+            &[
+                ("name", t("app")),
+                ("namespace", t("shop")),
+                ("data", j(json!({"LOG_LEVEL":"info"}))),
+                ("raw", j(raw2)),
+            ],
+        );
+        let w = update_body(Kind::ConfigMaps, &cm_raw(), &new).expect("valid");
+        assert_eq!(w.body["data"], json!({"LOG_LEVEL":"info","VIA_RAW":"1"}));
+    }
+
+    #[test]
+    fn update_with_both_raw_and_data_changed_applies_data_last() {
+        let mut raw2 = cm_raw();
+        raw2["metadata"]["labels"] = json!({"a":"b"});
+        raw2["data"] = json!({"FROM_RAW":"x"});
+        let new = new_row(
+            Kind::ConfigMaps,
+            &[
+                ("name", t("app")),
+                ("namespace", t("shop")),
+                ("data", j(json!({"FROM_DATA":"y"}))),
+                ("raw", j(raw2)),
+            ],
+        );
+        let w = update_body(Kind::ConfigMaps, &cm_raw(), &new).expect("valid");
+        assert_eq!(w.body["metadata"]["labels"], json!({"a":"b"}));
+        assert_eq!(w.body["data"], json!({"FROM_DATA":"y"}));
+    }
+
+    #[test]
+    fn update_set_data_null_clears_and_identity_null_is_an_error() {
+        let new = new_row(
+            Kind::ConfigMaps,
+            &[
+                ("name", t("app")),
+                ("namespace", t("shop")),
+                ("data", None),
+                ("raw", j(cm_raw())),
+            ],
+        );
+        let w = update_body(Kind::ConfigMaps, &cm_raw(), &new).expect("valid");
+        assert_eq!(w.body["data"], json!({}));
+        let new = new_row(
+            Kind::ConfigMaps,
+            &[("name", None), ("namespace", t("shop"))],
+        );
+        assert_eq!(
+            update_body(Kind::ConfigMaps, &cm_raw(), &new),
+            Err(WriteError::NullNotAllowed("name"))
+        );
+        let new = new_row(Kind::ConfigMaps, &[("name", t("app")), ("namespace", None)]);
+        assert_eq!(
+            update_body(Kind::ConfigMaps, &cm_raw(), &new),
+            Err(WriteError::NullNotAllowed("namespace"))
+        );
+        let new = new_row(
+            Kind::ConfigMaps,
+            &[("name", t("app")), ("namespace", t("shop")), ("raw", None)],
+        );
+        assert_eq!(
+            update_body(Kind::ConfigMaps, &cm_raw(), &new),
+            Err(WriteError::NullNotAllowed("raw"))
+        );
+    }
+
+    #[test]
+    fn update_with_nothing_changed_is_a_faithful_put_of_the_old_object() {
+        let new = new_row(
+            Kind::ConfigMaps,
+            &[
+                ("name", t("app")),
+                ("namespace", t("shop")),
+                ("data", j(json!({"LOG_LEVEL":"info"}))),
+                ("raw", j(cm_raw())),
+            ],
+        );
+        let w = update_body(Kind::ConfigMaps, &cm_raw(), &new).expect("valid");
+        assert_eq!(w.body, cm_raw());
+    }
+
+    #[test]
+    fn insert_null_columns() {
+        // NULL data → empty map; NULL raw → as if omitted.
+        let new = new_row(
+            Kind::ConfigMaps,
+            &[
+                ("name", t("app")),
+                ("namespace", t("shop")),
+                ("data", None),
+                ("raw", None),
+            ],
+        );
+        let w = insert_body(Kind::ConfigMaps, &new).expect("valid");
+        assert_eq!(w.body["data"], json!({}));
+        // NULL name is still a missing name.
+        let new = new_row(
+            Kind::ConfigMaps,
+            &[("name", None), ("namespace", t("shop"))],
+        );
+        assert_eq!(
+            insert_body(Kind::ConfigMaps, &new),
+            Err(WriteError::MissingName)
+        );
+    }
+
+    #[test]
+    fn undeclared_columns_are_distinct_from_null() {
+        let row = NewRow::undeclared(Kind::ConfigMaps);
+        assert!(row.cells.iter().all(|c| *c == NewCell::Undeclared));
+        assert!(!is_null(Kind::ConfigMaps, &row, "data"));
+        let row = new_row(Kind::ConfigMaps, &[("data", None)]);
+        assert!(is_null(Kind::ConfigMaps, &row, "data"));
+        assert_eq!(
+            *cell(Kind::ConfigMaps, &row, "nonexistent"),
+            NewCell::Undeclared
         );
     }
 }
