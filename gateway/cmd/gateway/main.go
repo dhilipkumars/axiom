@@ -21,6 +21,9 @@ import (
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/discovery/cached/memory"
+
 	axiomv1 "github.com/dhilipkumars/axiom/gateway/gen/axiom/v1"
 	"github.com/dhilipkumars/axiom/gateway/internal/k8s"
 	"github.com/dhilipkumars/axiom/gateway/internal/server"
@@ -45,6 +48,10 @@ func run(ctx context.Context, args []string, stderr *os.File) error {
 	keyPath := fs.String("tls-key", "", "path to PEM server private key (required)")
 	kubeconfig := fs.String("kubeconfig", "", "path to a kubeconfig; empty means in-cluster config")
 	noCluster := fs.Bool("no-cluster", false, "serve Ping only; Get/List fail with FAILED_PRECONDITION (Phase 0 plumbing mode)")
+	serve := fs.String("serve", k8s.DefaultServe,
+		"comma-separated resources this gateway serves, as `plural[.group]` "+
+			"(e.g. \"pods,configmaps,widgets.example.com\"); \"*.group\" covers a whole group. "+
+			"Scope the ServiceAccount's RBAC to match: this bounds what is offered, RBAC enforces it")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -54,6 +61,17 @@ func run(ctx context.Context, args []string, stderr *os.File) error {
 	// Cluster access is explicit: either credentials load successfully or the
 	// operator opted into --no-cluster. A silently unconfigured gateway would
 	// turn every SELECT into a misleading error (docs/RULES.md §1).
+	// The serve list bounds which kinds discovery may offer. It is parsed
+	// before any cluster contact so a typo fails at startup rather than
+	// turning into a silently narrower gateway (docs/RULES.md §1, §3).
+	allow, err := k8s.ParseAllowlist(*serve)
+	if err != nil {
+		return err
+	}
+	if allow.IsEmpty() {
+		return fmt.Errorf("--serve is empty: a gateway that serves no resources cannot answer any query")
+	}
+
 	var client k8s.Client
 	if *noCluster {
 		client = k8s.Unconfigured{}
@@ -64,12 +82,17 @@ func run(ctx context.Context, args []string, stderr *os.File) error {
 			return fmt.Errorf("%w (pass --no-cluster to run without cluster access)", err)
 		}
 		// Never log the loaded config: it holds the bearer token / client key.
-		dyn, err := k8s.NewFromConfig(cfg)
+		disco, err := discovery.NewDiscoveryClientForConfig(cfg)
+		if err != nil {
+			return fmt.Errorf("k8s: discovery client: %w", err)
+		}
+		mapper := k8s.NewDiscovery(memory.NewMemCacheClient(disco), allow)
+		dyn, err := k8s.NewFromConfig(cfg, mapper)
 		if err != nil {
 			return err
 		}
 		client = dyn
-		logger.Info("kubernetes client configured", "api_server", cfg.Host)
+		logger.Info("kubernetes client configured", "api_server", cfg.Host, "serve", allow.String())
 	}
 
 	tlsCfg, err := tlsconfig.Load(*certPath, *keyPath)

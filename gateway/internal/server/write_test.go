@@ -19,7 +19,7 @@ var cmGVK = &axiomv1.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}
 
 func newWriteServer(t *testing.T) *Server {
 	t.Helper()
-	return New("t", nil, k8s.NewDynamic(dynamicfake.NewSimpleDynamicClient(scheme.Scheme)), nil)
+	return New("t", nil, k8s.NewDynamic(dynamicfake.NewSimpleDynamicClient(scheme.Scheme), k8s.NewStaticMapper(k8s.BuiltinKinds()...)), nil)
 }
 
 func dataOf(t *testing.T, o *axiomv1.Object) map[string]any {

@@ -1,0 +1,392 @@
+package k8s
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"sync/atomic"
+	"testing"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/openapi"
+)
+
+// --- fakes -------------------------------------------------------------------
+//
+// client-go's own discovery fake does not serve OpenAPI v3, and the interfaces
+// this package actually uses are small, so the doubles live here. Methods that
+// Discovery must never call are left to the embedded nil interface, which
+// panics loudly if that assumption breaks.
+
+type fakeGroupVersion struct {
+	doc []byte
+	err error
+}
+
+func (f fakeGroupVersion) Schema(string) ([]byte, error) { return f.doc, f.err }
+func (f fakeGroupVersion) ServerRelativeURL() string     { return "" }
+
+type fakeOpenAPI struct {
+	paths map[string]openapi.GroupVersion
+	err   error
+}
+
+func (f fakeOpenAPI) Paths() (map[string]openapi.GroupVersion, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.paths, nil
+}
+
+type fakeDiscovery struct {
+	discovery.CachedDiscoveryInterface // nil: any unexpected call panics
+
+	groups *metav1.APIGroupList
+	// byGV is the resource list per "group/version" key; a missing key is an
+	// error, as the API server reports for a group-version it does not have.
+	byGV map[string]*metav1.APIResourceList
+
+	// calls counts ServerResourcesForGroupVersion, to prove caching.
+	calls atomic.Int32
+	// invalidations counts Invalidate, to prove the retry-once path.
+	invalidations atomic.Int32
+	openapi       openapi.Client
+}
+
+func (f *fakeDiscovery) ServerResourcesForGroupVersion(gv string) (*metav1.APIResourceList, error) {
+	f.calls.Add(1)
+	list, ok := f.byGV[gv]
+	if !ok {
+		return nil, fmt.Errorf("the server could not find the requested resource: %s", gv)
+	}
+	return list, nil
+}
+
+func (f *fakeDiscovery) ServerGroups() (*metav1.APIGroupList, error) {
+	if f.groups == nil {
+		return nil, errors.New("no groups")
+	}
+	return f.groups, nil
+}
+
+func (f *fakeDiscovery) Invalidate()               { f.invalidations.Add(1) }
+func (f *fakeDiscovery) OpenAPIV3() openapi.Client { return f.openapi }
+
+// openAPIDocFor builds a minimal OpenAPI v3 document describing kinds by their
+// x-kubernetes-group-version-kind extension, with the given top-level fields.
+func openAPIDocFor(t *testing.T, kinds map[schema.GroupVersionKind][]string) []byte {
+	t.Helper()
+	type prop = map[string]any
+	schemas := map[string]any{}
+	for gvk, fields := range kinds {
+		props := prop{}
+		for _, f := range fields {
+			props[f] = prop{"type": "object"}
+		}
+		schemas[gvk.Group+"."+gvk.Version+"."+gvk.Kind] = prop{
+			"properties": props,
+			"x-kubernetes-group-version-kind": []prop{
+				{"group": gvk.Group, "version": gvk.Version, "kind": gvk.Kind},
+			},
+		}
+	}
+	// A decoy schema for an unrelated kind, so lookup by GVK is actually tested.
+	schemas["decoy"] = prop{
+		"properties": prop{"nonsense": prop{}},
+		"x-kubernetes-group-version-kind": []prop{
+			{"group": "decoy.io", "version": "v9", "kind": "Decoy"},
+		},
+	}
+	doc, err := json.Marshal(prop{"components": prop{"schemas": schemas}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doc
+}
+
+var (
+	widgetGVK  = schema.GroupVersionKind{Group: "example.com", Version: "v1", Kind: "Widget"}
+	clusterGVK = schema.GroupVersionKind{Group: "example.com", Version: "v1", Kind: "ClusterWidget"}
+)
+
+// newTestDiscovery wires a Discovery over fakes serving pods plus an
+// example.com group with a namespaced and a cluster-scoped CRD.
+func newTestDiscovery(t *testing.T, serve string) (*Discovery, *fakeDiscovery) {
+	t.Helper()
+	allow, err := ParseAllowlist(serve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd := &fakeDiscovery{
+		groups: &metav1.APIGroupList{Groups: []metav1.APIGroup{
+			{Name: "", PreferredVersion: metav1.GroupVersionForDiscovery{GroupVersion: "v1"}},
+			{Name: "example.com", PreferredVersion: metav1.GroupVersionForDiscovery{GroupVersion: "example.com/v1"}},
+		}},
+		byGV: map[string]*metav1.APIResourceList{
+			"v1": {APIResources: []metav1.APIResource{
+				{Name: "pods", Kind: "Pod", Namespaced: true, Verbs: metav1.Verbs{"get", "list", "watch", "create", "update", "delete"}},
+				{Name: "pods/log", Kind: "Pod", Namespaced: true, Verbs: metav1.Verbs{"get"}},
+				{Name: "secrets", Kind: "Secret", Namespaced: true, Verbs: metav1.Verbs{"get", "list", "watch"}},
+			}},
+			"example.com/v1": {APIResources: []metav1.APIResource{
+				{Name: "widgets", Kind: "Widget", Namespaced: true, Verbs: metav1.Verbs{"get", "list", "watch", "create", "update", "delete"}},
+				{Name: "clusterwidgets", Kind: "ClusterWidget", Namespaced: false, Verbs: metav1.Verbs{"get", "list"}},
+			}},
+		},
+	}
+	fd.openapi = fakeOpenAPI{paths: map[string]openapi.GroupVersion{
+		"api/v1": fakeGroupVersion{doc: openAPIDocFor(t, map[schema.GroupVersionKind][]string{
+			{Version: "v1", Kind: "Pod"}:    {"apiVersion", "kind", "metadata", "spec", "status"},
+			{Version: "v1", Kind: "Secret"}: {"apiVersion", "kind", "metadata", "data", "stringData", "type"},
+		})},
+		"apis/example.com/v1": fakeGroupVersion{doc: openAPIDocFor(t, map[schema.GroupVersionKind][]string{
+			widgetGVK:  {"apiVersion", "kind", "metadata", "spec", "status"},
+			clusterGVK: {"apiVersion", "kind", "metadata", "spec"},
+		})},
+	}}
+	return NewDiscovery(fd, allow), fd
+}
+
+// --- tests -------------------------------------------------------------------
+
+func TestDiscoveryResolvesACRD(t *testing.T) {
+	t.Parallel()
+	d, _ := newTestDiscovery(t, "pods,widgets.example.com")
+	gvr, namespaced, err := d.Resolve(context.Background(), widgetGVK)
+	if err != nil {
+		t.Fatalf("Resolve(Widget) = %v", err)
+	}
+	if gvr.Resource != "widgets" || gvr.Group != "example.com" || !namespaced {
+		t.Errorf("Resolve(Widget) = %v namespaced=%v", gvr, namespaced)
+	}
+}
+
+func TestDiscoveryRespectsTheAllowlist(t *testing.T) {
+	t.Parallel()
+	// secrets exist in the cluster but are outside the serve list.
+	d, _ := newTestDiscovery(t, "pods")
+	_, _, err := d.Resolve(context.Background(), schema.GroupVersionKind{Version: "v1", Kind: "Secret"})
+	if !errors.Is(err, ErrUnsupportedKind) {
+		t.Fatalf("Resolve(Secret) = %v, want ErrUnsupportedKind", err)
+	}
+	// The error must not distinguish "not allowed" from "does not exist",
+	// or the allowlist becomes enumerable by probing.
+	_, _, missing := d.Resolve(context.Background(), schema.GroupVersionKind{Version: "v1", Kind: "Nonexistent"})
+	if !errors.Is(missing, ErrUnsupportedKind) {
+		t.Fatalf("Resolve(Nonexistent) = %v, want ErrUnsupportedKind", missing)
+	}
+	if strings.Contains(err.Error(), "allow") || strings.Contains(err.Error(), "serve") {
+		t.Errorf("denied-by-allowlist error leaks the reason: %q", err)
+	}
+}
+
+func TestDiscoveryIgnoresSubresources(t *testing.T) {
+	t.Parallel()
+	d, _ := newTestDiscovery(t, "pods,*.example.com")
+	gvr, _, err := d.Resolve(context.Background(), schema.GroupVersionKind{Version: "v1", Kind: "Pod"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// "pods/log" shares the Pod kind and must never win the lookup.
+	if gvr.Resource != "pods" {
+		t.Errorf("Resolve(Pod) = %q, want pods", gvr.Resource)
+	}
+}
+
+func TestDiscoveryCachesAndRetriesOnceOnAMiss(t *testing.T) {
+	t.Parallel()
+	d, fd := newTestDiscovery(t, "pods")
+	ctx := context.Background()
+	for range 5 {
+		if _, _, err := d.Resolve(ctx, schema.GroupVersionKind{Version: "v1", Kind: "Pod"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := fd.calls.Load(); got != 1 {
+		t.Errorf("discovery fetched %d times for 5 resolves, want 1: Resolve is on every scan's path", got)
+	}
+
+	// An unknown kind in a known group-version must not invalidate: the
+	// group-version was fetched successfully, the kind simply is not in it.
+	before := fd.invalidations.Load()
+	_, _, err := d.Resolve(ctx, schema.GroupVersionKind{Version: "v1", Kind: "Ghost"})
+	if !errors.Is(err, ErrUnsupportedKind) {
+		t.Fatalf("err = %v, want ErrUnsupportedKind", err)
+	}
+	if got := fd.invalidations.Load() - before; got != 1 {
+		t.Errorf("invalidated %d times, want exactly 1 (retry once so a new CRD resolves without a restart)", got)
+	}
+}
+
+func TestDiscoveryFindsACRDCreatedAfterStartup(t *testing.T) {
+	t.Parallel()
+	d, fd := newTestDiscovery(t, "gadgets.example.com")
+	ctx := context.Background()
+	gadget := schema.GroupVersionKind{Group: "example.com", Version: "v1", Kind: "Gadget"}
+	if _, _, err := d.Resolve(ctx, gadget); !errors.Is(err, ErrUnsupportedKind) {
+		t.Fatalf("before creation: err = %v, want ErrUnsupportedKind", err)
+	}
+	// The CRD appears in the cluster after the gateway cached the group.
+	fd.byGV["example.com/v1"].APIResources = append(fd.byGV["example.com/v1"].APIResources,
+		metav1.APIResource{Name: "gadgets", Kind: "Gadget", Namespaced: true, Verbs: metav1.Verbs{"get", "list"}})
+	gvr, _, err := d.Resolve(ctx, gadget)
+	if err != nil {
+		t.Fatalf("after creation: %v (a CRD created while the gateway runs must resolve without a restart)", err)
+	}
+	if gvr.Resource != "gadgets" {
+		t.Errorf("Resolve(Gadget) = %q, want gadgets", gvr.Resource)
+	}
+}
+
+func TestDiscoveryDescribeBuildsColumnsFromOpenAPI(t *testing.T) {
+	t.Parallel()
+	d, _ := newTestDiscovery(t, "*.example.com")
+	info, err := d.Describe(context.Background(), widgetGVK)
+	if err != nil {
+		t.Fatalf("Describe(Widget) = %v", err)
+	}
+	if info.Plural != "widgets" || !info.Namespaced {
+		t.Errorf("Describe(Widget) plural=%q namespaced=%v", info.Plural, info.Namespaced)
+	}
+	if !info.Writable || !info.Watchable {
+		t.Errorf("Widget advertises create/update/delete/watch; got writable=%v watchable=%v", info.Writable, info.Watchable)
+	}
+	want := "name,namespace,uid,resource_version,creation_timestamp,labels,annotations,spec,status,raw"
+	if got := joined(info.Columns); got != want {
+		t.Errorf("columns = %s\n     want %s", got, want)
+	}
+}
+
+func TestDiscoveryDescribeClusterScopedKind(t *testing.T) {
+	t.Parallel()
+	d, _ := newTestDiscovery(t, "*.example.com")
+	info, err := d.Describe(context.Background(), clusterGVK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Namespaced {
+		t.Error("ClusterWidget should be cluster-scoped")
+	}
+	if strings.Contains(joined(info.Columns), "namespace") {
+		t.Errorf("cluster-scoped kind must have no namespace column, got %s", joined(info.Columns))
+	}
+	if info.Writable {
+		t.Error("ClusterWidget advertises only get/list; Writable must be false")
+	}
+	if info.Watchable {
+		t.Error("ClusterWidget does not advertise watch; Watchable must be false")
+	}
+}
+
+func TestDiscoveryDescribeFailsRatherThanReturningAThinTable(t *testing.T) {
+	t.Parallel()
+	d, fd := newTestDiscovery(t, "pods")
+	fd.openapi = fakeOpenAPI{err: errors.New("openapi endpoint unavailable")}
+	d.openapi = fd.openapi
+	_, err := d.Describe(context.Background(), schema.GroupVersionKind{Version: "v1", Kind: "Pod"})
+	if err == nil {
+		t.Fatal("Describe must fail when the schema cannot be read, not return a kind with no fields")
+	}
+	if !strings.Contains(err.Error(), "openapi") {
+		t.Errorf("err = %v, want it to name openapi as the cause", err)
+	}
+}
+
+func TestDiscoveryDescribeUnknownKindInSchemaDocument(t *testing.T) {
+	t.Parallel()
+	d, _ := newTestDiscovery(t, "secrets")
+	// Secrets resolve, and the document describes them; flip to a kind the
+	// document does not describe to exercise the not-in-schema path.
+	d.openapi = fakeOpenAPI{paths: map[string]openapi.GroupVersion{
+		"api/v1": fakeGroupVersion{doc: openAPIDocFor(t, nil)},
+	}}
+	_, err := d.Describe(context.Background(), schema.GroupVersionKind{Version: "v1", Kind: "Secret"})
+	if err == nil || !strings.Contains(err.Error(), "not described") {
+		t.Fatalf("err = %v, want a 'not described by the schema document' error", err)
+	}
+}
+
+func TestDiscoveryKindsEnumeratesOnlyServedKinds(t *testing.T) {
+	t.Parallel()
+	d, _ := newTestDiscovery(t, "pods,*.example.com")
+	got, err := d.Kinds(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plurals []string
+	for _, k := range got {
+		plurals = append(plurals, k.Plural)
+	}
+	// Sorted by group then plural; secrets are excluded by the allowlist.
+	want := "pods,clusterwidgets,widgets"
+	if strings.Join(plurals, ",") != want {
+		t.Errorf("Kinds() = %v, want %s", plurals, want)
+	}
+}
+
+func TestDiscoveryKindsFilters(t *testing.T) {
+	t.Parallel()
+	d, _ := newTestDiscovery(t, "pods,*.example.com")
+	ctx := context.Background()
+
+	group := "example.com"
+	byGroup, err := d.Kinds(ctx, &group, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range byGroup {
+		if k.GVK.Group != "example.com" {
+			t.Errorf("group filter leaked %s", k.GVK)
+		}
+	}
+	if len(byGroup) != 2 {
+		t.Errorf("group filter returned %d kinds, want 2", len(byGroup))
+	}
+
+	core := ""
+	byCore, err := d.Kinds(ctx, &core, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byCore) != 1 || byCore[0].Plural != "pods" {
+		t.Errorf("core group filter = %v, want just pods (the empty group must mean core, not unset)", byCore)
+	}
+
+	byPlural, err := d.Kinds(ctx, nil, []string{"widgets", "nonexistent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byPlural) != 1 || byPlural[0].Plural != "widgets" {
+		t.Errorf("plural filter = %v, want just widgets; an unmatched name is omitted, not an error", byPlural)
+	}
+}
+
+func TestDiscoveryKindsSkipsUnlistableKinds(t *testing.T) {
+	t.Parallel()
+	d, fd := newTestDiscovery(t, "*.example.com")
+	fd.byGV["example.com/v1"].APIResources = append(fd.byGV["example.com/v1"].APIResources,
+		metav1.APIResource{Name: "actions", Kind: "Action", Namespaced: true, Verbs: metav1.Verbs{"create"}})
+	got, err := d.Kinds(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range got {
+		if k.Plural == "actions" {
+			t.Error("a kind that cannot be listed has no rows and must not become a table")
+		}
+	}
+}
+
+func TestOpenAPIPath(t *testing.T) {
+	t.Parallel()
+	if got := openAPIPath(schema.GroupVersion{Version: "v1"}); got != "api/v1" {
+		t.Errorf("core group path = %q, want api/v1", got)
+	}
+	if got := openAPIPath(schema.GroupVersion{Group: "example.com", Version: "v1"}); got != "apis/example.com/v1" {
+		t.Errorf("group path = %q, want apis/example.com/v1", got)
+	}
+}

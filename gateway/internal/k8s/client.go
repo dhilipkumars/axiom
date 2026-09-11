@@ -22,10 +22,18 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// Client is the gateway's cluster surface: reads (Phase 1) and writes
-// (Phase 2). Implementations must return apimachinery StatusErrors
-// (apierrors.IsNotFound, IsConflict, ...) so callers can map them to gRPC codes.
+// Client is the gateway's cluster surface: reads (Phase 1), writes (Phase 2),
+// watch (Phase 3) and schema discovery (Phase 4). Implementations must return
+// apimachinery StatusErrors (apierrors.IsNotFound, IsConflict, ...) so callers
+// can map them to gRPC codes.
+//
+// Discovery is part of this interface rather than a second dependency so that
+// "what this gateway can serve" and "what it does with a served kind" can never
+// disagree: the same Mapper that resolves a scan's GVK is the one that decided
+// the kind was servable in the first place.
 type Client interface {
+	Mapper
+
 	// Get returns one object. Namespace must be empty for cluster-scoped kinds.
 	Get(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) (*unstructured.Unstructured, error)
 	// List returns objects of one kind. Empty namespace means all namespaces.
@@ -53,43 +61,23 @@ var ErrUnsupportedKind = errors.New("unsupported kind")
 // ErrNoCluster is returned by Unconfigured for every read.
 var ErrNoCluster = errors.New("gateway has no cluster credentials configured")
 
-// resource describes how a served kind maps onto the REST API.
-type resource struct {
-	gvr        schema.GroupVersionResource
-	namespaced bool
-}
-
-// registry is the static set of kinds served: Pods (Phase 1, read-only at the
-// SQL layer) and ConfigMaps (Phase 2, read-write).
-// TODO(phase4): replace with RESTMapper-backed discovery so CRDs resolve.
-var registry = map[schema.GroupVersionKind]resource{
-	{Group: "", Version: "v1", Kind: "Pod"}: {
-		gvr:        schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"},
-		namespaced: true,
-	},
-	{Group: "", Version: "v1", Kind: "ConfigMap"}: {
-		gvr:        schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"},
-		namespaced: true,
-	},
-}
-
-// Resolve maps a GVK to its REST resource. Returns ErrUnsupportedKind (wrapped
-// with the GVK) for anything outside the registry.
-func Resolve(gvk schema.GroupVersionKind) (schema.GroupVersionResource, bool, error) {
-	r, ok := registry[gvk]
-	if !ok {
-		return schema.GroupVersionResource{}, false, fmt.Errorf("%w: %s", ErrUnsupportedKind, gvk.String())
-	}
-	return r.gvr, r.namespaced, nil
-}
-
-// Dynamic is a Client over client-go's dynamic interface.
+// Dynamic is a Client over client-go's dynamic interface, resolving kinds
+// through a Mapper rather than a compile-time table.
 type Dynamic struct {
 	dyn dynamic.Interface
+	Mapper
 }
 
-// NewDynamic wraps an existing dynamic client (real or fake).
-func NewDynamic(d dynamic.Interface) *Dynamic { return &Dynamic{dyn: d} }
+// NewDynamic wraps an existing dynamic client (real or fake) and the Mapper
+// that decides which kinds it serves. A nil Mapper serves nothing, so a
+// miswired gateway fails loudly on the first scan instead of resolving
+// everything (docs/RULES.md §1).
+func NewDynamic(d dynamic.Interface, m Mapper) *Dynamic {
+	if m == nil {
+		m = NewStaticMapper()
+	}
+	return &Dynamic{dyn: d, Mapper: m}
+}
 
 // Config loads REST config from kubeconfigPath, or in-cluster config when the
 // path is empty. Errors wrap the underlying cause but never include token or
@@ -112,17 +100,18 @@ func Config(kubeconfigPath string) (*rest.Config, error) {
 	return cfg, nil
 }
 
-// NewFromConfig builds a Dynamic client from REST config.
-func NewFromConfig(cfg *rest.Config) (*Dynamic, error) {
+// NewFromConfig builds a Dynamic client from REST config, resolving kinds
+// through m.
+func NewFromConfig(cfg *rest.Config, m Mapper) (*Dynamic, error) {
 	d, err := dynamic.NewForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("k8s: dynamic client: %w", err)
 	}
-	return NewDynamic(d), nil
+	return NewDynamic(d, m), nil
 }
 
-func (c *Dynamic) resourceFor(gvk schema.GroupVersionKind, namespace string) (dynamic.ResourceInterface, error) {
-	gvr, namespaced, err := Resolve(gvk)
+func (c *Dynamic) resourceFor(ctx context.Context, gvk schema.GroupVersionKind, namespace string) (dynamic.ResourceInterface, error) {
+	gvr, namespaced, err := c.Resolve(ctx, gvk)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +126,7 @@ func (c *Dynamic) resourceFor(gvk schema.GroupVersionKind, namespace string) (dy
 
 // Get implements Client.
 func (c *Dynamic) Get(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) (*unstructured.Unstructured, error) {
-	ri, err := c.resourceFor(gvk, namespace)
+	ri, err := c.resourceFor(ctx, gvk, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +145,7 @@ func (c *Dynamic) List(ctx context.Context, gvk schema.GroupVersionKind, namespa
 		}
 		return &unstructured.UnstructuredList{Items: []unstructured.Unstructured{*obj}}, nil
 	}
-	ri, err := c.resourceFor(gvk, namespace)
+	ri, err := c.resourceFor(ctx, gvk, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +154,7 @@ func (c *Dynamic) List(ctx context.Context, gvk schema.GroupVersionKind, namespa
 
 // Create implements Client.
 func (c *Dynamic) Create(ctx context.Context, gvk schema.GroupVersionKind, namespace string, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
-	ri, err := c.resourceFor(gvk, namespace)
+	ri, err := c.resourceFor(ctx, gvk, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +163,7 @@ func (c *Dynamic) Create(ctx context.Context, gvk schema.GroupVersionKind, names
 
 // Update implements Client.
 func (c *Dynamic) Update(ctx context.Context, gvk schema.GroupVersionKind, namespace string, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
-	ri, err := c.resourceFor(gvk, namespace)
+	ri, err := c.resourceFor(ctx, gvk, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +172,7 @@ func (c *Dynamic) Update(ctx context.Context, gvk schema.GroupVersionKind, names
 
 // Delete implements Client.
 func (c *Dynamic) Delete(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) error {
-	ri, err := c.resourceFor(gvk, namespace)
+	ri, err := c.resourceFor(ctx, gvk, namespace)
 	if err != nil {
 		return err
 	}
@@ -192,7 +181,7 @@ func (c *Dynamic) Delete(ctx context.Context, gvk schema.GroupVersionKind, names
 
 // Watch implements Client.
 func (c *Dynamic) Watch(ctx context.Context, gvk schema.GroupVersionKind, namespace, resourceVersion string) (watch.Interface, error) {
-	ri, err := c.resourceFor(gvk, namespace)
+	ri, err := c.resourceFor(ctx, gvk, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -235,5 +224,23 @@ func (Unconfigured) Delete(context.Context, schema.GroupVersionKind, string, str
 
 // Watch implements Client.
 func (Unconfigured) Watch(context.Context, schema.GroupVersionKind, string, string) (watch.Interface, error) {
+	return nil, ErrNoCluster
+}
+
+// Resolve implements Mapper.
+func (Unconfigured) Resolve(context.Context, schema.GroupVersionKind) (schema.GroupVersionResource, bool, error) {
+	return schema.GroupVersionResource{}, false, ErrNoCluster
+}
+
+// Describe implements Mapper.
+func (Unconfigured) Describe(context.Context, schema.GroupVersionKind) (KindInfo, error) {
+	return KindInfo{}, ErrNoCluster
+}
+
+// Kinds implements Mapper. It reports the error rather than an empty list: an
+// empty enumeration would make IMPORT FOREIGN SCHEMA succeed with no tables,
+// which reads as "this cluster has nothing" instead of "this gateway has no
+// cluster" (docs/RULES.md §1).
+func (Unconfigured) Kinds(context.Context, *string, []string) ([]KindInfo, error) {
 	return nil, ErrNoCluster
 }

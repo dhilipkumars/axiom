@@ -39,7 +39,7 @@ func newReadServer(t *testing.T) *Server {
 		testPod("default", "web", "Running", "node-a"),
 		testPod("default", "db", "Pending", ""),
 		testPod("kube-system", "dns", "Running", "node-b"))
-	return New("t", nil, k8s.NewDynamic(dyn), nil)
+	return New("t", nil, k8s.NewDynamic(dyn, k8s.NewStaticMapper(k8s.BuiltinKinds()...)), nil)
 }
 
 func TestGet(t *testing.T) {
@@ -164,6 +164,18 @@ func (e errClient) Delete(context.Context, schema.GroupVersionKind, string, stri
 }
 
 func (e errClient) Watch(context.Context, schema.GroupVersionKind, string, string) (watch.Interface, error) {
+	return nil, e.err
+}
+
+func (e errClient) Resolve(context.Context, schema.GroupVersionKind) (schema.GroupVersionResource, bool, error) {
+	return schema.GroupVersionResource{}, false, e.err
+}
+
+func (e errClient) Describe(context.Context, schema.GroupVersionKind) (k8s.KindInfo, error) {
+	return k8s.KindInfo{}, e.err
+}
+
+func (e errClient) Kinds(context.Context, *string, []string) ([]k8s.KindInfo, error) {
 	return nil, e.err
 }
 
