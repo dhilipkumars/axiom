@@ -140,6 +140,13 @@ impl TableSchema {
 fn project(raw: &serde_json::Value, column: &ResolvedColumn) -> Option<Cell> {
     match column.projection {
         Projection::Text(pointer) => str_at(raw, pointer).map(|s| Cell::Text(s.to_owned())),
+        Projection::Scalar(pointer) => raw.pointer(pointer).and_then(|v| match v {
+            serde_json::Value::String(s) => Some(Cell::Text(s.clone())),
+            serde_json::Value::Number(n) => Some(Cell::Text(n.to_string())),
+            serde_json::Value::Bool(b) => Some(Cell::Text(b.to_string())),
+            // Objects, arrays and null have no faithful text rendering here.
+            _ => None,
+        }),
         Projection::Json {
             pointer,
             empty_object,
@@ -469,10 +476,10 @@ fn apply_column(
                 }
             }
         }
-        // Text and Raw projections are never applied column-wise: name and
-        // namespace go through set_identity, raw is the base object, and every
-        // other text projection is server-managed.
-        Projection::Text(_) | Projection::Raw => {}
+        // Text, Scalar and Raw projections are never applied column-wise: name
+        // and namespace go through set_identity, raw is the base object, and
+        // every other text projection is server-managed.
+        Projection::Text(_) | Projection::Scalar(_) | Projection::Raw => {}
     }
     Ok(())
 }
@@ -819,6 +826,58 @@ mod tests {
             Some(&Cell::Json(json!({}))),
             "absent data reads as {{}} so `data ? 'k'` is false, not NULL"
         );
+    }
+
+    #[test]
+    fn decodes_deployment_replica_counts_from_json_numbers() {
+        let r = Resource::new("apps", "v1", "Deployment", "deployments", true).expect("valid");
+        let s = TableSchema::resolve(
+            r,
+            true,
+            &[
+                Some("name"),
+                Some("replicas"),
+                Some("ready_replicas"),
+                Some("available_replicas"),
+                Some("updated_replicas"),
+            ],
+        );
+        let obj = json!({
+            "metadata": {"name": "api", "namespace": "shop"},
+            "spec": {"replicas": 3},
+            "status": {"readyReplicas": 2, "availableReplicas": 2}
+        });
+        let row = s.row_from_value(&obj).expect("valid");
+        assert_eq!(row.cell(&s, "replicas"), Some(&Cell::Text("3".into())));
+        assert_eq!(
+            row.cell(&s, "ready_replicas"),
+            Some(&Cell::Text("2".into()))
+        );
+        assert_eq!(
+            row.cell(&s, "available_replicas"),
+            Some(&Cell::Text("2".into()))
+        );
+        // An absent count is NULL, never 0: "not reported" and "zero replicas"
+        // are different facts.
+        assert_eq!(row.cell(&s, "updated_replicas"), None);
+    }
+
+    #[test]
+    fn scalar_projection_renders_only_json_scalars() {
+        let r = Resource::new("apps", "v1", "Deployment", "deployments", true).expect("valid");
+        let s = TableSchema::resolve(r, true, &[Some("name"), Some("replicas")]);
+        for (value, want) in [
+            (json!(0), Some(Cell::Text("0".into()))),
+            (json!("3"), Some(Cell::Text("3".into()))),
+            (json!(true), Some(Cell::Text("true".into()))),
+            (json!(null), None),
+            (json!({"a": 1}), None),
+            (json!([1]), None),
+        ] {
+            let obj = json!({"metadata": {"name": "d"}, "spec": {"replicas": value}});
+            let row = s.row_from_value(&obj).expect("valid");
+            assert_eq!(row.cell(&s, "replicas"), want.as_ref(), "value {value}");
+        }
     }
 
     #[test]

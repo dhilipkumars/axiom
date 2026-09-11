@@ -39,8 +39,16 @@ impl SqlType {
 /// Where a column's value comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Projection {
-    /// A JSON pointer into the object, read as a string.
+    /// A JSON pointer into the object, read as a string. Strict: a value that
+    /// is not a JSON string reads as SQL NULL rather than being coerced, so a
+    /// field whose type changed upstream is visible as missing instead of
+    /// silently reinterpreted.
     Text(&'static str),
+    /// A JSON pointer into the object, read as text from any JSON scalar:
+    /// string, number or boolean. For fields Kubernetes models as numbers,
+    /// such as a Deployment's replica counts, which [`Projection::Text`]
+    /// would read as NULL. Objects, arrays and null read as SQL NULL.
+    Scalar(&'static str),
     /// A JSON pointer into the object, read as JSON. Absent means SQL NULL
     /// unless `empty_object` is set, in which case an absent value reads as
     /// `{}` so containment and key tests do not NULL-propagate.
@@ -81,6 +89,18 @@ const fn text(name: &'static str, pointer: &'static str, writable: bool) -> Colu
     }
 }
 
+const fn scalar(name: &'static str, pointer: &'static str) -> Column {
+    Column {
+        name,
+        sql_type: SqlType::Text,
+        projection: Projection::Scalar(pointer),
+        // Server-reported counts. spec.replicas is genuinely settable through
+        // Kubernetes, but writing it here would mean reaching into a nested
+        // path; scale by assigning the `spec` column instead.
+        writable: false,
+    }
+}
+
 const fn json(name: &'static str, pointer: &'static str, empty_object: bool) -> Column {
     Column {
         name,
@@ -110,6 +130,17 @@ const POD_PROMOTED: &[Column] = &[
     text("node", "/spec/nodeName", false),
 ];
 
+/// Deployments carry the numbers people actually filter on inside `spec` and
+/// `status`, deep enough that the generic top-level rule cannot reach them.
+/// They are text columns holding a rendered number, so `replicas::int` works
+/// and an absent field is NULL rather than zero.
+const DEPLOYMENT_PROMOTED: &[Column] = &[
+    scalar("replicas", "/spec/replicas"),
+    scalar("ready_replicas", "/status/readyReplicas"),
+    scalar("available_replicas", "/status/availableReplicas"),
+    scalar("updated_replicas", "/status/updatedReplicas"),
+];
+
 const CONFIGMAP_PROMOTED: &[Column] = &[
     // Absent data reads as `{}` so `data ? 'key'` is false rather than NULL.
     json("data", "/data", true),
@@ -123,12 +154,10 @@ const CONFIGMAP_PROMOTED: &[Column] = &[
 /// why the two lists are asserted equal by tests on both sides rather than by a
 /// shared artifact.
 pub fn promoted_columns(r: &Resource) -> &'static [Column] {
-    if !r.group.is_empty() {
-        return &[];
-    }
-    match r.kind.as_str() {
-        "Pod" => POD_PROMOTED,
-        "ConfigMap" => CONFIGMAP_PROMOTED,
+    match (r.group.as_str(), r.kind.as_str()) {
+        ("", "Pod") => POD_PROMOTED,
+        ("", "ConfigMap") => CONFIGMAP_PROMOTED,
+        ("apps", "Deployment") => DEPLOYMENT_PROMOTED,
         _ => &[],
     }
 }
@@ -267,6 +296,9 @@ mod tests {
     fn widgets() -> Resource {
         Resource::new("example.com", "v1", "Widget", "widgets", true).expect("valid")
     }
+    fn deployments() -> Resource {
+        Resource::new("apps", "v1", "Deployment", "deployments", true).expect("valid")
+    }
 
     #[test]
     fn normalize_matches_the_gateway_cases() {
@@ -320,6 +352,44 @@ mod tests {
                 .collect();
         assert_eq!(names, ["data"]);
         assert!(promoted_columns(&widgets()).is_empty());
+        // Mirrors the apps/v1 Deployment entry in the gateway's `promoted` map.
+        let names: Vec<&str> = promoted_columns(&deployments())
+            .iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "replicas",
+                "ready_replicas",
+                "available_replicas",
+                "updated_replicas"
+            ]
+        );
+    }
+
+    #[test]
+    fn deployment_replica_columns_are_scalars_not_strict_text() {
+        // Kubernetes models replica counts as JSON numbers, which
+        // Projection::Text reads as NULL. Getting this wrong gives a column
+        // that is silently always empty.
+        for c in promoted_columns(&deployments()) {
+            assert_eq!(c.sql_type, SqlType::Text, "{} should be text", c.name);
+            assert!(
+                matches!(c.projection, Projection::Scalar(_)),
+                "{} must use a Scalar projection to survive a numeric value",
+                c.name
+            );
+            assert!(!c.writable, "{} is server-reported", c.name);
+        }
+    }
+
+    #[test]
+    fn promoted_columns_are_keyed_on_group_as_well_as_kind() {
+        // A Deployment in some other group is not the apps/v1 Deployment.
+        let impostor =
+            Resource::new("example.com", "v1", "Deployment", "deployments", true).expect("valid");
+        assert!(promoted_columns(&impostor).is_empty());
     }
 
     #[test]

@@ -86,6 +86,21 @@ func TestColumns(t *testing.T) {
 			want:       "name,namespace,uid,resource_version,creation_timestamp,labels,annotations,phase,node,spec,status,raw",
 		},
 		{
+			name:       "deployments keep their hand-mapped replica columns",
+			gvk:        schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"},
+			namespaced: true,
+			topLevel:   []string{"apiVersion", "kind", "metadata", "spec", "status"},
+			want: "name,namespace,uid,resource_version,creation_timestamp,labels,annotations," +
+				"replicas,ready_replicas,available_replicas,updated_replicas,spec,status,raw",
+		},
+		{
+			name:       "a Deployment in another group gets no promoted columns",
+			gvk:        schema.GroupVersionKind{Group: "example.com", Version: "v1", Kind: "Deployment"},
+			namespaced: true,
+			topLevel:   []string{"spec", "status"},
+			want:       "name,namespace,uid,resource_version,creation_timestamp,labels,annotations,spec,status,raw",
+		},
+		{
 			name:       "a cluster-scoped kind has no namespace column",
 			gvk:        widget,
 			namespaced: false,
@@ -164,6 +179,39 @@ func TestColumnsAlwaysEndsWithRawAndHasNoDuplicates(t *testing.T) {
 			t.Errorf("duplicate column %q in %s", c.Name, joined(got))
 		}
 		seen[c.Name] = true
+	}
+}
+
+// TestPromotedColumnsMatchTheExtension pins the exact promoted set per kind.
+// The extension holds the same table keyed by the same GVKs (promoted_columns
+// in extension/src/schema.rs) and has the mirror of this test. A column added
+// on one side only reads as NULL rather than failing, which is why both sides
+// assert the set rather than relying on review.
+func TestPromotedColumnsMatchTheExtension(t *testing.T) {
+	t.Parallel()
+	want := map[schema.GroupVersionKind][]string{
+		{Group: "", Version: "v1", Kind: "Pod"}: {"phase", "node"},
+		{Group: "apps", Version: "v1", Kind: "Deployment"}: {
+			"replicas", "ready_replicas", "available_replicas", "updated_replicas",
+		},
+	}
+	if len(promoted) != len(want) {
+		t.Fatalf("promoted has %d kinds, want %d: update the extension's table too", len(promoted), len(want))
+	}
+	for gvk, names := range want {
+		got := promoted[gvk]
+		if len(got) != len(names) {
+			t.Errorf("%s: got %d columns, want %d", gvk, len(got), len(names))
+			continue
+		}
+		for i, n := range names {
+			if got[i].Name != n {
+				t.Errorf("%s column %d = %q, want %q", gvk, i, got[i].Name, n)
+			}
+			if got[i].Type != ColumnText {
+				t.Errorf("%s column %q is not text; the extension renders these as text", gvk, n)
+			}
+		}
 	}
 }
 

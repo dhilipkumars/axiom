@@ -156,6 +156,16 @@ var promoted = map[schema.GroupVersionKind][]Column{
 		{Name: "phase", Type: ColumnText, Source: "status.phase"},
 		{Name: "node", Type: ColumnText, Source: "spec.nodeName"},
 	},
+	// A Deployment's replica counts are what people filter on, and they sit
+	// too deep for the generic top-level rule. They are text columns holding a
+	// rendered number (Kubernetes models them as JSON numbers), so
+	// `replicas::int` works and an absent field is NULL rather than zero.
+	{Group: "apps", Version: "v1", Kind: "Deployment"}: {
+		{Name: "replicas", Type: ColumnText, Source: "spec.replicas"},
+		{Name: "ready_replicas", Type: ColumnText, Source: "status.readyReplicas"},
+		{Name: "available_replicas", Type: ColumnText, Source: "status.availableReplicas"},
+		{Name: "updated_replicas", Type: ColumnText, Source: "status.updatedReplicas"},
+	},
 }
 
 // skipTopLevel are the object-identity fields that never become columns of
