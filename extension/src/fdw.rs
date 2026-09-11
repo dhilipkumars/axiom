@@ -43,12 +43,14 @@ use pgrx::{pg_sys, JsonB, PgList, PgMemoryContexts};
 
 use crate::cache::{decide_tier, CacheMode, Tier};
 use crate::client::{self, ClientError, ErrorClass};
-use crate::kinds::{
-    self, Cell, DecodeError, Kind, NewCell, NewRow, Row, SqlType, WriteError, MAX_OBJECT_BYTES,
-};
 use crate::options::{self, Catalog, OptionsError, ServerOptions, TableOptions};
 use crate::quals::{Filter, Qual};
+use crate::resource::Resource;
+use crate::schema::SqlType;
 use crate::shmem::{self, ShmemError};
+use crate::table::{
+    self, Cell, DecodeError, NewCell, NewRow, Row, TableSchema, WriteError, MAX_OBJECT_BYTES,
+};
 
 // --- SQL surface --------------------------------------------------------------
 
@@ -130,7 +132,10 @@ fn options_sqlstate(e: &OptionsError) -> PgSqlErrorCode {
         OptionsError::Endpoint(_)
         | OptionsError::Timeout(_)
         | OptionsError::Resource(_)
-        | OptionsError::CacheMode(_) => PgSqlErrorCode::ERRCODE_FDW_INVALID_ATTRIBUTE_VALUE,
+        | OptionsError::CacheMode(_)
+        | OptionsError::Identity(_)
+        | OptionsError::Bool(..)
+        | OptionsError::ForcedWritable(_) => PgSqlErrorCode::ERRCODE_FDW_INVALID_ATTRIBUTE_VALUE,
     }
 }
 
@@ -151,7 +156,7 @@ fn client_sqlstate(e: &ClientError) -> PgSqlErrorCode {
 
 fn write_sqlstate(e: &WriteError) -> PgSqlErrorCode {
     match e {
-        WriteError::ReadOnly(_) | WriteError::IdentityChange(_) => {
+        WriteError::ReadOnly(_) | WriteError::IdentityChange(_) | WriteError::NotWritable(_) => {
             PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
         }
         WriteError::MissingName | WriteError::MissingNamespace | WriteError::NullNotAllowed(_) => {
@@ -203,7 +208,8 @@ unsafe fn options_from_list(list: *mut pg_sys::List) -> Vec<(String, String)> {
 /// Everything a scan needs from the catalogs.
 struct ScanConfig {
     server: ServerOptions,
-    kind: Kind,
+    resource: Resource,
+    writable: bool,
     cache_mode: CacheMode,
 }
 
@@ -223,7 +229,8 @@ unsafe fn scan_config(foreigntableid: pg_sys::Oid) -> ScanConfig {
         };
         ScanConfig {
             server,
-            kind: table.resource,
+            resource: table.resource,
+            writable: table.writable,
             cache_mode: table.cache_mode,
         }
     }
@@ -439,59 +446,70 @@ unsafe extern "C" fn get_foreign_plan(
 struct ScanState {
     config: ScanConfig,
     filter: Filter,
-    /// One entry per attribute of the scan tuple: index into
-    /// `kind.columns()`, or `None` for dropped columns.
-    columns: Vec<Option<usize>>,
+    /// The table's resolved columns, in attribute order.
+    schema: TableSchema,
     /// `None` until the first `Iterate` fetches; then the remaining rows.
     rows: Option<VecDeque<Row>>,
 }
 
-/// Builds the attribute → kind-column map, validating names and types.
-unsafe fn column_map(tupdesc: pg_sys::TupleDesc, kind: Kind) -> Vec<Option<usize>> {
+/// Resolves the relation's declared columns against its kind, validating types.
+///
+/// Unlike Phases 1-3 there is no list of permitted names to check against: a
+/// kind's fields are not known without discovery, and a scan deliberately never
+/// discovers. A name matching no promoted column becomes a top-level lookup
+/// that reads NULL if the object has no such field, which is what lets a
+/// hand-written table target a CRD. Types are still strict, so a column
+/// declared with the wrong type fails at scan rather than at cast time.
+unsafe fn resolve_schema(
+    tupdesc: pg_sys::TupleDesc,
+    resource: &Resource,
+    writable: bool,
+) -> TableSchema {
     // SAFETY: tupdesc is a live TupleDesc supplied by the executor.
     unsafe {
         let natts = usize::try_from((*tupdesc).natts).unwrap_or(0);
-        let mut out = Vec::with_capacity(natts);
+        let mut names: Vec<Option<String>> = Vec::with_capacity(natts);
         for i in 0..natts {
             let att = (*tupdesc).attrs.as_ptr().add(i);
             if (*att).attisdropped {
-                out.push(None);
+                names.push(None);
                 continue;
             }
-            let name = CStr::from_ptr((*att).attname.data.as_ptr().cast::<c_char>())
-                .to_string_lossy()
-                .into_owned();
-            let Some(idx) = kind.column_index(&name) else {
-                let supported: Vec<&str> = kind.columns().iter().map(|c| c.name).collect();
-                raise(
-                    PgSqlErrorCode::ERRCODE_FDW_COLUMN_NAME_NOT_FOUND,
-                    format!(
-                        "column {name:?} is not a {kind:?} column; supported columns: {}",
-                        supported.join(", ")
-                    ),
-                );
-            };
-            let (want_oid, want_name) = match kind.columns()[idx].sql_type {
+            names.push(Some(
+                CStr::from_ptr((*att).attname.data.as_ptr().cast::<c_char>())
+                    .to_string_lossy()
+                    .into_owned(),
+            ));
+        }
+        let borrowed: Vec<Option<&str>> = names.iter().map(|n| n.as_deref()).collect();
+        let schema = TableSchema::resolve(*resource, writable, &borrowed);
+
+        for (i, col) in schema.columns.iter().enumerate() {
+            let Some(col) = col else { continue };
+            let att = (*tupdesc).attrs.as_ptr().add(i);
+            let (want_oid, want_name) = match col.sql_type {
                 SqlType::Text => (pg_sys::TEXTOID, "text"),
                 SqlType::Jsonb => (pg_sys::JSONBOID, "jsonb"),
             };
             if (*att).atttypid != want_oid {
                 raise(
                     PgSqlErrorCode::ERRCODE_FDW_INVALID_DATA_TYPE,
-                    format!("column {name:?} must be of type {want_name}"),
+                    format!(
+                        "column {:?} must be of type {want_name} for {}",
+                        col.name, schema.resource
+                    ),
                 );
             }
-            out.push(Some(idx));
         }
-        out
+        schema
     }
 }
 
 /// Decodes gateway JSON into rows, raising on malformed objects.
-fn decode_rows(kind: Kind, objects: &[Vec<u8>]) -> VecDeque<Row> {
+fn decode_rows(schema: &TableSchema, objects: &[Vec<u8>]) -> VecDeque<Row> {
     let mut rows = VecDeque::with_capacity(objects.len());
     for json in objects {
-        match kind.decode(json, MAX_OBJECT_BYTES) {
+        match schema.decode(json, MAX_OBJECT_BYTES) {
             Ok(r) => rows.push_back(r),
             Err(
                 e @ (DecodeError::TooLarge { .. } | DecodeError::Json(_) | DecodeError::Shape(_)),
@@ -509,21 +527,22 @@ fn decode_rows(kind: Kind, objects: &[Vec<u8>]) -> VecDeque<Row> {
 /// Stores `row` into `slot` as a virtual tuple, allocating datums in `memcx`.
 unsafe fn store_row(
     slot: *mut pg_sys::TupleTableSlot,
-    columns: &[Option<usize>],
+    schema: &TableSchema,
     row: &Row,
     memcx: pg_sys::MemoryContext,
 ) {
-    // SAFETY: slot is the executor's slot for this relation; columns matches its tupdesc.
+    // SAFETY: slot is the executor's slot for this relation; the schema was
+    // resolved from that relation's tupdesc, so cells align with attributes.
     unsafe {
         if let Some(clear) = (*(*slot).tts_ops).clear {
             clear(slot);
         }
-        let natts = columns.len();
+        let natts = schema.columns.len();
         let values = std::slice::from_raw_parts_mut((*slot).tts_values, natts);
         let isnull = std::slice::from_raw_parts_mut((*slot).tts_isnull, natts);
         PgMemoryContexts::For(memcx).switch_to(|_| {
-            for (i, col) in columns.iter().enumerate() {
-                let datum = match col.and_then(|c| row.cells.get(c)).and_then(Option::as_ref) {
+            for i in 0..natts {
+                let datum = match row.cells.get(i).and_then(Option::as_ref) {
                     Some(Cell::Text(s)) => s.clone().into_datum(),
                     Some(Cell::Json(v)) => JsonB(v.clone()).into_datum(),
                     None => None,
@@ -558,27 +577,24 @@ unsafe fn slot_datum(slot: *mut pg_sys::TupleTableSlot, attno: i16) -> Option<pg
     }
 }
 
-/// Reads the new tuple's columns into a [`NewRow`] aligned with `kind.columns()`.
-unsafe fn new_row_from_slot(
-    slot: *mut pg_sys::TupleTableSlot,
-    columns: &[Option<usize>],
-    kind: Kind,
-) -> NewRow {
-    let mut row = NewRow::undeclared(kind);
-    for (i, col) in columns.iter().enumerate() {
-        let Some(idx) = *col else { continue };
+/// Reads the new tuple's columns into a [`NewRow`] aligned with the table's
+/// resolved columns.
+unsafe fn new_row_from_slot(slot: *mut pg_sys::TupleTableSlot, schema: &TableSchema) -> NewRow {
+    let mut row = NewRow::undeclared(schema);
+    for (i, col) in schema.columns.iter().enumerate() {
+        let Some(col) = col else { continue };
         let attno = i16::try_from(i + 1).unwrap_or(0);
-        // SAFETY: attno is within the slot's tupdesc by construction of `columns`.
+        // SAFETY: attno is within the slot's tupdesc by construction of the schema.
         let Some(datum) = (unsafe { slot_datum(slot, attno) }) else {
-            row.cells[idx] = NewCell::Null;
+            row.cells[i] = NewCell::Null;
             continue;
         };
-        let value = match kind.columns()[idx].sql_type {
-            // SAFETY: column types were checked against the tupdesc in column_map.
+        let value = match col.sql_type {
+            // SAFETY: column types were checked against the tupdesc in resolve_schema.
             SqlType::Text => unsafe { String::from_datum(datum, false) }.map(Cell::Text),
             SqlType::Jsonb => unsafe { JsonB::from_datum(datum, false) }.map(|j| Cell::Json(j.0)),
         };
-        row.cells[idx] = value.map_or(NewCell::Null, NewCell::Value);
+        row.cells[i] = value.map_or(NewCell::Null, NewCell::Value);
     }
     row
 }
@@ -599,11 +615,11 @@ unsafe extern "C" fn begin_foreign_scan(node: *mut pg_sys::ForeignScanState, efl
             rel_oid,
         );
         let config = scan_config(rel_oid);
-        let columns = column_map((*rel).rd_att, config.kind);
+        let schema = resolve_schema((*rel).rd_att, &config.resource, config.writable);
         let state = ScanState {
             config,
             filter: Filter::from_quals(&quals),
-            columns,
+            schema,
             rows: None,
         };
         // Dropped when the executor's per-query context is reset, error or not.
@@ -623,7 +639,7 @@ fn fetch_from_cache(state: &ScanState) -> Option<VecDeque<Row>> {
     let looked_up = shmem::lookup_or_request(
         &state.config.server.target,
         state.config.server.rpc_timeout,
-        state.config.kind,
+        &state.config.resource,
         ns,
     );
     let (slot, id, sub_state) = match looked_up {
@@ -650,17 +666,17 @@ fn fetch_from_cache(state: &ScanState) -> Option<VecDeque<Row>> {
                     .and_then(|rows| {
                         rows.into_iter().find(|r| {
                             r.endpoint == state.config.server.target.endpoint
-                                && r.resource == state.config.kind.resource_name()
+                                && r.resource == state.config.resource.plural.as_str()
                                 && r.namespace == ns
                         })
                     })
                     .map_or_else(String::new, |r| r.reason);
                 warning!(
                     "axiom: serving STALE data for {} from the watch cache: the watch is DEGRADED ({reason}); see axiom_watch_status()",
-                    state.config.kind.resource_name()
+                    state.config.resource
                 );
             }
-            Some(decode_rows(state.config.kind, &objects))
+            Some(decode_rows(&state.schema, &objects))
         }
         Err(e) => {
             warning!("axiom: cache read failed ({e}); serving this scan on demand");
@@ -681,8 +697,8 @@ fn fetch_rows(state: &ScanState) -> VecDeque<Row> {
             return rows;
         }
     }
-    match client::list(&state.config.server, state.config.kind, &state.filter) {
-        Ok(objects) => decode_rows(state.config.kind, &objects),
+    match client::list(&state.config.server, &state.config.resource, &state.filter) {
+        Ok(objects) => decode_rows(&state.schema, &objects),
         Err(e) => raise_client("list", &state.config.server, &e),
     }
 }
@@ -716,7 +732,7 @@ unsafe extern "C" fn iterate_foreign_scan(
         };
         // Row datums belong to the per-tuple context, which ExecScan resets per row.
         let per_tuple = (*(*node).ss.ps.ps_ExprContext).ecxt_per_tuple_memory;
-        store_row(slot, &state.columns, &row, per_tuple);
+        store_row(slot, &state.schema, &row, per_tuple);
         slot
     }
 }
@@ -746,7 +762,7 @@ const JUNK_RAW: &CStr = c"axiom_raw";
 /// Per-statement modify state, allocated in the per-query memory context.
 struct ModifyState {
     config: ScanConfig,
-    columns: Vec<Option<usize>>,
+    schema: TableSchema,
     /// Attribute number of `axiom_raw` in the subplan's output (UPDATE/DELETE), else 0.
     junk_raw_attno: i16,
 }
@@ -756,7 +772,7 @@ struct ModifyState {
 unsafe extern "C" fn is_foreign_rel_updatable(rel: pg_sys::Relation) -> c_int {
     // SAFETY: rel is an open relation supplied by the planner/executor.
     let cfg = unsafe { scan_config((*rel).rd_id) };
-    if cfg.kind.writable() {
+    if cfg.writable {
         (1 << pg_sys::CmdType::CMD_INSERT)
             | (1 << pg_sys::CmdType::CMD_UPDATE)
             | (1 << pg_sys::CmdType::CMD_DELETE)
@@ -836,13 +852,13 @@ unsafe extern "C" fn begin_foreign_modify(
         }
         let rel = (*rinfo).ri_RelationDesc;
         let config = scan_config((*rel).rd_id);
-        if !config.kind.writable() {
+        if !config.writable {
             raise(
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                WriteError::ReadOnly(config.kind).to_string(),
+                WriteError::ReadOnly(config.resource.to_string()).to_string(),
             );
         }
-        let columns = column_map((*rel).rd_att, config.kind);
+        let schema = resolve_schema((*rel).rd_att, &config.resource, config.writable);
         let mut junk_raw_attno: i16 = 0;
         let op = (*mtstate).operation;
         if op == pg_sys::CmdType::CMD_UPDATE || op == pg_sys::CmdType::CMD_DELETE {
@@ -858,7 +874,7 @@ unsafe extern "C" fn begin_foreign_modify(
         }
         let state = ModifyState {
             config,
-            columns,
+            schema,
             junk_raw_attno,
         };
         (*rinfo).ri_FdwState = PgMemoryContexts::CurrentMemoryContext
@@ -923,19 +939,23 @@ unsafe extern "C" fn exec_foreign_insert(
     // SAFETY: executor-supplied pointers.
     unsafe {
         let state = modify_state(rinfo);
-        let kind = state.config.kind;
-        let new = new_row_from_slot(slot, &state.columns, kind);
-        let write = match kinds::insert_body(kind, &new) {
+        let new = new_row_from_slot(slot, &state.schema);
+        let write = match table::insert_body(&state.schema, &new) {
             Ok(w) => w,
             Err(e) => raise(write_sqlstate(&e), format!("axiom: INSERT: {e}")),
         };
-        let json = match client::create(&state.config.server, kind, &write.identity, &write.body) {
+        let json = match client::create(
+            &state.config.server,
+            &state.config.resource,
+            &write.identity,
+            &write.body,
+        ) {
             Ok(j) => j,
             Err(e) => raise_client("INSERT", &state.config.server, &e),
         };
         // Reflect the stored object (uid, resourceVersion, defaults) for RETURNING.
-        if let Some(row) = decode_rows(kind, &[json]).pop_front() {
-            store_row(slot, &state.columns, &row, per_tuple_memcx(estate));
+        if let Some(row) = decode_rows(&state.schema, &[json]).pop_front() {
+            store_row(slot, &state.schema, &row, per_tuple_memcx(estate));
         }
         slot
     }
@@ -951,19 +971,23 @@ unsafe extern "C" fn exec_foreign_update(
     // SAFETY: executor-supplied pointers.
     unsafe {
         let state = modify_state(rinfo);
-        let kind = state.config.kind;
         let old = old_raw(state, plan_slot);
-        let new = new_row_from_slot(slot, &state.columns, kind);
-        let write = match kinds::update_body(kind, &old, &new) {
+        let new = new_row_from_slot(slot, &state.schema);
+        let write = match table::update_body(&state.schema, &old, &new) {
             Ok(w) => w,
             Err(e) => raise(write_sqlstate(&e), format!("axiom: UPDATE: {e}")),
         };
-        let json = match client::update(&state.config.server, kind, &write.identity, &write.body) {
+        let json = match client::update(
+            &state.config.server,
+            &state.config.resource,
+            &write.identity,
+            &write.body,
+        ) {
             Ok(j) => j,
             Err(e) => raise_client("UPDATE", &state.config.server, &e),
         };
-        if let Some(row) = decode_rows(kind, &[json]).pop_front() {
-            store_row(slot, &state.columns, &row, per_tuple_memcx(estate));
+        if let Some(row) = decode_rows(&state.schema, &[json]).pop_front() {
+            store_row(slot, &state.schema, &row, per_tuple_memcx(estate));
         }
         slot
     }
@@ -979,18 +1003,17 @@ unsafe extern "C" fn exec_foreign_delete(
     // SAFETY: executor-supplied pointers.
     unsafe {
         let state = modify_state(rinfo);
-        let kind = state.config.kind;
         let old = old_raw(state, plan_slot);
-        let id = match kinds::identity_from_raw(&old) {
+        let id = match table::identity_from_raw(&old) {
             Ok(id) => id,
             Err(e) => raise(write_sqlstate(&e), format!("axiom: DELETE: {e}")),
         };
-        if let Err(e) = client::delete(&state.config.server, kind, &id) {
+        if let Err(e) = client::delete(&state.config.server, &state.config.resource, &id) {
             raise_client("DELETE", &state.config.server, &e);
         }
         // RETURNING sees the row as it was read.
-        if let Ok(row) = Row::from_value(kind, &old) {
-            store_row(slot, &state.columns, &row, per_tuple_memcx(estate));
+        if let Ok(row) = state.schema.row_from_value(&old) {
+            store_row(slot, &state.schema, &row, per_tuple_memcx(estate));
         }
         slot
     }

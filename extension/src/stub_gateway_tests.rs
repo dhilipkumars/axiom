@@ -23,6 +23,10 @@ use tonic::{Request, Response, Status};
 use crate::proto::v1::gateway_service_server::{GatewayService, GatewayServiceServer};
 use crate::proto::v1::subscribe_response::Type as EvType;
 use crate::proto::v1::{
+    ColumnSchema, DiscoverSchemaRequest, DiscoverSchemaResponse, GroupVersionKind, KindSchema,
+    ListKindsRequest, ListKindsResponse, SqlType,
+};
+use crate::proto::v1::{
     CreateRequest, CreateResponse, DeleteRequest, DeleteResponse, GetRequest, GetResponse,
     ListRequest, ListResponse, Object, PingRequest, PingResponse, UpdateRequest, UpdateResponse,
 };
@@ -353,6 +357,102 @@ impl GatewayService for Stub {
         }
         Ok(Response::new(DeleteResponse {}))
     }
+
+    /// The stub serves one hardcoded kind, so discovery answers for that kind
+    /// and refuses everything else. The extension's own IMPORT FOREIGN SCHEMA
+    /// tests drive this; the column list is what the real gateway's pure
+    /// `Columns` rule produces for a `ConfigMap`.
+    async fn discover_schema(
+        &self,
+        req: Request<DiscoverSchemaRequest>,
+    ) -> Result<Response<DiscoverSchemaResponse>, Status> {
+        let gvk = req.into_inner().gvk.unwrap_or_default();
+        let schema = stub_kind(&gvk.kind)
+            .ok_or_else(|| Status::invalid_argument(format!("unsupported kind: {}", gvk.kind)))?;
+        Ok(Response::new(DiscoverSchemaResponse {
+            schema: Some(schema),
+        }))
+    }
+
+    async fn list_kinds(
+        &self,
+        req: Request<ListKindsRequest>,
+    ) -> Result<Response<ListKindsResponse>, Status> {
+        let req = req.into_inner();
+        let kinds = ["Pod", "ConfigMap", "Widget"]
+            .into_iter()
+            .filter_map(stub_kind)
+            .filter(|k| {
+                let gvk = k.gvk.clone().unwrap_or_default();
+                req.group.as_ref().is_none_or(|g| *g == gvk.group)
+                    && (req.plurals.is_empty() || req.plurals.contains(&k.plural))
+            })
+            .collect();
+        Ok(Response::new(ListKindsResponse { kinds }))
+    }
+}
+
+/// Builds the wire schema for one stub kind, mirroring what the real gateway's
+/// discovery would return.
+fn stub_kind(kind: &str) -> Option<KindSchema> {
+    let text = |name: &str, source: &str| ColumnSchema {
+        name: name.to_owned(),
+        sql_type: SqlType::Text as i32,
+        source: source.to_owned(),
+    };
+    let jsonb = |name: &str, source: &str| ColumnSchema {
+        name: name.to_owned(),
+        sql_type: SqlType::Jsonb as i32,
+        source: source.to_owned(),
+    };
+    let meta = || {
+        vec![
+            text("name", "metadata.name"),
+            text("namespace", "metadata.namespace"),
+            text("uid", "metadata.uid"),
+            text("resource_version", "metadata.resourceVersion"),
+            text("creation_timestamp", "metadata.creationTimestamp"),
+            jsonb("labels", "metadata.labels"),
+            jsonb("annotations", "metadata.annotations"),
+        ]
+    };
+    let (group, plural, writable) = match kind {
+        "Pod" => ("", "pods", true),
+        "ConfigMap" => ("", "configmaps", true),
+        "Widget" => ("example.com", "widgets", true),
+        _ => return None,
+    };
+    let mut columns = meta();
+    match kind {
+        "Pod" => {
+            columns.push(text("phase", "status.phase"));
+            columns.push(text("node", "spec.nodeName"));
+            columns.push(jsonb("spec", "spec"));
+            columns.push(jsonb("status", "status"));
+        }
+        "ConfigMap" => {
+            columns.push(jsonb("binary_data", "binaryData"));
+            columns.push(jsonb("data", "data"));
+            columns.push(jsonb("immutable", "immutable"));
+        }
+        _ => {
+            columns.push(jsonb("spec", "spec"));
+            columns.push(jsonb("status", "status"));
+        }
+    }
+    columns.push(jsonb("raw", "the whole object"));
+    Some(KindSchema {
+        gvk: Some(GroupVersionKind {
+            group: group.to_owned(),
+            version: "v1".to_owned(),
+            kind: kind.to_owned(),
+        }),
+        plural: plural.to_owned(),
+        namespaced: true,
+        columns,
+        writable,
+        watchable: true,
+    })
 }
 
 /// A running stub: its address, the CA file path, and the shared state.

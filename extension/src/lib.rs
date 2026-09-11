@@ -18,15 +18,17 @@ pub mod cache;
 pub mod client;
 pub mod config;
 pub mod fdw;
-pub mod kinds;
 pub mod options;
 pub mod ping;
 pub mod proto;
 pub mod quals;
+pub mod resource;
+pub mod schema;
 pub mod shmem;
 pub mod status;
 #[cfg(test)]
 mod stub_gateway_tests;
+pub mod table;
 pub mod transport;
 
 ::pgrx::pg_module_magic!();
@@ -147,12 +149,58 @@ mod tests {
     }
 
     #[pg_test(
-        error = "option \"resource\" \"deployments\" is not supported; valid values: pods, configmaps"
+        error = "option \"resource\" \"deployments\" needs options \"version\" and \"kind\" (and \"group\" for a non-core API group) to identify it; only pods, configmaps are known without them. IMPORT FOREIGN SCHEMA writes these for you"
     )]
-    fn table_rejects_unknown_resource() {
+    fn table_rejects_an_unidentified_resource() {
+        // A kind that is not built in must spell out its identity; the
+        // extension never asks the gateway at DDL time.
         Spi::run(UNREACHABLE_SERVER).expect("server");
         Spi::run("CREATE FOREIGN TABLE t (name text) SERVER gw OPTIONS (resource 'deployments')")
             .expect("should fail");
+    }
+
+    #[pg_test]
+    fn table_accepts_a_crd_identified_by_group_version_kind() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run(
+            "CREATE FOREIGN TABLE w (name text, namespace text, spec jsonb, raw jsonb) \
+             SERVER gw OPTIONS (resource 'widgets', group 'example.com', version 'v1', kind 'Widget')",
+        )
+        .expect("a CRD table should be definable without contacting the gateway");
+    }
+
+    #[pg_test(
+        error = "option \"writable\" cannot be true for pods: the extension keeps this kind read-only because SQL UPDATE has no sane meaning for it"
+    )]
+    fn writable_cannot_be_forced_on_a_read_only_kind() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run(
+            "CREATE FOREIGN TABLE t (name text) SERVER gw \
+             OPTIONS (resource 'pods', writable 'true')",
+        )
+        .expect("should fail");
+    }
+
+    #[pg_test(error = "option \"namespaced\" must be true or false (got \"maybe\")")]
+    fn table_rejects_a_malformed_boolean_option() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run(
+            "CREATE FOREIGN TABLE t (name text) SERVER gw \
+             OPTIONS (resource 'widgets', version 'v1', kind 'Widget', namespaced 'maybe')",
+        )
+        .expect("should fail");
+    }
+
+    #[pg_test(
+        error = "option \"group\" contains a character that is not allowed in a Kubernetes name"
+    )]
+    fn table_rejects_an_identity_that_could_be_a_path() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run(
+            "CREATE FOREIGN TABLE t (name text) SERVER gw \
+             OPTIONS (resource 'widgets', version 'v1', kind 'Widget', group '../secrets')",
+        )
+        .expect("should fail");
     }
 
     #[pg_test(error = "invalid option \"password\" for UserMapping: no options are accepted")]
@@ -219,10 +267,8 @@ mod tests {
             .contains("Foreign Scan on k8s_pods"));
     }
 
-    #[pg_test(
-        error = "column \"labels\" is not a Pods column; supported columns: name, namespace, phase, node, raw"
-    )]
-    fn unknown_column_is_rejected_at_scan() {
+    #[pg_test(error = "column \"labels\" must be of type jsonb for pods")]
+    fn wrong_type_on_a_metadata_column_is_rejected_at_scan() {
         Spi::run(UNREACHABLE_SERVER).expect("server");
         Spi::run(
             "CREATE FOREIGN TABLE t (name text, labels text) SERVER gw OPTIONS (resource 'pods')",
@@ -231,7 +277,7 @@ mod tests {
         let _ = Spi::get_one::<i64>("SELECT count(*) FROM t WHERE name = 'impossible name'");
     }
 
-    #[pg_test(error = "column \"phase\" must be of type text")]
+    #[pg_test(error = "column \"phase\" must be of type text for pods")]
     fn wrong_column_type_is_rejected_at_scan() {
         Spi::run(UNREACHABLE_SERVER).expect("server");
         Spi::run(
@@ -239,6 +285,26 @@ mod tests {
         )
         .expect("table");
         let _ = Spi::get_one::<i64>("SELECT count(*) FROM t WHERE name = 'impossible name'");
+    }
+
+    #[pg_test]
+    fn a_column_the_kind_lacks_is_a_top_level_lookup_not_an_error() {
+        // Phases 1-3 rejected any name outside a fixed per-kind list. A CRD's
+        // fields are not known without discovery, and a scan never discovers,
+        // so an unrecognised name is now a top-level lookup that reads NULL.
+        // The type is still checked, which is what catches real mistakes.
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run(
+            "CREATE FOREIGN TABLE t (name text, nonesuch jsonb) SERVER gw OPTIONS (resource 'pods')",
+        )
+        .expect("table");
+        let n = Spi::get_one::<i64>("SELECT count(*) FROM t WHERE name = 'impossible name'")
+            .expect("query")
+            .expect("count");
+        assert_eq!(
+            n, 0,
+            "the impossible-name short circuit still avoids an RPC"
+        );
     }
 
     // --- Phase 3: watch cache plumbing without a real gateway ----------------------

@@ -253,7 +253,7 @@ impl Pinger {
 fn notify(spec: &SubSpec, ty: &str, namespace: &str, name: &str) {
     let payload = serde_json::json!({
         "server": spec.target.endpoint,
-        "resource": spec.kind.resource_name(),
+        "resource": spec.resource.to_string(),
         "namespace": namespace,
         "name": name,
         "type": ty,
@@ -377,7 +377,7 @@ fn transition(
         log!(
             "{WORKER_NAME}: watch {} {} ns={:?}: {} -> {} ({reason})",
             spec.target.endpoint,
-            spec.kind.resource_name(),
+            spec.resource,
             spec.namespace,
             current,
             next
@@ -440,12 +440,12 @@ async fn run_stream(
 ) -> Result<EventAction, String> {
     let channel = build_channel(&spec.target, spec.rpc_timeout).map_err(|e| e.to_string())?;
     let mut client = GatewayServiceClient::new(channel);
-    let (group, version, kind) = spec.kind.gvk();
+    let r = &spec.resource;
     let req = SubscribeRequest {
         gvk: Some(crate::proto::v1::GroupVersionKind {
-            group: group.into(),
-            version: version.into(),
-            kind: kind.into(),
+            group: r.group.to_string(),
+            version: r.version.to_string(),
+            kind: r.kind.to_string(),
         }),
         namespace: spec.namespace.clone(),
         resource_version: rv.to_owned(),
@@ -505,7 +505,7 @@ fn manage_subscriptions(tasks: &mut HashMap<(usize, u32), tokio::task::JoinHandl
         log!(
             "{WORKER_NAME}: starting watch for {} {} ns={:?}",
             spec.target.endpoint,
-            spec.kind.resource_name(),
+            spec.resource,
             spec.namespace
         );
         let spec = Rc::new(spec);
