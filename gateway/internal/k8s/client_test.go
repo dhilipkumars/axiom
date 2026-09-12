@@ -29,16 +29,18 @@ func pod(ns, name string) *corev1.Pod {
 func newFake(t *testing.T) *Dynamic {
 	t.Helper()
 	return NewDynamic(dynamicfake.NewSimpleDynamicClient(scheme.Scheme,
-		pod("default", "a"), pod("default", "b"), pod("other", "c")))
+		pod("default", "a"), pod("default", "b"), pod("other", "c")),
+		NewStaticMapper(BuiltinKinds()...))
 }
 
 func TestResolve(t *testing.T) {
 	t.Parallel()
-	gvr, namespaced, err := Resolve(podGVK)
+	m := NewStaticMapper(BuiltinKinds()...)
+	gvr, namespaced, err := m.Resolve(context.Background(), podGVK)
 	if err != nil || gvr.Resource != "pods" || !namespaced {
 		t.Fatalf("Resolve(Pod) = %v %v %v", gvr, namespaced, err)
 	}
-	_, _, err = Resolve(schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"})
+	_, _, err = m.Resolve(context.Background(), schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"})
 	if !errors.Is(err, ErrUnsupportedKind) {
 		t.Fatalf("err = %v, want ErrUnsupportedKind", err)
 	}

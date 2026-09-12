@@ -53,7 +53,7 @@ func TestSubscribeListsThenStreams(t *testing.T) {
 		testPod("default", "web", "Running", "n1"),
 		testPod("default", "db", "Pending", ""),
 		testPod("other", "x", "Running", "n2"))
-	client := k8s.NewDynamic(dyn)
+	client := k8s.NewDynamic(dyn, k8s.NewStaticMapper(k8s.BuiltinKinds()...))
 	srv := New("t", nil, client, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	rec := newRecorder(ctx)

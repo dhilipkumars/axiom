@@ -144,6 +144,20 @@ avoid torn reads during a concurrent scan.
   (`spec jsonb`, `status jsonb`) plus promoted top-level scalar fields
   (name/namespace/labels/annotations/resourceVersion), rather than trying to
   fully explode arbitrary CRD schemas into typed SQL columns.
+- **Where the mapping lives** (settled in Phase 4): the gateway decides *which*
+  columns a kind gets; the extension decides what each column *means*, keyed on
+  the column name alone. Neither side ships a per-kind table to the other, so a
+  scan needs no schema round-trip and the two cannot disagree about a value —
+  only about whether a column exists, whose worst case is a column that reads
+  NULL. `IMPORT FOREIGN SCHEMA` writes the resolved `(group, version, kind)`
+  into each generated table's options, which is what keeps discovery off the
+  scan path entirely.
+- **What a deployment serves** (added in Phase 4): removing the hardcoded kind
+  registry would otherwise have widened the gateway to everything in the
+  cluster, so the served set is an explicit `--serve` allowlist, with the
+  ServiceAccount's RBAC scoped to match (§7, RULES.md §3). A kind outside it is
+  reported exactly as a kind the cluster does not have, so the allowlist is not
+  enumerable by probing.
 - `IMPORT FOREIGN SCHEMA` support to auto-generate `CREATE FOREIGN TABLE` DDL by
   querying the gateway's discovery endpoint, rather than requiring hand-written DDL
   per resource type.
@@ -182,6 +196,15 @@ Placeholder design, to be firmed up before any non-POC deployment:
 
 - CRD schema explosion (deeply nested/oneOf-heavy CRDs) may force more JSONB and
   less typed-column mapping than we'd like — acceptable, not blocking.
+  **Revisited in Phase 4 and closed for now**: the mapping never explodes a CRD
+  schema at all, promoting metadata scalars and leaving every structured field
+  as top-level `jsonb`, so a pathological CRD costs nothing beyond a wider row.
+- **Status subresources** (found in Phase 4, open): a kind with
+  `subresources: status` has its status ignored by a PUT to the main resource,
+  so a SQL `UPDATE` of a `status` column would appear to succeed and change
+  nothing. Writing status needs its own request against the status subresource.
+  Not yet scheduled; the Phase 4 test CRD deliberately has no status
+  subresource so the gate tests the path that is actually implemented.
 - Watch scalability: many foreign tables × many namespaces could mean many informers
   in the gateway; needs shared-informer-factory style de-duplication, not one
   raw watch per foreign table.

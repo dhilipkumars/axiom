@@ -1,0 +1,29 @@
+# Instances of the Phase 4 test CRD. Kept in their own file because a CRD and
+# its instances cannot be applied together: the API server needs the CRD to be
+# Established before it can resolve the instances' kind.
+---
+apiVersion: example.com/v1
+kind: Widget
+metadata:
+  name: sprocket
+  namespace: axiom-e2e
+  labels:
+    tier: backend
+spec:
+  size: 3
+  color: blue
+status:
+  ready: true
+  phase: Running
+---
+apiVersion: example.com/v1
+kind: Widget
+metadata:
+  name: cog
+  namespace: axiom-e2e
+spec:
+  size: 7
+  color: red
+status:
+  ready: false
+  phase: Pending

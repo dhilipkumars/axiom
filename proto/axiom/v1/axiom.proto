@@ -2,9 +2,11 @@
 //
 // Phase 0 defined the liveness surface (Ping). Phase 1 added read-only, on-demand
 // access (Get/List). Phase 2 added the write path (Create/Update/Delete). Phase 3
-// adds the watch stream (Subscribe). Phase 4 adds DiscoverSchema per
-// docs/DESIGN.md §5.1. Credentials never appear as fields in
-// any message here: each side holds its own credentials locally (docs/RULES.md §3).
+// added the watch stream (Subscribe). Phase 4 adds schema discovery
+// (DiscoverSchema/ListKinds) per docs/DESIGN.md §5.1 and §5.4, which is what
+// lets arbitrary CRDs be served without a hand-written mapping per kind.
+// Credentials never appear as fields in any message here: each side holds its
+// own credentials locally (docs/RULES.md §3).
 syntax = "proto3";
 
 package axiom.v1;
@@ -96,6 +98,39 @@ service GatewayService {
   // re-watching from the last seen resourceVersion; the stream only ends on
   // RESYNC_REQUIRED, a non-retryable error, or client cancellation.
   rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
+
+  // DiscoverSchema resolves one kind against the cluster's discovery and
+  // OpenAPI documents and returns the foreign-table shape the extension should
+  // use for it. It is called at IMPORT FOREIGN SCHEMA time, never on the scan
+  // path: the generated DDL carries the resolved identity in table options, so
+  // a scan needs no discovery round-trip.
+  //
+  // The columns returned are the promoted metadata scalars, the kind's own
+  // top-level object fields (spec/status/data/...), and `raw` — see
+  // docs/DESIGN.md §5.4. The gateway only decides *which* columns exist; how a
+  // column is read out of an object is fixed by the extension's projection
+  // rule, so the two sides cannot disagree about a column's value.
+  //
+  // Errors: INVALID_ARGUMENT for a malformed gvk; NOT_FOUND if the cluster has
+  // no such kind; PERMISSION_DENIED if serving it is outside the gateway's
+  // configured allowlist or its own RBAC; FAILED_PRECONDITION if the gateway
+  // has no cluster configured; UNAVAILABLE if the API server cannot be reached.
+  rpc DiscoverSchema(DiscoverSchemaRequest) returns (DiscoverSchemaResponse);
+
+  // ListKinds enumerates the kinds this gateway is configured to serve,
+  // optionally narrowed to one API group and/or an explicit set of plural
+  // names. It backs IMPORT FOREIGN SCHEMA, which needs every kind's shape in
+  // one round-trip rather than one DiscoverSchema call per table.
+  //
+  // The result is bounded by the gateway's serve allowlist, so it describes
+  // what this deployment offers, not everything the cluster has. A kind the
+  // allowlist permits but the API server does not have is omitted rather than
+  // reported as an error.
+  //
+  // Errors: INVALID_ARGUMENT for a malformed filter; FAILED_PRECONDITION if
+  // the gateway has no cluster configured; UNAVAILABLE if the API server
+  // cannot be reached.
+  rpc ListKinds(ListKindsRequest) returns (ListKindsResponse);
 }
 
 message PingRequest {
@@ -232,4 +267,68 @@ message SubscribeResponse {
   // TYPE_RESYNC_REQUIRED, and for live TYPE_ADDED/MODIFIED/DELETED events.
   // Empty on initial-listing TYPE_ADDED events: never resume from those.
   string resource_version = 3;
+}
+
+// SqlType is the Postgres type a discovered column must be declared with.
+// Deliberately narrow: docs/DESIGN.md §5.4 promotes scalars as text and keeps
+// everything structured in jsonb rather than guessing at numeric/date types
+// from an OpenAPI schema that may not constrain them.
+enum SqlType {
+  SQL_TYPE_UNSPECIFIED = 0;
+  SQL_TYPE_TEXT = 1;
+  SQL_TYPE_JSONB = 2;
+}
+
+// ColumnSchema is one column of a kind's foreign table.
+message ColumnSchema {
+  // SQL column name. Always a lowercase identifier that needs no quoting;
+  // the extension quotes it anyway when generating DDL (docs/RULES.md §3).
+  string name = 1;
+  SqlType sql_type = 2;
+  // Human-readable origin of the column, e.g. "metadata.name" or "spec".
+  // Diagnostics only: the extension's projection rule, not this string,
+  // decides how the column is read.
+  string source = 3;
+}
+
+// KindSchema is everything the extension needs to define and serve a foreign
+// table for one kind.
+message KindSchema {
+  GroupVersionKind gvk = 1;
+  // Plural resource name as it appears in the REST path, e.g. "pods",
+  // "widgets". This is the `resource` table option.
+  string plural = 2;
+  // False for cluster-scoped kinds, whose objects have no namespace.
+  bool namespaced = 3;
+  repeated ColumnSchema columns = 4;
+  // True when the API server advertises create/update/delete verbs for the
+  // kind. This reflects what the *API* supports, not what the gateway's RBAC
+  // identity is permitted to do: a write may still be denied at execution.
+  bool writable = 5;
+  // True when the API server advertises the watch verb, so a `cache_mode
+  // 'watch'` table is possible for this kind.
+  bool watchable = 6;
+}
+
+message DiscoverSchemaRequest {
+  GroupVersionKind gvk = 1;
+}
+
+message DiscoverSchemaResponse {
+  KindSchema schema = 1;
+}
+
+message ListKindsRequest {
+  // If set, only kinds in this API group. The empty string is a meaningful
+  // value here (the core group), which is why this is `optional`: unset means
+  // "every group the gateway serves".
+  optional string group = 1;
+  // If non-empty, only kinds whose plural name appears here. Names that match
+  // nothing are silently absent from the response rather than an error, so a
+  // caller can pass a speculative list.
+  repeated string plurals = 2;
+}
+
+message ListKindsResponse {
+  repeated KindSchema kinds = 1;
 }

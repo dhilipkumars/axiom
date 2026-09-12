@@ -14,6 +14,10 @@ services:
       - /certs/gateway.key
       - -kubeconfig
       - /kube/config
+      # Bounds the kinds this gateway offers. Must stay in step with the
+      # ServiceAccount's RBAC in deploy/k8s/gateway-rbac.yaml.
+      - -serve
+      - pods,configmaps,widgets.example.com
     volumes:
       - certs:/certs:ro
       # Mount only the gateway kubeconfig, never the admin one beside it.

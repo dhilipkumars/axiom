@@ -8,7 +8,7 @@ PG ?= pg14
 COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 
 .PHONY: all proto proto-check gateway-build gateway-test gateway-lint gateway-vuln \
-        ext-build ext-test ext-lint ext-fmt ext-audit unit lint up down e2e-ping e2e-phase0 e2e-pods e2e-phase1 e2e-configmaps e2e-phase2 e2e-watch e2e-phase3 e2e
+        ext-build ext-test ext-lint ext-fmt ext-audit unit lint up down e2e-ping e2e-phase0 e2e-pods e2e-phase1 e2e-configmaps e2e-phase2 e2e-watch e2e-phase3 e2e-crd e2e-phase4 e2e
 
 all: lint unit
 
@@ -90,5 +90,11 @@ e2e-watch:
 # PLAN.md name for the Phase 3 gate; the watch test is that gate.
 e2e-phase3: e2e-watch
 
+e2e-crd:
+	./e2e/crd_test.sh
+
+# PLAN.md name for the Phase 4 gate; the CRD test is that gate.
+e2e-phase4: e2e-crd
+
 # Every completed phase's gate, oldest first (regression order per RULES.md §4).
-e2e: e2e-ping e2e-pods e2e-configmaps e2e-watch
+e2e: e2e-ping e2e-pods e2e-configmaps e2e-watch e2e-crd

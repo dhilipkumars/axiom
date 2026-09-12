@@ -46,29 +46,33 @@ connectivity from the cluster.
  └──────────────────────────┘                   └────────────────────────────────┘
 ```
 
-## Current status: Phase 1 (read-only Pods, on-demand)
+## Current status: Phase 4 (CRDs and schema discovery)
 
-Phase 0 proved the Postgres ↔ gateway boundary; Phase 1 puts the first real
-Kubernetes data behind SQL. There is no cache or watch yet (Phase 3) and no
-writes (Phase 2). What exists and is tested end to end:
+Phases 0-3 built the gateway boundary, reads, writes and the watch-driven
+cache for two hardcoded kinds. Phase 4 removes the hardcoding: the gateway
+resolves kinds through Kubernetes discovery, and `IMPORT FOREIGN SCHEMA`
+generates foreign tables for whatever it serves, CRDs included. Still to come
+are multi-cluster (Phase 5) and the real auth model (Phase 6).
 
 | Component | Path | What it does today |
 |---|---|---|
-| Protobuf API | [proto/axiom/v1/axiom.proto](proto/axiom/v1/axiom.proto) | `Ping`, `Get`, `List` (generic GVK + raw object JSON) |
-| Gateway (Go) | [gateway/](gateway/) | TLS-only gRPC server; `Get`/`List` over `client-go`'s dynamic client behind a narrow interface; Pods only; runs under a least-privilege ServiceAccount ([deploy/k8s/gateway-rbac.yaml](deploy/k8s/gateway-rbac.yaml)) |
-| Extension (Rust, pgrx) | [extension/](extension/) | `axiom_fdw` foreign data wrapper: `CREATE SERVER` + `CREATE FOREIGN TABLE ... OPTIONS (resource 'pods')`, `namespace`/`name` qual pushdown, typed columns plus `raw jsonb`, FDW SQLSTATEs on failure; plus the Phase 0 background pinger |
+| Protobuf API | [proto/axiom/v1/axiom.proto](proto/axiom/v1/axiom.proto) | `Ping`, `Get`, `List`, `Create`/`Update`/`Delete`, `Subscribe`, and `DiscoverSchema`/`ListKinds` |
+| Gateway (Go) | [gateway/](gateway/) | TLS-only gRPC server over `client-go`'s dynamic client; kinds resolved by discovery and bounded by a `--serve` allowlist; runs under a least-privilege ServiceAccount ([deploy/k8s/gateway-rbac.yaml](deploy/k8s/gateway-rbac.yaml)) |
+| Extension (Rust, pgrx) | [extension/](extension/) | `axiom_fdw`: qual pushdown, typed columns plus `raw jsonb`, DML with conflict detection, the watch cache and `NOTIFY`, and `IMPORT FOREIGN SCHEMA` |
 | Local stack | [deploy/compose/](deploy/compose/) | Base stack (no cluster) and a kind overlay that gives the gateway a kubeconfig |
-| E2E | [e2e/ping_test.sh](e2e/ping_test.sh), [e2e/pods_test.sh](e2e/pods_test.sh) | Phase 0 and Phase 1 gates on the shared setup libraries in [e2e/lib/](e2e/lib/) |
+| E2E | [e2e/](e2e/) | One gate per phase on the shared setup libraries in [e2e/lib/](e2e/lib/) |
 
 ```sql
 CREATE EXTENSION axiom;
 CREATE SERVER kind FOREIGN DATA WRAPPER axiom_fdw
   OPTIONS (endpoint 'https://gateway:8443', ca_cert '/certs/ca.crt');
-CREATE FOREIGN TABLE k8s_pods (name text, namespace text, phase text, node text, raw jsonb)
-  SERVER kind OPTIONS (resource 'pods');
 
-SELECT name, phase, node FROM k8s_pods WHERE namespace = 'kube-system';
-SELECT raw->'metadata'->>'uid' FROM k8s_pods WHERE namespace = 'default' AND name = 'web-0';
+-- Generate a foreign table per kind the gateway serves, CRDs included.
+CREATE SCHEMA k8s;
+IMPORT FOREIGN SCHEMA k8s FROM SERVER kind INTO k8s;
+
+SELECT name, phase, node FROM k8s.pods WHERE namespace = 'kube-system';
+SELECT name, spec->>'color' FROM k8s.widgets WHERE namespace = 'shop';
 ```
 
 The rest of this README walks you through building, running, and testing it.
@@ -82,7 +86,7 @@ the components natively you also need the Go and Rust toolchains.
 
 - Docker Desktop or Docker Engine with Compose v2 (`docker compose version`)
 - `bash`, `git`, `make`
-- For the Phase 1 test: [`kind`](https://kind.sigs.k8s.io) and `kubectl`
+- For every gate but Phase 0: [`kind`](https://kind.sigs.k8s.io) and `kubectl`
 
 ### Full developer setup
 
@@ -123,7 +127,6 @@ below take `PG=pg16` (or `pg14`, `pg15`, `pg17`) to match.
 ```sh
 git clone https://github.com/dhilipkumars/axiom.git
 cd axiom
-git checkout phase-1      # until the Phase 1 PR is merged into main
 ```
 
 ## 3. Run the E2E gates (the thing to try first)
@@ -135,17 +138,13 @@ make e2e-ping        # Phase 0 gate (alias: make e2e-phase0), Docker only
 make e2e-pods        # Phase 1 gate (alias: make e2e-phase1), needs kind + kubectl
 make e2e-configmaps  # Phase 2 gate (alias: make e2e-phase2), needs kind + kubectl
 make e2e-watch       # Phase 3 gate (alias: make e2e-phase3), needs kind + kubectl
+make e2e-crd         # Phase 4 gate (alias: make e2e-phase4), needs kind + kubectl
 make e2e             # all gates, oldest first
 ```
 
-Phase 1 also needs `kind` and `kubectl`; it creates a cluster named `axiom-e2e`,
-applies the least-privilege RBAC and three fixture Pods, and deletes the
-cluster afterwards:
-
-```sh
-make e2e-pods        # alias: make e2e-phase1
-make e2e             # both gates, oldest first
-```
+Every gate but Phase 0 needs `kind` and `kubectl`. Each creates a cluster named
+`axiom-e2e`, applies the least-privilege RBAC and its own fixtures, and deletes
+the cluster afterwards.
 
 The first run builds two images and takes several minutes (it compiles
 `cargo-pgrx` and the extension inside Docker). Subsequent runs reuse build
@@ -176,22 +175,74 @@ leave the compose stack running afterwards so you can poke at it (see next secti
 
 ## 4. Poke at the running stack by hand
 
-Bring the stack up and leave it running. With the pods test you get a real
-cluster behind it:
+Bring up a stack and leave it running. The Phase 4 harness gives you the most to
+look at: a kind cluster, the test CRD with a couple of Widgets, and an already
+imported `k8s` schema.
 
 ```sh
-E2E_KEEP=1 E2E_KIND_KEEP=1 make e2e-pods
-# or, without a cluster (Ping only):
-make up
+E2E_KEEP=1 E2E_KIND_KEEP=1 make e2e-crd     # cluster + CRD + imported tables
+E2E_KEEP=1 E2E_KIND_KEEP=1 make e2e-pods    # cluster + pods only
+make up                                      # no cluster at all (Ping only)
 ```
 
-Open a SQL session inside the Postgres container:
+The test deletes its own Widgets on the way out, so put them back:
 
 ```sh
-docker compose -f deploy/compose/docker-compose.yml exec postgres psql -U axiom -d axiom
+export KUBECONFIG="$PWD/e2e/.kind/admin"
+kubectl apply -f e2e/fixtures/widgets.yaml
+kubectl -n axiom-e2e get widgets            # your oracle for comparing against SQL
 ```
 
-Things worth trying:
+### Talking to this stack with `docker compose`
+
+**Always pass the same `-f` files you started with.** The base compose file
+runs the gateway with `-no-cluster`; the kind overlay is what replaces that with
+a kubeconfig. Any `up` or `restart` that omits the overlay will quietly
+reconfigure the gateway to serve no cluster, and every query then fails with
+`gateway has no cluster credentials configured`. Set this once per shell:
+
+```sh
+export E2E_KUBE_DIR="$PWD/e2e/.kind"
+ac() { docker compose -f deploy/compose/docker-compose.yml \
+                     -f deploy/compose/docker-compose.kind.yml "$@"; }
+```
+
+`ac` stands in for that pair below. A function rather than an alias or a
+variable, because it behaves the same in bash and zsh and inside scripts.
+
+`make up` and `make down` deliberately use only the base file: `up` is the
+no-cluster Ping stack, and `down` removes containers regardless of overlays.
+
+### Connecting to Postgres
+
+Port 5432 is **not published to the host** — the compose file keeps it inside
+the compose network. The session that always works:
+
+```sh
+ac exec postgres psql -U axiom -d axiom
+```
+
+For a GUI client or a local `psql`, publish the port with a third overlay:
+
+```sh
+cat > /tmp/expose-pg.yml <<'YAML'
+services:
+  postgres:
+    ports:
+      - "55432:5432"
+YAML
+ac -f /tmp/expose-pg.yml up -d
+
+PGPASSWORD=axiom-dev psql -h 127.0.0.1 -p 55432 -U axiom -d axiom
+```
+
+Credentials are `axiom` / `axiom-dev`, database `axiom`, no SSL. Keep the
+overlay out of `deploy/compose/`: a file named `docker-compose.override.yml`
+there would be loaded automatically and would publish the port during E2E runs
+too. Note that recreating the Postgres container empties the shared-memory
+watch cache, so any `cache_mode 'watch'` table starts cold again.
+
+### Things worth trying
 
 ```sql
 -- Install the extension's SQL objects (idempotent)
@@ -200,57 +251,113 @@ SELECT axiom_version();
 
 -- The settings the background worker is using
 SHOW axiom.gateway_endpoint;
-SHOW axiom.gateway_ca_cert;
 SHOW axiom.ping_interval_secs;
-SHOW axiom.rpc_timeout_secs;
 
 -- The worker is a real Postgres process, visible like any backend
-SELECT pid, backend_type, backend_start FROM pg_stat_activity WHERE backend_type = 'axiom gateway pinger';
+SELECT pid, backend_type, backend_start FROM pg_stat_activity
+ WHERE backend_type = 'axiom gateway pinger';
+```
 
--- With the kind stack: query the cluster (the E2E already created server + table)
-SELECT name, phase, node FROM k8s_pods WHERE namespace = 'kube-system' ORDER BY 1;
-SELECT name, raw->'status'->>'podIP' FROM k8s_pods WHERE namespace = 'axiom-e2e' AND name = 'web-0';
-EXPLAIN SELECT name FROM k8s_pods WHERE namespace = 'axiom-e2e';   -- plans without contacting the gateway
+**Discovery and import.** The e2e already created the server and a `k8s`
+schema; this is how to do it yourself, and how to scope an import to one API
+group:
+
+```sql
+CREATE SERVER kind FOREIGN DATA WRAPPER axiom_fdw
+  OPTIONS (endpoint 'https://gateway:8443', ca_cert '/certs/ca.crt', rpc_timeout_secs '10');
+
+CREATE SCHEMA crds;
+IMPORT FOREIGN SCHEMA "example.com" FROM SERVER kind INTO crds;   -- just the CRD group
+\d crds.widgets                                                   -- columns discovery chose
+
+-- The generated DDL carries the resolved identity, which is why no scan needs discovery
+SELECT ftoptions FROM pg_foreign_table ft
+  JOIN pg_class c ON c.oid = ft.ftrelid WHERE c.relname = 'widgets';
+```
+
+**Read a CRD through the generic projection.** No Rust knows what a Widget is;
+`spec` and `status` are top-level fields matched by column name:
+
+```sql
+SELECT name, spec->>'size', spec->>'color', status->>'phase', labels
+  FROM k8s.widgets WHERE namespace = 'axiom-e2e' ORDER BY name;
+
+EXPLAIN SELECT name FROM k8s.widgets WHERE namespace = 'axiom-e2e';  -- plans without contacting the gateway
+```
+
+**Write to it**, and watch the guardrails:
+
+```sql
+INSERT INTO k8s.widgets (name, namespace, spec)
+  VALUES ('manual', 'axiom-e2e', '{"size":1,"color":"teal"}');
+UPDATE k8s.widgets SET spec = spec || '{"color":"pink"}' WHERE name = 'manual';
+
+UPDATE k8s.widgets SET uid = 'forged' WHERE name = 'manual';   -- 0A000: server-managed
+UPDATE k8s.widgets SET name = 'renamed' WHERE name = 'manual'; -- 0A000: identity is immutable
+DELETE FROM k8s.widgets WHERE name = 'manual';
+```
+
+Built-in kinds need no `group`/`version`/`kind`, so the Phase 1-3 spellings
+still work unchanged:
+
+```sql
+CREATE FOREIGN TABLE k8s_pods (name text, namespace text, phase text, node text, raw jsonb)
+  SERVER kind OPTIONS (resource 'pods');
+CREATE FOREIGN TABLE k8s_configmaps (name text, namespace text, data jsonb, raw jsonb)
+  SERVER kind OPTIONS (resource 'configmaps');
+
+SELECT name, phase, node FROM k8s_pods WHERE namespace = 'kube-system';
+INSERT INTO k8s_configmaps (name, namespace, data) VALUES ('app', 'default', '{"LOG_LEVEL":"info"}');
+UPDATE k8s_configmaps SET data = data || '{"LOG_LEVEL":"debug"}' WHERE namespace = 'default' AND name = 'app';
+DELETE FROM k8s_configmaps WHERE namespace = 'default' AND name = 'app';
 ```
 
 Watch the gateway log to see pushdown in action: each `List` logs the namespace
 and name filters it received:
 
 ```sh
-docker compose -f deploy/compose/docker-compose.yml logs -f gateway | grep '"msg":"list"'
+ac logs -f gateway | grep '"msg":"list"'
 ```
 
-Query a cluster. Point the stack at a kind cluster with the Phase 1/2 harness
-(`E2E_KEEP=1 E2E_KIND_KEEP=1 ./e2e/pods_test.sh` leaves everything running), then:
+**The allowlist is not discovery.** The gateway only offers what `--serve`
+names, which the kind overlay sets to `pods,configmaps,widgets.example.com`.
+Create a CRD outside that list and it stays invisible, and a hand-written table
+for it fails at scan with the same error as a kind that does not exist:
 
-```sql
-CREATE SERVER kind FOREIGN DATA WRAPPER axiom_fdw
-  OPTIONS (endpoint 'https://gateway:8443', ca_cert '/certs/ca.crt', rpc_timeout_secs '10');
-
-CREATE FOREIGN TABLE k8s_pods (name text, namespace text, phase text, node text, raw jsonb)
-  SERVER kind OPTIONS (resource 'pods');
-CREATE FOREIGN TABLE k8s_configmaps (name text, namespace text, data jsonb, raw jsonb)
-  SERVER kind OPTIONS (resource 'configmaps');
-
-SELECT name, phase, node FROM k8s_pods WHERE namespace = 'kube-system';          -- namespace/name are pushed down
-INSERT INTO k8s_configmaps (name, namespace, data) VALUES ('app', 'default', '{"LOG_LEVEL":"info"}');
-UPDATE k8s_configmaps SET data = data || '{"LOG_LEVEL":"debug"}' WHERE namespace = 'default' AND name = 'app';
-DELETE FROM k8s_configmaps WHERE namespace = 'default' AND name = 'app';
+```sh
+kubectl apply -f - <<'YAML'
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata: {name: gizmos.example.com}
+spec:
+  group: example.com
+  scope: Namespaced
+  names: {plural: gizmos, singular: gizmo, kind: Gizmo, listKind: GizmoList}
+  versions: [{name: v1, served: true, storage: true,
+              schema: {openAPIV3Schema: {type: object, properties: {spec: {type: object}}}}}]
+YAML
 ```
 
-Live tables. Add `cache_mode 'watch'` to serve a table from the shared-memory
-cache instead of an RPC per scan. The first scan is served on demand and starts
-the watch; once `axiom_watch_status()` shows `ACTIVE`, scans read the cache and
-kubectl-side changes appear within watch latency. If the gateway goes away the
-subscription turns `DEGRADED` and the cache is still served, with a `WARNING` on
-every scan; when it returns the stream resumes from its bookmark. Change
-notifications: `LISTEN axiom_events;` in the database named by
-`axiom.notify_database` (payload: `{"server","resource","namespace","name","type"}`).
+```sql
+CREATE SCHEMA late;
+IMPORT FOREIGN SCHEMA k8s FROM SERVER kind INTO late;   -- widgets yes, gizmos no
+```
+
+**Live tables.** Add `cache_mode 'watch'` to serve a table from the
+shared-memory cache instead of an RPC per scan. The first scan is served on
+demand and starts the watch; once `axiom_watch_status()` shows `ACTIVE`, scans
+read the cache and kubectl-side changes appear within watch latency. If the
+gateway goes away the subscription turns `DEGRADED` and the cache is still
+served, with a `WARNING` on every scan; when it returns the stream resumes from
+its bookmark. A resumed stream stays `DEGRADED` until the API server's first
+bookmark proves the backlog was delivered, which can take up to a minute.
+Change notifications: `LISTEN axiom_events;` in the database named by
+`axiom.notify_database` (payload: `{"server","resource","namespace","name","type"}`,
+where `resource` is the kubectl spelling, e.g. `widgets.example.com`).
 
 ```sql
-CREATE FOREIGN TABLE k8s_pods_live (name text, namespace text, phase text, node text, raw jsonb)
-  SERVER kind OPTIONS (resource 'pods', cache_mode 'watch');
-SELECT * FROM axiom_watch_status();
+SELECT count(*) FROM k8s.widgets_live;   -- first scan registers the subscription
+SELECT * FROM axiom_watch_status();      -- wait for ACTIVE
 ```
 
 Any subset of a kind's columns may be declared, but UPDATE/DELETE need the
@@ -264,18 +371,19 @@ runs and is not undone by `ROLLBACK`. Pods are read-only.
 Watch the worker's log lines from another terminal:
 
 ```sh
-docker compose -f deploy/compose/docker-compose.yml logs -f postgres | grep "axiom bgworker"
+ac logs -f postgres | grep "axiom bgworker"
 ```
 
 Now break things and watch it cope. Stop the gateway and you should see
 `ping failed ... code=Unavailable` at `WARNING` with the retry delay doubling
 from 1s up to 60s; start it again and the next attempt logs `ping ok` and the
-interval resets:
+interval resets. `stop`/`start` reuse the existing container, so they are safe
+without the overlays:
 
 ```sh
-docker compose -f deploy/compose/docker-compose.yml stop gateway
-# ...watch the warnings and backoff...
-docker compose -f deploy/compose/docker-compose.yml start gateway
+ac stop gateway
+# ...watch the warnings and backoff, and any watch table go DEGRADED...
+ac start gateway
 ```
 
 Settings are reloadable without a restart. For example, shrink the ping interval:
@@ -336,11 +444,70 @@ cd gateway && go run ./cmd/gateway -listen 127.0.0.1:8443
 
 **Foreign server and tables** are ordinary FDW DDL. Server options: `endpoint`
 (required, `https://` only), `ca_cert` (PEM path; default is the webpki root
-store), `rpc_timeout_secs` (default 30). Table options: `resource` (`pods`).
-Columns are matched by name from `name`, `namespace`, `phase`, `node` (all
-`text`) and `raw` (`jsonb`); you may declare any subset. Failures surface as
-SQL errors with FDW SQLSTATEs, e.g. `HV00N` (`fdw_unable_to_establish_connection`)
-when the gateway is unreachable, which PL/pgSQL can catch by name.
+store), `rpc_timeout_secs` (default 30).
+
+Table options identify the kind. `resource` (the plural name) is always
+required, and is enough on its own for the two built-in kinds, `pods` and
+`configmaps`. Any other kind also needs `version` and `kind`, plus `group`
+unless it is in the core API group. `namespaced` (default `true`), `writable`
+and `cache_mode` are optional. `IMPORT FOREIGN SCHEMA` writes all of these for
+you, which is the expected way to define a CRD table:
+
+```sql
+CREATE FOREIGN TABLE widgets (name text, namespace text, spec jsonb, raw jsonb)
+  SERVER kind
+  OPTIONS (resource 'widgets', group 'example.com', version 'v1', kind 'Widget');
+```
+
+Because the identity lives in the options, no scan or write ever contacts the
+gateway for schema. Discovery happens once, during `IMPORT FOREIGN SCHEMA`.
+
+Columns are matched **by name**, and any subset may be declared:
+
+| Column | Type | Reads |
+|---|---|---|
+| `name`, `namespace`, `uid`, `resource_version`, `creation_timestamp` | `text` | the matching `metadata` field |
+| `labels`, `annotations` | `jsonb` | the matching `metadata` map |
+| `raw` | `jsonb` | the whole object; required for `UPDATE`/`DELETE` |
+| `phase`, `node` on `pods` | `text` | `status.phase`, `spec.nodeName` |
+| anything else | `jsonb` | the object's top-level field of that name |
+
+The last row is what makes CRDs work without a per-kind mapping: a column named
+`spec` reads `spec`, and a `camelCase` field is reached by its `snake_case`
+column name (`string_data` reads `stringData`). A column naming a field the
+kind does not have reads NULL rather than being rejected, since a CRD's fields
+are not knowable without discovery and a scan deliberately never discovers.
+Column *types* are still checked strictly, so a mistyped column fails loudly.
+`uid`, `resource_version` and `creation_timestamp` are server-managed: they
+read fine but writing them raises an error instead of being quietly dropped.
+
+Failures surface as SQL errors with FDW SQLSTATEs, e.g. `HV00N`
+(`fdw_unable_to_establish_connection`) when the gateway is unreachable, which
+PL/pgSQL can catch by name.
+
+**`IMPORT FOREIGN SCHEMA`** takes the remote schema name as an API group:
+`k8s` for every kind the gateway serves, `core` or `v1` for the core group, or
+a group name such as `example.com`. `LIMIT TO` and `EXCEPT` filter by plural
+name. Options: `cache_mode` (applied to every generated table the API server
+will actually watch) and `prefix` (prepended to each table name, so two
+clusters can be imported into one schema).
+
+```sql
+IMPORT FOREIGN SCHEMA "example.com" FROM SERVER kind INTO crds;
+IMPORT FOREIGN SCHEMA k8s LIMIT TO (pods, configmaps) FROM SERVER kind INTO k8s
+  OPTIONS (cache_mode 'watch', prefix 'prod_');
+```
+
+A kind whose name cannot be a safe SQL identifier is skipped with a `WARNING`
+naming it, rather than failing the whole import; the same applies to individual
+columns, which stay reachable through `raw`.
+
+**The gateway's `--serve` flag** bounds which resources it offers, as a comma
+list of `plural[.group]` entries (`*.group` covers a whole group). It defaults
+to `pods,configmaps`. This is a deployment decision that must be kept in step
+with the ServiceAccount's RBAC: `--serve` bounds what is *offered*, RBAC bounds
+what is *reachable*. A kind outside the allowlist is reported exactly as a kind
+the cluster does not have, so the allowlist cannot be enumerated by probing.
 
 **The background worker** only starts when the library is preloaded. `CREATE
 EXTENSION` alone installs the SQL objects and emits a WARNING telling you the
@@ -376,18 +543,39 @@ to alert on: `axiom bgworker: ping ok ...` at `LOG`, `axiom bgworker: ping faile
 - **`WARNING: axiom: not loaded via shared_preload_libraries`** after `CREATE
   EXTENSION`: expected if you did not preload the library; add it to
   `shared_preload_libraries` and restart Postgres.
+- **`invalid peer certificate: BadSignature`** on a stack that was working:
+  the gateway is serving a stale certificate. The `certs` service is a one-shot
+  that regenerates the CA and server cert on every `up`, but Compose only
+  recreates a container whose configuration changed, so a repeated `up` can
+  rewrite the volume while leaving a long-running gateway holding the cert it
+  loaded at startup. Restart the gateway so it re-reads them; rebuilding is not
+  needed.
+
+  ```sh
+  ac restart gateway
+  # confirm the gateway started after the certs were written:
+  docker inspect axiom-gateway-1 --format '{{.State.StartedAt}}'
+  docker inspect axiom-certs-1   --format '{{.State.FinishedAt}}'
+  ```
+- **`gateway has no cluster credentials configured`** on every query: the
+  gateway was recreated without the kind overlay and is running with
+  `-no-cluster`. Bring it back up with both `-f` files (see section 4);
+  `docker inspect axiom-gateway-1 --format '{{json .Args}}'` shows which
+  flags it actually has.
 
 ## 8. Repository layout
 
 ```
 proto/            axiom.v1 protobuf + buf config (Go stubs → gateway/gen, Rust stubs via build.rs)
-gateway/          Go gateway: cmd/gateway, internal/server (RPC handlers), internal/k8s (client-go behind an interface), internal/tlsconfig
-extension/        pgrx crate: src/{fdw,bgworker,client}.rs (Postgres/network glue),
-                  src/{options,quals,pods,transport,config,backoff,ping}.rs (pure, unit-tested)
+gateway/          Go gateway: cmd/gateway, internal/server (RPC handlers),
+                  internal/k8s (client-go behind an interface, plus discovery/allowlist/column rules), internal/tlsconfig
+extension/        pgrx crate: src/{fdw,bgworker,client,shmem}.rs (Postgres/network glue),
+                  src/{resource,schema,table,import,options,quals,cache,transport,config,backoff,ping}.rs
+                  (pure, unit-tested; schema.rs is the column-projection rule paired with the gateway's)
 deploy/compose/   docker-compose.yml + cert generator for the local stack
-e2e/              *_test.sh scripts (one per PLAN.md gate) + lib/{stack,kind}.sh shared setup + fixtures/
+e2e/              *_test.sh scripts (one per PLAN.md gate) + lib/{stack,kind}.sh shared setup + fixtures/ (pods, test CRD)
 deploy/k8s/       least-privilege RBAC for the gateway ServiceAccount
-.github/          CI: proto drift, gateway, extension, gitleaks, e2e-ping, e2e-pods as separate jobs
+.github/          CI: proto drift, gateway, extension, gitleaks, and one job per E2E gate, chained so a later gate implies the earlier ones
 docs/             DESIGN.md, PLAN.md, RULES.md
 ```
 

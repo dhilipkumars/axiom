@@ -187,16 +187,59 @@ restart the gateway, assert it resyncs and returns to `ACTIVE` with correct stat
 **Goal**: generalize beyond hardcoded built-ins to arbitrary CRDs.
 
 Tasks:
-- [ ] Gateway: `DiscoverSchema(gvk) -> ColumnSchema` using the cluster's
+- [x] Gateway: `DiscoverSchema(gvk) -> ColumnSchema` using the cluster's
   discovery/OpenAPI client.
-- [ ] Extension: generic scan/DML path driven by discovered schema instead of
+- [x] Extension: generic scan/DML path driven by discovered schema instead of
   hardcoded Rust structs (promoted scalar columns + `spec jsonb`/`status jsonb`
   catch-all, per DESIGN.md §5.4).
-- [ ] `IMPORT FOREIGN SCHEMA` implementation: queries `DiscoverSchema` for all (or a
+- [x] `IMPORT FOREIGN SCHEMA` implementation: queries `DiscoverSchema` for all (or a
   filtered set of) GVKs in a cluster and emits `CREATE FOREIGN TABLE` statements.
-- [ ] Extend watch/cache machinery (already generic by `gvk` key from Phase 3) to
+- [x] Extend watch/cache machinery (already generic by `gvk` key from Phase 3) to
   a test CRD — should require no changes if Phase 3 was built generically; this
   phase is partly a regression check on that assumption.
+
+Notes from implementation: replacing the gateway's static two-kind registry with
+discovery would have widened it to everything in the cluster, so the served set
+became an explicit deployment decision: a **`--serve` allowlist** of
+`plural[.group]` entries (default `pods,configmaps`, exactly what the registry
+held), with the ServiceAccount's RBAC scoped to match. A kind outside the
+allowlist and a kind the cluster does not have return the *same* error, so the
+allowlist cannot be enumerated by probing. Resolution caches per group-version
+and invalidates once on a miss, so a CRD created while the gateway runs resolves
+without a restart.
+
+**Two RPCs, not one:** `DiscoverSchema` for a single kind and `ListKinds` for
+enumeration, because `IMPORT FOREIGN SCHEMA` needs every kind's shape in one
+round-trip rather than one call per table.
+
+The extension's closed `Kind` enum became a runtime `Resource`
+(`group/version/kind/plural` + scope), kept `Copy` and plain-data with inline
+bounded strings so it drops into a shared-memory subscription slot unchanged.
+**Discovery never happens on the scan path**: `IMPORT` writes the resolved
+identity into each table's options, and column *meaning* comes from the column
+name alone via a projection rule that mirrors the gateway's column rule
+(`extension/src/schema.rs` against `gateway/internal/k8s/schema.go`, with the
+same normalization cases asserted on both sides). A declared column matching no
+promoted column is a top-level lookup that reads NULL when the kind lacks the
+field — a deliberate change from Phases 1-3, which rejected unknown names; a
+CRD's fields are not knowable without discovery and a scan must not discover.
+Column *types* stay strictly checked, which is what still catches real mistakes.
+
+Generated DDL quotes and strictly validates every identifier, because a CRD's
+group/kind/field names are attacker-influenceable in a multi-tenant cluster and
+arrive across the gRPC boundary (RULES.md §3); a name that fails validation
+drops its column or its table rather than being sanitised into a possible
+collision. One unusable CRD warns and is skipped rather than failing the whole
+import. `cache_mode 'watch'` is emitted only for kinds the API server says it
+will watch.
+
+Phase 3's cache needed no structural change, which was the regression check this
+phase was partly there to perform. The test CRD deliberately has **no status
+subresource**: with one, the API server silently ignores status changes in a PUT
+to the main resource, so a SQL `UPDATE` of `status` would appear to succeed and
+change nothing. Writing a status subresource needs its own request and is not in
+Phase 4's scope. The E2E lives in `e2e/crd_test.sh` (`make e2e-crd`, alias
+`make e2e-phase4`).
 
 **E2E test (`e2e-phase4`)**: apply a test CRD + CRD instances to the `kind` cluster,
 run `IMPORT FOREIGN SCHEMA` against it, assert the generated foreign table's columns

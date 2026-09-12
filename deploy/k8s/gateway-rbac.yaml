@@ -1,7 +1,14 @@
 # Least-privilege identity for the Axiom gateway (docs/RULES.md §3).
 # Phase 1: read-only Pods (`get`, `list`). Phase 2: read-write ConfigMaps
 # (`get`, `list`, `create`, `update`, `delete`). Phase 3: `watch` on both, for
-# the Subscribe stream. Nothing is granted ahead of need.
+# the Subscribe stream. Phase 4: the example.com test CRD, plus the discovery
+# and OpenAPI endpoints that schema discovery reads. Nothing is granted ahead
+# of need.
+#
+# This must stay in step with the gateway's --serve allowlist: --serve bounds
+# what the gateway offers, this bounds what it can actually reach. Widening one
+# without the other either hides a kind or leaves an offer the API server will
+# refuse.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -24,6 +31,19 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]
+  # Phase 4: the test CRD the e2e gate exercises. A real deployment lists its
+  # own CRDs here; there is deliberately no wildcard.
+  - apiGroups: ["example.com"]
+    resources: ["widgets"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  # Schema discovery reads the aggregated discovery and OpenAPI documents.
+  # These are non-resource URLs and grant no access to any object; the
+  # resource rules above remain the only way the gateway reaches data.
+  # Kubernetes binds system:discovery to system:authenticated by default, so
+  # this is usually redundant; it is spelled out so the dependency is visible
+  # rather than inherited by accident.
+  - nonResourceURLs: ["/api", "/api/*", "/apis", "/apis/*", "/openapi", "/openapi/*", "/version"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

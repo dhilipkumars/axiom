@@ -31,7 +31,8 @@ use pgrx::shmem::{PGRXSharedMemory, PgSharedMemoryInitialization};
 use pgrx::{pg_shmem_init, PgLwLock};
 
 use crate::cache::{buckets_for, key_hash, key_matches, tombstone_expired, SubState};
-use crate::kinds::{Kind, MAX_OBJECT_BYTES};
+use crate::resource::Resource;
+use crate::table::MAX_OBJECT_BYTES;
 use crate::transport::Target;
 
 /// Maximum concurrent subscriptions (cluster × kind × namespace filter).
@@ -53,7 +54,6 @@ const REASON_MAX: usize = 160;
 pub struct SubSlot {
     in_use: bool,
     state: u8,
-    kind: u8,
     ns_len: u8,
     rv_len: u8,
     reason_len: u8,
@@ -66,6 +66,11 @@ pub struct SubSlot {
     tombstone_count: u32,
     nbuckets: u32,
     buckets: pg_sys::dsa_pointer,
+    /// The kind this subscription watches. Stored in full rather than as an
+    /// index into a fixed table, because Phase 4 kinds are discovered at
+    /// runtime; `Resource` is plain data and valid when zeroed, so the slot
+    /// stays memcpy-safe.
+    resource: Resource,
     last_event_us: i64,
     last_full_list_us: i64,
     state_since_us: i64,
@@ -201,7 +206,7 @@ pub struct SubSpec {
     /// Per-RPC deadline for this gateway.
     pub rpc_timeout: Duration,
     /// Kind watched.
-    pub kind: Kind,
+    pub resource: Resource,
     /// Namespace filter ("" = all).
     pub namespace: String,
     /// Current state.
@@ -252,7 +257,7 @@ fn slot_spec(i: usize, s: &SubSlot) -> SubSpec {
         id: s.id,
         target,
         rpc_timeout: Duration::from_secs(u64::from(s.rpc_timeout_secs)),
-        kind: Kind::from_index(s.kind).unwrap_or(Kind::Pods),
+        resource: s.resource,
         namespace: get(&s.namespace, s.ns_len as usize),
         state: SubState::from_u8(s.state),
         bookmark: get(&s.bookmark_rv, s.rv_len as usize),
@@ -280,7 +285,7 @@ fn set_state_inner(s: &mut SubSlot, state: SubState, reason: &str, now: i64) {
 pub fn lookup_or_request(
     target: &Target,
     rpc_timeout: Duration,
-    kind: Kind,
+    resource: &Resource,
     namespace: &str,
 ) -> Result<(usize, u32, SubState), ShmemError> {
     ensure_available()?;
@@ -290,9 +295,10 @@ pub fn lookup_or_request(
     let want_ca = target.ca_cert_path.as_deref().unwrap_or("");
     for (i, s) in ctl.subs.iter().enumerate() {
         // Identity is (endpoint, CA, kind): two servers with the same endpoint
-        // but different trust roots must never share a cache.
+        // but different trust roots must never share a cache, and two versions
+        // of one kind are separate subscriptions.
         if !s.in_use
-            || s.kind != kind.index()
+            || s.resource != *resource
             || get(&s.endpoint, s.endpoint_len as usize) != target.endpoint
             || get(&s.ca_path, s.ca_len as usize) != want_ca
         {
@@ -317,7 +323,7 @@ pub fn lookup_or_request(
     // Build the slot privately; publish only after every fallible copy succeeded,
     // so a too-long endpoint/CA path can never leave a half-initialised slot.
     let mut fresh = SubSlot::default_zeroed();
-    fresh.kind = kind.index();
+    fresh.resource = *resource;
     #[allow(
         clippy::cast_possible_truncation,
         reason = "put() bounds the length by the buffer size (<= 512)"
@@ -372,9 +378,7 @@ pub fn status() -> Result<Vec<SubStatus>, ShmemError> {
         .filter(|s| s.in_use)
         .map(|s| SubStatus {
             endpoint: get(&s.endpoint, s.endpoint_len as usize),
-            resource: Kind::from_index(s.kind)
-                .map_or("?", Kind::resource_name)
-                .to_owned(),
+            resource: s.resource.to_string(),
             namespace: get(&s.namespace, s.ns_len as usize),
             state: SubState::from_u8(s.state),
             objects: s.live_count,

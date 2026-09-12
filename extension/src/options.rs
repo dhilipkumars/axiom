@@ -7,7 +7,7 @@ use std::fmt;
 use std::time::Duration;
 
 use crate::cache::CacheMode;
-use crate::kinds::Kind;
+use crate::resource::{self, InlineError, Resource};
 use crate::transport::{Target, TargetError};
 
 /// Which catalog an option list belongs to (mirrors the validator's `catalog`
@@ -36,10 +36,12 @@ pub struct ServerOptions {
 /// Validated `CREATE FOREIGN TABLE` options.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableOptions {
-    /// Which kind this table maps to (`resource`).
-    pub resource: Kind,
+    /// The fully resolved kind this table maps to.
+    pub resource: Resource,
     /// `cache_mode`: serve scans from the watch cache or always via RPC.
     pub cache_mode: CacheMode,
+    /// Whether INSERT/UPDATE/DELETE are offered on this table.
+    pub writable: bool,
 }
 
 /// Why an option list was rejected. Every variant names the offending option
@@ -56,10 +58,16 @@ pub enum OptionsError {
     Endpoint(TargetError),
     /// `rpc_timeout_secs` not a positive integer.
     Timeout(String),
-    /// `resource` names a kind we do not serve.
+    /// `resource` is not a built-in and no explicit identity was given.
     Resource(String),
     /// `cache_mode` is not `on_demand` or `watch`.
     CacheMode(String),
+    /// A group/version/kind/resource value is malformed or over-long.
+    Identity(InlineError),
+    /// A boolean option is not `true` or `false`.
+    Bool(&'static str, String),
+    /// `writable 'true'` was given for a kind the extension keeps read-only.
+    ForcedWritable(String),
 }
 
 impl fmt::Display for OptionsError {
@@ -79,12 +87,23 @@ impl fmt::Display for OptionsError {
             ),
             Self::Resource(v) => write!(
                 f,
-                "option \"resource\" {v:?} is not supported; valid values: {}",
-                Kind::NAMES.join(", ")
+                "option \"resource\" {v:?} needs options \"version\" and \"kind\" \
+                 (and \"group\" for a non-core API group) to identify it; \
+                 only {} are known without them. IMPORT FOREIGN SCHEMA writes these for you",
+                resource::builtin_names().join(", ")
             ),
             Self::CacheMode(v) => write!(
                 f,
                 "option \"cache_mode\" {v:?} is not supported; valid values: on_demand, watch"
+            ),
+            Self::Identity(e) => write!(f, "{e}"),
+            Self::Bool(name, v) => {
+                write!(f, "option {name:?} must be true or false (got {v:?})")
+            }
+            Self::ForcedWritable(r) => write!(
+                f,
+                "option \"writable\" cannot be true for {r}: the extension keeps this kind \
+                 read-only because SQL UPDATE has no sane meaning for it"
             ),
         }
     }
@@ -93,7 +112,15 @@ impl fmt::Display for OptionsError {
 impl std::error::Error for OptionsError {}
 
 const SERVER_OPTIONS: &[&str] = &["endpoint", "ca_cert", "rpc_timeout_secs"];
-const TABLE_OPTIONS: &[&str] = &["resource", "cache_mode"];
+const TABLE_OPTIONS: &[&str] = &[
+    "resource",
+    "group",
+    "version",
+    "kind",
+    "namespaced",
+    "writable",
+    "cache_mode",
+];
 const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn allowed(catalog: Catalog) -> String {
@@ -157,12 +184,66 @@ impl ServerOptions {
     }
 }
 
+/// Parses a boolean option value.
+fn parse_bool(name: &'static str, v: &str) -> Result<bool, OptionsError> {
+    match v.trim() {
+        "true" | "t" | "yes" | "on" | "1" => Ok(true),
+        "false" | "f" | "no" | "off" | "0" => Ok(false),
+        other => Err(OptionsError::Bool(name, other.to_owned())),
+    }
+}
+
 impl TableOptions {
-    /// Parses foreign-table options. `resource` is required.
+    /// Parses foreign-table options.
+    ///
+    /// `resource` is always required. For the built-in kinds it is sufficient
+    /// on its own, which keeps every Phase 1-3 table definition working
+    /// unchanged. Any other kind must also carry `version` and `kind` (and
+    /// `group` unless it is in the core API group), which is what
+    /// `IMPORT FOREIGN SCHEMA` generates.
+    ///
+    /// Resolution is entirely local: no option is looked up against the
+    /// gateway, so defining a table never depends on the cluster being
+    /// reachable and a scan never pays for discovery.
     pub fn parse(opts: &[(String, String)]) -> Result<Self, OptionsError> {
         check_names(Catalog::Table, opts)?;
-        let raw = get(opts, "resource").ok_or(OptionsError::Missing("resource"))?;
-        let resource = Kind::parse(raw).ok_or_else(|| OptionsError::Resource(raw.to_owned()))?;
+        let plural = get(opts, "resource")
+            .ok_or(OptionsError::Missing("resource"))?
+            .trim();
+
+        let explicit = get(opts, "kind").is_some() || get(opts, "version").is_some();
+        let (resource, default_writable) = if explicit {
+            let kind = get(opts, "kind")
+                .ok_or(OptionsError::Missing("kind"))?
+                .trim();
+            let version = get(opts, "version")
+                .ok_or(OptionsError::Missing("version"))?
+                .trim();
+            let group = get(opts, "group").unwrap_or("").trim();
+            let namespaced = match get(opts, "namespaced") {
+                None => true,
+                Some(v) => parse_bool("namespaced", v)?,
+            };
+            let r = Resource::new(group, version, kind, plural, namespaced)
+                .map_err(OptionsError::Identity)?;
+            // A kind spelled out in full still obeys the built-in read-only
+            // policy, so writing to Pods cannot be unlocked by verbose DDL.
+            (r, !resource::builtin_read_only(&r))
+        } else {
+            resource::builtin(plural).ok_or_else(|| OptionsError::Resource(plural.to_owned()))?
+        };
+
+        let writable = match get(opts, "writable") {
+            None => default_writable,
+            Some(v) => {
+                let want = parse_bool("writable", v)?;
+                if want && resource::builtin_read_only(&resource) {
+                    return Err(OptionsError::ForcedWritable(resource.to_string()));
+                }
+                want
+            }
+        };
+
         let cache_mode = match get(opts, "cache_mode") {
             None => CacheMode::OnDemand,
             Some(v) => CacheMode::parse(v).ok_or_else(|| OptionsError::CacheMode(v.to_owned()))?,
@@ -170,6 +251,7 @@ impl TableOptions {
         Ok(Self {
             resource,
             cache_mode,
+            writable,
         })
     }
 }
@@ -258,7 +340,8 @@ mod tests {
         assert_eq!(
             TableOptions::parse(&o(&[("resource", "pods")])),
             Ok(TableOptions {
-                resource: Kind::Pods,
+                resource: resource::builtin("pods").expect("built in").0,
+                writable: false,
                 cache_mode: CacheMode::OnDemand
             })
         );

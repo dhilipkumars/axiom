@@ -13,13 +13,15 @@ use std::time::Duration;
 
 use tonic::transport::Channel;
 
-use crate::kinds::{Identity, Kind};
 use crate::options::ServerOptions;
 use crate::proto::v1::gateway_service_client::GatewayServiceClient;
 use crate::proto::v1::{
-    CreateRequest, DeleteRequest, GroupVersionKind, ListRequest, UpdateRequest,
+    CreateRequest, DeleteRequest, GroupVersionKind, KindSchema, ListKindsRequest, ListRequest,
+    UpdateRequest,
 };
 use crate::quals::Filter;
+use crate::resource::Resource;
+use crate::table::Identity;
 use crate::transport::{build_channel, ChannelError, Target};
 
 thread_local! {
@@ -135,12 +137,13 @@ fn channel_for(
     })
 }
 
-fn gvk_of(kind: Kind) -> GroupVersionKind {
-    let (group, version, k) = kind.gvk();
+/// Builds the wire GVK for a resolved resource. The gateway resolves this to
+/// a REST resource through its own discovery, so the plural name is not sent.
+fn gvk_of(resource: &Resource) -> GroupVersionKind {
     GroupVersionKind {
-        group: group.to_owned(),
-        version: version.to_owned(),
-        kind: k.to_owned(),
+        group: resource.group.to_string(),
+        version: resource.version.to_string(),
+        kind: resource.kind.to_string(),
     }
 }
 
@@ -175,11 +178,11 @@ where
 /// short-circuits). A filter that matches nothing is `Ok(vec![])`.
 pub fn list(
     server: &ServerOptions,
-    kind: Kind,
+    resource: &Resource,
     filter: &Filter,
 ) -> Result<Vec<Vec<u8>>, ClientError> {
     let req = ListRequest {
-        gvk: Some(gvk_of(kind)),
+        gvk: Some(gvk_of(resource)),
         namespace: filter.namespace.clone().unwrap_or_default(),
         name: filter.name.clone().unwrap_or_default(),
     };
@@ -190,12 +193,12 @@ pub fn list(
 /// Creates one object; returns the stored object's JSON (for RETURNING).
 pub fn create(
     server: &ServerOptions,
-    kind: Kind,
+    resource: &Resource,
     id: &Identity,
     body: &serde_json::Value,
 ) -> Result<Vec<u8>, ClientError> {
     let req = CreateRequest {
-        gvk: Some(gvk_of(kind)),
+        gvk: Some(gvk_of(resource)),
         namespace: id.namespace.clone(),
         name: id.name.clone(),
         json: body.to_string().into_bytes(),
@@ -208,12 +211,12 @@ pub fn create(
 /// token; a stale token is [`ErrorClass::Conflict`]. Returns the stored JSON.
 pub fn update(
     server: &ServerOptions,
-    kind: Kind,
+    resource: &Resource,
     id: &Identity,
     body: &serde_json::Value,
 ) -> Result<Vec<u8>, ClientError> {
     let req = UpdateRequest {
-        gvk: Some(gvk_of(kind)),
+        gvk: Some(gvk_of(resource)),
         namespace: id.namespace.clone(),
         name: id.name.clone(),
         resource_version: id.resource_version.clone(),
@@ -223,10 +226,36 @@ pub fn update(
         .map(|resp| resp.object.map(|o| o.json).unwrap_or_default())
 }
 
+/// Enumerates the kinds the gateway serves, for `IMPORT FOREIGN SCHEMA`.
+///
+/// `group` narrows to one API group when `Some` (the empty string being the
+/// core group, which is why this is an `Option` rather than a bare `&str`).
+/// `plurals` narrows to an explicit set; a name matching nothing is simply
+/// absent from the result rather than an error.
+///
+/// This is the only RPC the extension makes outside a scan or a write, and it
+/// happens at DDL time only: the generated tables carry their identity in
+/// options, so no later query depends on discovery.
+pub fn list_kinds(
+    server: &ServerOptions,
+    group: Option<&str>,
+    plurals: &[String],
+) -> Result<Vec<KindSchema>, ClientError> {
+    let req = ListKindsRequest {
+        group: group.map(ToOwned::to_owned),
+        plurals: plurals.to_vec(),
+    };
+    call(server, |mut c| async move { c.list_kinds(req).await }).map(|resp| resp.kinds)
+}
+
 /// Deletes one object by identity.
-pub fn delete(server: &ServerOptions, kind: Kind, id: &Identity) -> Result<(), ClientError> {
+pub fn delete(
+    server: &ServerOptions,
+    resource: &Resource,
+    id: &Identity,
+) -> Result<(), ClientError> {
     let req = DeleteRequest {
-        gvk: Some(gvk_of(kind)),
+        gvk: Some(gvk_of(resource)),
         namespace: id.namespace.clone(),
         name: id.name.clone(),
     };
@@ -236,6 +265,13 @@ pub fn delete(server: &ServerOptions, kind: Kind, id: &Identity) -> Result<(), C
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pods() -> Resource {
+        Resource::new("", "v1", "Pod", "pods", true).expect("valid")
+    }
+    fn configmaps() -> Resource {
+        Resource::new("", "v1", "ConfigMap", "configmaps", true).expect("valid")
+    }
     use tonic::{Code, Status};
 
     #[test]
@@ -277,10 +313,10 @@ mod tests {
         ])
         .expect("valid");
         let err =
-            list(&server, Kind::Pods, &Filter::default()).expect_err("nothing listens on port 1");
+            list(&server, &pods(), &Filter::default()).expect_err("nothing listens on port 1");
         assert_eq!(err.class(), ErrorClass::Connection, "{err}");
         // Second call reuses the cached channel and fails the same way.
-        let err = list(&server, Kind::Pods, &Filter::default()).expect_err("still unreachable");
+        let err = list(&server, &pods(), &Filter::default()).expect_err("still unreachable");
         assert_eq!(err.class(), ErrorClass::Connection, "{err}");
         // Writes go through the same path and never succeed silently.
         let id = Identity {
@@ -289,19 +325,19 @@ mod tests {
             resource_version: "1".into(),
         };
         assert_eq!(
-            create(&server, Kind::ConfigMaps, &id, &serde_json::json!({}))
+            create(&server, &configmaps(), &id, &serde_json::json!({}))
                 .expect_err("down")
                 .class(),
             ErrorClass::Connection
         );
         assert_eq!(
-            update(&server, Kind::ConfigMaps, &id, &serde_json::json!({}))
+            update(&server, &configmaps(), &id, &serde_json::json!({}))
                 .expect_err("down")
                 .class(),
             ErrorClass::Connection
         );
         assert_eq!(
-            delete(&server, Kind::ConfigMaps, &id)
+            delete(&server, &configmaps(), &id)
                 .expect_err("down")
                 .class(),
             ErrorClass::Connection
@@ -315,7 +351,7 @@ mod tests {
             ("ca_cert".to_owned(), "/definitely/missing.pem".to_owned()),
         ])
         .expect("valid");
-        let err = list(&server, Kind::Pods, &Filter::default()).expect_err("ca missing");
+        let err = list(&server, &pods(), &Filter::default()).expect_err("ca missing");
         assert!(
             matches!(err, ClientError::Channel(ChannelError::ReadCa(..))),
             "{err:?}"
