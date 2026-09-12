@@ -395,6 +395,16 @@ func (d *Discovery) paths() (map[string]openapi.GroupVersion, error) {
 	return p, nil
 }
 
+// forgetSchema drops a group-version's parsed document and the paths index, so
+// the next lookup refetches both. Caller must hold schemaMu.
+func (d *Discovery) forgetSchema(gv schema.GroupVersion) {
+	delete(d.schemaCache, gv)
+	// The index is dropped too: a group-version that did not exist when the
+	// index was fetched has no entry in it, so keeping it would make the
+	// refetch fail to find the document at all.
+	d.pathsCache = nil
+}
+
 // schemaFor returns every kind described by one group-version's OpenAPI
 // document, mapped to its top-level property names, parsing the document once.
 //
@@ -451,13 +461,26 @@ func (d *Discovery) topLevelFields(_ context.Context, gvk schema.GroupVersionKin
 	defer d.schemaMu.Unlock()
 
 	gv := gvk.GroupVersion()
-	byKind, err := d.schemaFor(gv)
-	if err != nil {
-		return nil, err
+	// Retry once through a cache drop, mirroring what resource discovery does
+	// on a miss. A CRD created after this group-version's document was parsed
+	// resolves through the RESTMapper but is absent from the cached schema, so
+	// without this it could not be described until the gateway restarted --
+	// which would undo the "a new CRD needs no restart" property for the
+	// describe path while leaving it true for Resolve.
+	for _, refresh := range []bool{false, true} {
+		if refresh {
+			d.forgetSchema(gv)
+		}
+		byKind, err := d.schemaFor(gv)
+		if err != nil {
+			if refresh {
+				return nil, err
+			}
+			continue
+		}
+		if fields, ok := byKind[gvk]; ok {
+			return fields, nil
+		}
 	}
-	fields, ok := byKind[gvk]
-	if !ok {
-		return nil, fmt.Errorf("openapi: %s is not described by the schema document for %s", gvk.Kind, gv.String())
-	}
-	return fields, nil
+	return nil, fmt.Errorf("openapi: %s is not described by the schema document for %s", gvk.Kind, gv.String())
 }

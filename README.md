@@ -12,7 +12,7 @@ conflicts surfaced as SQL errors.
 
 ```sql
 CREATE SERVER prod FOREIGN DATA WRAPPER axiom_fdw OPTIONS (endpoint 'https://gw.prod.example:8443');
-IMPORT FOREIGN SCHEMA k8s FROM SERVER prod INTO prod;
+IMPORT FOREIGN SCHEMA prod FROM SERVER prod INTO prod;
 
 SELECT name, namespace, phase FROM prod.pods WHERE namespace = 'payments' AND phase <> 'Running';
 UPDATE prod.configmaps SET data = data || '{"LOG_LEVEL":"debug"}' WHERE namespace = 'payments' AND name = 'api';
@@ -56,7 +56,7 @@ multi-cluster (Phase 6) and the real auth model (Phase 7).
 
 ```sql
 CREATE SCHEMA prod;
-IMPORT FOREIGN SCHEMA k8s FROM SERVER prod INTO prod;   -- prod.pods, prod.widgets, ...
+IMPORT FOREIGN SCHEMA prod FROM SERVER prod INTO prod;   -- prod.pods, prod.widgets, ...
 
 -- api_version, kind and metadata are on every table, so a query can span kinds
 SELECT kind, namespace, name FROM prod.pods   WHERE labels ? 'team'
@@ -78,11 +78,11 @@ CREATE SERVER kind FOREIGN DATA WRAPPER axiom_fdw
   OPTIONS (endpoint 'https://gateway:8443', ca_cert '/certs/ca.crt');
 
 -- Generate a foreign table per kind the gateway serves, CRDs included.
-CREATE SCHEMA k8s;
-IMPORT FOREIGN SCHEMA k8s FROM SERVER kind INTO k8s;
+CREATE SCHEMA kind;
+IMPORT FOREIGN SCHEMA kind FROM SERVER kind INTO kind;
 
-SELECT name, phase, node FROM k8s.pods WHERE namespace = 'kube-system';
-SELECT name, spec->>'color' FROM k8s.widgets WHERE namespace = 'shop';
+SELECT name, phase, node FROM kind.pods WHERE namespace = 'kube-system';
+SELECT name, spec->>'color' FROM kind.widgets WHERE namespace = 'shop';
 ```
 
 The rest of this README walks you through building, running, and testing it.
@@ -511,9 +511,13 @@ Failures surface as SQL errors with FDW SQLSTATEs, e.g. `HV00N`
 (`fdw_unable_to_establish_connection`) when the gateway is unreachable, which
 PL/pgSQL can catch by name.
 
-**`IMPORT FOREIGN SCHEMA`** takes the remote schema name as an API group:
-`k8s` for every kind the gateway serves, `core` or `v1` for the core group, or
-a group name such as `example.com`. `LIMIT TO` and `EXCEPT` filter by plural
+**`IMPORT FOREIGN SCHEMA`** takes the remote schema name as an API group, since
+Kubernetes has no schemas of its own. Two spellings mean "everything this
+gateway serves": the literal `k8s`, and **the server's own name** — so
+`IMPORT FOREIGN SCHEMA prod FROM SERVER prod INTO prod` reads naturally under
+the one-schema-per-cluster model. `core` and `v1` both mean the core group,
+whose real name is the empty string and cannot be typed as a schema name.
+Anything else is an API group, such as `example.com`. `LIMIT TO` and `EXCEPT` filter by plural
 name. Options: `cache_mode` (applied to every generated table the API server
 will actually watch) and `prefix` (prepended to each table name, so two
 clusters can be imported into one schema).

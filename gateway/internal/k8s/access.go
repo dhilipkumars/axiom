@@ -79,6 +79,14 @@ func (s *SelfAccess) CanList(ctx context.Context, gvr schema.GroupVersionResourc
 	if err != nil {
 		return false, fmt.Errorf("access review for %s: %w", gvr.String(), err)
 	}
+	// EvaluationError means the authorizer could not answer -- a webhook that
+	// failed, say. Allowed is false in that case, but it is false because the
+	// question went unanswered, not because the answer was no. Treating it as
+	// a denial would silently drop the kind, which is exactly what CanList's
+	// contract forbids.
+	if e := got.Status.EvaluationError; e != "" {
+		return false, fmt.Errorf("access review for %s was not evaluated: %s", gvr.String(), e)
+	}
 	allowed := got.Status.Allowed
 
 	s.mu.Lock()

@@ -47,7 +47,7 @@ psql_axiom "DROP SERVER IF EXISTS $SCHEMA CASCADE;"
 psql_axiom "DROP SCHEMA IF EXISTS $SCHEMA CASCADE;"
 psql_axiom "CREATE SERVER $SCHEMA FOREIGN DATA WRAPPER axiom_fdw OPTIONS (endpoint '$E2E_GATEWAY_ENDPOINT', ca_cert '/certs/ca.crt', rpc_timeout_secs '30');"
 psql_axiom "CREATE SCHEMA $SCHEMA;"
-psql_axiom "IMPORT FOREIGN SCHEMA k8s FROM SERVER $SCHEMA INTO $SCHEMA;"
+psql_axiom "IMPORT FOREIGN SCHEMA $SCHEMA FROM SERVER $SCHEMA INTO $SCHEMA;"
 
 tables() { psql_axiom "SELECT string_agg(c.relname, ',' ORDER BY c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = '$SCHEMA' AND c.relkind = 'f';"; }
 got="$(tables)"
@@ -65,20 +65,25 @@ done
 for unwanted in secrets nodes deployments namespaces serviceaccounts; do
   grep -q "\b$unwanted\b" <<<"$got" && fail "'$unwanted' is not granted by RBAC but was offered: $got"
 done
-# The set is exactly what the identity may list -- which is the five kinds this
-# fixture grants, plus clustertrustbundles. That last one is not an oversight:
-# Kubernetes binds system:cluster-trust-bundle-discovery to the
-# system:serviceaccounts group, so every ServiceAccount can list it. Following
-# RBAC honestly means offering it, and it is precisely why --serve survives as
-# optional narrowing for deployments that would rather not expose it.
-want="clustertrustbundles,configmaps,events_core,events_events_k8s_io,pods,widgets"
+# The set is exactly what the identity may list. That is the five kinds this
+# fixture grants, plus whatever Kubernetes grants every ServiceAccount through
+# its own default bindings -- `clustertrustbundles` is bound to the
+# `system:serviceaccounts` group, for instance. Which of those exist depends on
+# the cluster version, so derive the expectation instead of hardcoding it: the
+# property under test is "the tables are exactly the listable kinds", not any
+# particular list. Following RBAC honestly means offering the extras, and that
+# is precisely why --serve survives as optional narrowing.
+want="configmaps,events_core,events_events_k8s_io,pods,widgets"
+for extra in clustertrustbundles; do
+  if [[ "$(can_i_cluster list "$extra")" == "yes" ]]; then
+    want="$want,$extra"
+    log "note: $extra is granted by a built-in binding, not by this fixture, so it is offered"
+  fi
+done
+want="$(tr ',' '\n' <<<"$want" | sort | paste -sd, -)"
 [[ "$got" == "$want" ]] || fail "table set is
   '$got'
   want '$want'"
-
-log "a kind granted by a built-in binding rather than our fixture is still offered"
-[[ "$(can_i_cluster list clustertrustbundles)" == "yes" ]] \
-  || fail "clustertrustbundles should be listable by any ServiceAccount"
 
 log "the gateway's own identity confirms the boundary"
 [[ "$(can_i list pods)" == "yes" ]]    || fail "SA cannot list pods"

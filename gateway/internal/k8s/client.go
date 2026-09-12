@@ -38,10 +38,18 @@ type Client interface {
 	// Get returns one object. Namespace must be empty for cluster-scoped kinds.
 	Get(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) (*unstructured.Unstructured, error)
 	// List returns objects of one kind. Empty namespace means all namespaces.
-	// If name is non-empty the result holds at most that one object; this is
-	// served with a point Get (cheaper for the API server than a filtered
-	// LIST, which scans the whole collection server-side) and a miss yields an
-	// empty list, not an error.
+	//
+	// A non-empty name narrows to objects of that name, server-side. How that
+	// is served depends on whether the object can be addressed exactly: with a
+	// namespace, or for a cluster-scoped kind, it is a point Get, which is
+	// cheaper for the API server than a filtered LIST over the collection.
+	// Without one it is a LIST with a metadata.name field selector across every
+	// namespace, because a Get cannot express "wherever it lives".
+	//
+	// So a name filter yields at most one object only when it was paired with a
+	// namespace, or the kind is cluster-scoped. Across all namespaces it can
+	// yield several, since a name is unique only within a namespace. A filter
+	// matching nothing is an empty list, not an error.
 	List(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) (*unstructured.UnstructuredList, error)
 	// Create creates obj. apiVersion/kind must already match gvk.
 	Create(ctx context.Context, gvk schema.GroupVersionKind, namespace string, obj *unstructured.Unstructured) (*unstructured.Unstructured, error)

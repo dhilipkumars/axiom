@@ -303,14 +303,23 @@ pub fn create_table_sql(
 }
 
 /// Resolves the `remote_schema` of an `IMPORT FOREIGN SCHEMA` to an API group
-/// filter.
+/// filter, or `None` for "every kind this gateway serves".
 ///
-/// `k8s` means every kind the gateway serves. `core` and `v1` both mean the
-/// core API group, whose real name is the empty string and so cannot be typed
-/// as a schema name. Anything else is taken as the API group verbatim.
-pub fn group_filter(remote_schema: &str) -> Option<String> {
+/// Kubernetes has no schemas, so the remote-schema slot names an API group.
+/// Two spellings mean "everything": the literal `k8s`, and the server's own
+/// name. The latter exists because the model is one schema per cluster, which
+/// makes `IMPORT FOREIGN SCHEMA prod FROM SERVER prod INTO prod` the natural
+/// thing to type -- and without this it would silently filter for an API group
+/// called `prod` and import nothing.
+///
+/// `core` and `v1` both mean the core API group, whose real name is the empty
+/// string and so cannot be typed as a schema name. Anything else is taken as an
+/// API group verbatim.
+pub fn group_filter(remote_schema: &str, server_name: &str) -> Option<String> {
+    if remote_schema == "k8s" || remote_schema == server_name {
+        return None;
+    }
     match remote_schema {
-        "k8s" => None,
         "core" | "v1" => Some(String::new()),
         other => Some(other.to_owned()),
     }
@@ -652,13 +661,35 @@ mod tests {
 
     #[test]
     fn remote_schema_maps_to_an_api_group() {
-        assert_eq!(group_filter("k8s"), None, "k8s means every served kind");
-        assert_eq!(group_filter("core"), Some(String::new()));
         assert_eq!(
-            group_filter("v1"),
+            group_filter("k8s", "prod"),
+            None,
+            "k8s means every served kind"
+        );
+        assert_eq!(group_filter("core", "prod"), Some(String::new()));
+        assert_eq!(
+            group_filter("v1", "prod"),
             Some(String::new()),
             "the core group's real name is empty and cannot be typed as a schema"
         );
-        assert_eq!(group_filter("example.com"), Some("example.com".to_owned()));
+        assert_eq!(
+            group_filter("example.com", "prod"),
+            Some("example.com".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_servers_own_name_means_every_served_kind() {
+        // One schema per cluster makes `IMPORT FOREIGN SCHEMA prod FROM SERVER
+        // prod INTO prod` the natural spelling. Without the synonym it would
+        // filter for an API group called "prod" and import nothing at all.
+        assert_eq!(group_filter("prod", "prod"), None);
+        assert_eq!(group_filter("axiom_e2e", "axiom_e2e"), None);
+        // A different server's name is still just a group name.
+        assert_eq!(group_filter("prod", "staging"), Some("prod".to_owned()));
+        // And a real group that happens to share the server's name resolves to
+        // everything, which is the safe direction: a narrower-than-expected
+        // import would look like the cluster is empty.
+        assert_eq!(group_filter("example.com", "example.com"), None);
     }
 }

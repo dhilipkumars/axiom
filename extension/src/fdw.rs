@@ -1178,7 +1178,7 @@ unsafe extern "C" fn import_foreign_schema(
             (*stmt).list_type == pg_sys::ImportForeignSchemaType::FDW_IMPORT_SCHEMA_LIMIT_TO;
         let except = (*stmt).list_type == pg_sys::ImportForeignSchemaType::FDW_IMPORT_SCHEMA_EXCEPT;
 
-        let group = import::group_filter(&remote_schema);
+        let group = import::group_filter(&remote_schema, &server_name);
         let plurals: Vec<String> = if limit_to {
             requested.clone()
         } else {

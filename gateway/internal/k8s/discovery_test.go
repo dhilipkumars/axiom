@@ -611,3 +611,62 @@ func TestAccessAnswersAreNotReCheckedPerKindLookup(t *testing.T) {
 		t.Errorf("Resolve issued %d access reviews; scans must not pay for authorization round-trips", got)
 	}
 }
+
+// TestDescribeFindsACRDAddedToAnAlreadyCachedGroupVersion is the describe-path
+// counterpart to TestDiscoveryFindsACRDCreatedAfterStartup.
+//
+// Caching a parsed schema document for the process lifetime would make a CRD
+// created later in an already-seen group-version resolvable but not
+// describable: the RESTMapper refreshes and finds it, while the cached document
+// does not mention it. The property "a new CRD needs no gateway restart" has to
+// hold for both paths or it does not hold at all.
+func TestDescribeFindsACRDAddedToAnAlreadyCachedGroupVersion(t *testing.T) {
+	t.Parallel()
+	d, fd := newTestDiscovery(t, "*.example.com")
+	ctx := context.Background()
+
+	// Warm the cache for example.com/v1.
+	if _, err := d.Describe(ctx, widgetGVK); err != nil {
+		t.Fatalf("warm Describe(Widget) = %v", err)
+	}
+	warmFetches := fd.crdFetches.Load()
+
+	// A second CRD appears in the same group-version, after both the resource
+	// list and the schema document were cached.
+	gadget := schema.GroupVersionKind{Group: "example.com", Version: "v1", Kind: "Gadget"}
+	fd.byGV["example.com/v1"].APIResources = append(fd.byGV["example.com/v1"].APIResources,
+		metav1.APIResource{Name: "gadgets", Kind: "Gadget", Namespaced: true,
+			Verbs: metav1.Verbs{"get", "list", "watch"}})
+	fd.openapi = fakeOpenAPI{calls: fd.pathsCalls, paths: map[string]openapi.GroupVersion{
+		"apis/example.com/v1": fakeGroupVersion{fetches: fd.crdFetches,
+			doc: openAPIDocFor(t, map[schema.GroupVersionKind][]string{
+				widgetGVK: {"apiVersion", "kind", "metadata", "spec", "status"},
+				gadget:    {"apiVersion", "kind", "metadata", "spec"},
+			})},
+	}}
+	d.openapi = fd.openapi
+
+	info, err := d.Describe(ctx, gadget)
+	if err != nil {
+		t.Fatalf("Describe(Gadget) after creation = %v; a CRD added to a cached "+
+			"group-version must not need a gateway restart", err)
+	}
+	if info.Plural != "gadgets" {
+		t.Errorf("plural = %q, want gadgets", info.Plural)
+	}
+	if !strings.Contains(joined(info.Columns), "spec") {
+		t.Errorf("columns = %s, want the schema's spec field", joined(info.Columns))
+	}
+	if fd.crdFetches.Load() <= warmFetches {
+		t.Error("the document was never refetched; the result came from a stale cache")
+	}
+
+	// The refetched document is cached in turn: describing again is free.
+	after := fd.crdFetches.Load()
+	if _, err := d.Describe(ctx, gadget); err != nil {
+		t.Fatal(err)
+	}
+	if fd.crdFetches.Load() != after {
+		t.Error("a second Describe refetched; the refreshed document was not cached")
+	}
+}
