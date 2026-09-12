@@ -26,6 +26,7 @@ import (
 	authv1client "k8s.io/client-go/kubernetes/typed/authorization/v1"
 
 	axiomv1 "github.com/dhilipkumars/axiom/gateway/gen/axiom/v1"
+	"github.com/dhilipkumars/axiom/gateway/internal/cli"
 	"github.com/dhilipkumars/axiom/gateway/internal/k8s"
 	"github.com/dhilipkumars/axiom/gateway/internal/server"
 	"github.com/dhilipkumars/axiom/gateway/internal/tlsconfig"
@@ -44,15 +45,11 @@ func main() {
 func run(ctx context.Context, args []string, stderr *os.File) error {
 	fs := flag.NewFlagSet("gateway", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	listen := fs.String("listen", ":8443", "TCP address to listen on")
-	certPath := fs.String("tls-cert", "", "path to PEM server certificate (required)")
-	keyPath := fs.String("tls-key", "", "path to PEM server private key (required)")
-	kubeconfig := fs.String("kubeconfig", "", "path to a kubeconfig; empty means in-cluster config")
-	noCluster := fs.Bool("no-cluster", false, "serve Ping only; Get/List fail with FAILED_PRECONDITION (Phase 0 plumbing mode)")
-	serve := fs.String("serve", k8s.DefaultServe,
-		"comma-separated resources this gateway serves, as `plural[.group]` "+
-			"(e.g. \"pods,configmaps,widgets.example.com\"); \"*.group\" covers a whole group. "+
-			"Scope the ServiceAccount's RBAC to match: this bounds what is offered, RBAC enforces it")
+	// Flags live in internal/cli so `make docs-generate` can walk the same
+	// FlagSet the binary parses (docs/PLAN.md Phase 6 Part 2).
+	opts := cli.Register(fs, k8s.DefaultServe)
+	listen, certPath, keyPath := opts.Listen, opts.CertPath, opts.KeyPath
+	kubeconfig, noCluster, serve := opts.Kubeconfig, opts.NoCluster, opts.Serve
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

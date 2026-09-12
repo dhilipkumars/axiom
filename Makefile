@@ -8,7 +8,7 @@ PG ?= pg14
 COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 
 .PHONY: all proto proto-check gateway-build gateway-test gateway-lint gateway-vuln \
-        ext-build ext-test ext-lint ext-fmt ext-audit unit lint up down e2e-ping e2e-phase0 e2e-pods e2e-phase1 e2e-configmaps e2e-phase2 e2e-watch e2e-phase3 e2e-crd e2e-phase4 e2e-cluster e2e-phase5 e2e
+        ext-build ext-test ext-lint ext-fmt ext-audit unit lint docs-generate docs-check up down e2e-ping e2e-phase0 e2e-pods e2e-phase1 e2e-configmaps e2e-phase2 e2e-watch e2e-phase3 e2e-crd e2e-phase4 e2e-cluster e2e-phase5 e2e
 
 all: lint unit
 
@@ -52,6 +52,20 @@ ext-fmt:
 ext-audit:
 	cd extension && cargo audit
 	cd extension && cargo deny check
+
+## Documentation
+# Regenerates the reference pages whose sole source of truth is code: the gRPC
+# API, the gateway's flags, the FDW options and the column rules. Everything
+# under docs/ that is *not* in docs/generated/ is written by hand.
+docs-generate:
+	cd gateway && go run ./cmd/docsgen -root .. -out ../docs/generated
+
+# The anti-drift gate. Same shape as proto-check: regenerate, then fail if that
+# changed anything that was committed. Deliberately not a rule like "every PR
+# touching code must touch docs/" -- that false-positives on every refactor and
+# is satisfied by a whitespace change (docs/PLAN.md Phase 6 Part 2).
+docs-check: docs-generate
+	git diff --exit-code -- docs/generated
 
 ## Aggregates
 unit: gateway-test ext-test

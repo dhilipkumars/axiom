@@ -91,6 +91,26 @@ SELECT name, spec->>'color' FROM kind.widgets WHERE namespace = 'shop';
 
 The rest of this README walks you through building, running, and testing it.
 
+## Documentation
+
+User-facing documentation is at **https://dhilipkumars.github.io/axiom/** —
+guides for getting started, deploying the gateway and querying, plus reference
+pages generated from the code.
+
+The rest of this README is for working *on* Axiom. The two do not overlap much:
+the site does not explain how to build the extension, and this file does not
+explain how to use it.
+
+Reference pages under `docs/generated/` are produced by `make docs-generate` and
+must be committed. CI regenerates them and fails on a difference, the same way
+`make proto-check` guards the generated protobuf code. A change to a `.proto`
+comment, an FDW option or a column rule therefore requires regenerating; a
+refactor that changes none of them does not.
+
+A user-visible change also wants a note under `.changes/`; see
+`.changes/README.md` for what counts and what does not. That one is enforced in
+review rather than by CI, on purpose.
+
 ## 1. Prerequisites
 
 You need Docker for the quickest path (section 3). For building and unit-testing
@@ -445,6 +465,10 @@ make ext-lint  PG=pg16   # cargo fmt --check + clippy::pedantic with -D warnings
 make ext-test  PG=pg16   # pure unit tests + tests against a real, temporary Postgres
 make ext-audit           # cargo audit + cargo deny (advisories, licenses, sources)
 
+# Documentation: regenerate the reference pages, and the CI drift check
+make docs-generate
+make docs-check
+
 # Aggregates
 make lint
 make unit
@@ -620,15 +644,21 @@ to alert on: `axiom bgworker: ping ok ...` at `LOG`, `axiom bgworker: ping faile
 ```
 proto/            axiom.v1 protobuf + buf config (Go stubs → gateway/gen, Rust stubs via build.rs)
 gateway/          Go gateway: cmd/gateway, internal/server (RPC handlers),
-                  internal/k8s (client-go behind an interface, plus discovery/allowlist/column rules), internal/tlsconfig
+                  internal/k8s (client-go behind an interface, plus discovery/allowlist/column rules),
+                  internal/cli (the flag definitions, shared with docsgen), internal/tlsconfig,
+                  cmd/docsgen (generates docs/generated/ from proto, flags, options and column tables)
 extension/        pgrx crate: src/{fdw,bgworker,client,shmem}.rs (Postgres/network glue),
                   src/{resource,schema,table,import,options,quals,cache,transport,config,backoff,ping}.rs
                   (pure, unit-tested; schema.rs is the column-projection rule paired with the gateway's)
 deploy/compose/   docker-compose.yml + cert generator for the local stack
 e2e/              *_test.sh scripts (one per PLAN.md gate) + lib/{stack,kind}.sh shared setup + fixtures/ (pods, test CRD)
-deploy/k8s/       least-privilege RBAC for the gateway ServiceAccount
-.github/          CI: proto drift, gateway, extension, gitleaks, and one job per E2E gate, chained so a later gate implies the earlier ones
-docs/             DESIGN.md, PLAN.md, RULES.md
+deploy/k8s/       gateway Deployment + NodePort Service, and least-privilege RBAC for its ServiceAccount
+.github/          CI: proto drift, generated-docs drift, gateway, extension, gitleaks, and one job per E2E gate,
+                  chained so a later gate implies the earlier ones; plus the GitHub Pages publish
+docs/             index.md + guides/ (the site, written by hand), generated/ (produced by make docs-generate),
+                  and DESIGN.md, AUTH.md, PLAN.md, RULES.md (engineering documents)
+mkdocs.yml        site configuration; docs_dir is docs/ itself, so the site cannot disagree with the tree
+.changes/         changeset notes for user-visible changes (see .changes/README.md)
 ```
 
 ## Contributing

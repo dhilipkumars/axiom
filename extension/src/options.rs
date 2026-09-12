@@ -111,40 +111,136 @@ impl fmt::Display for OptionsError {
 
 impl std::error::Error for OptionsError {}
 
-const SERVER_OPTIONS: &[&str] = &["endpoint", "ca_cert", "rpc_timeout_secs"];
-const TABLE_OPTIONS: &[&str] = &[
-    "resource",
-    "group",
-    "version",
-    "kind",
-    "namespaced",
-    "writable",
-    "cache_mode",
+/// One accepted option: what the validator checks names against, and what
+/// `docs/generated/fdw-options.md` is generated from.
+///
+/// The two uses are deliberately the same table. A reference page maintained
+/// alongside the allowlist drifts the first time an option is added or
+/// removed and nobody notices; one generated from the allowlist the validator
+/// itself consults cannot. `make docs-generate` reads the literals below and
+/// CI fails on an uncommitted diff (docs/PLAN.md Phase 6 Part 2), so the
+/// enforcement is mechanical rather than a review convention.
+///
+/// Keep the fields as plain literals. The generator parses this source rather
+/// than linking the crate, because the crate is a pgrx `cdylib` that cannot be
+/// built or run outside a Postgres build, and it fails loudly rather than
+/// emitting a partial page if the shape here stops matching.
+pub struct OptionDoc {
+    /// Option name as written in `OPTIONS (...)`.
+    pub name: &'static str,
+    /// Whether the statement is rejected when it is absent.
+    pub required: bool,
+    /// Value used when it is absent, or `None` when there is no default.
+    pub default: Option<&'static str>,
+    /// One line, in the voice of the error the validator would raise.
+    pub summary: &'static str,
+}
+
+/// `CREATE SERVER ... OPTIONS` — how to reach a gateway.
+pub const SERVER_OPTION_DOCS: &[OptionDoc] = &[
+    OptionDoc {
+        name: "endpoint",
+        required: true,
+        default: None,
+        summary: "gateway address as an https URL, e.g. https://axiom-gateway:8443; \
+                  plaintext is refused because the connection carries cluster data",
+    },
+    OptionDoc {
+        name: "ca_cert",
+        required: false,
+        default: Some("the host trust store"),
+        summary: "path, readable by the Postgres server process, to the PEM CA bundle \
+                  that signs the gateway certificate",
+    },
+    OptionDoc {
+        name: "rpc_timeout_secs",
+        required: false,
+        default: Some("30"),
+        summary: "per-RPC deadline in whole seconds, greater than zero; a whole-cluster \
+                  IMPORT FOREIGN SCHEMA can need more than the default",
+    },
 ];
+
+/// `CREATE FOREIGN TABLE ... OPTIONS` — which kind a table maps to.
+pub const TABLE_OPTION_DOCS: &[OptionDoc] = &[
+    OptionDoc {
+        name: "resource",
+        required: true,
+        default: None,
+        summary: "plural resource name, e.g. pods; sufficient on its own for the \
+                  built-in kinds",
+    },
+    OptionDoc {
+        name: "group",
+        required: false,
+        default: Some("\"\" (the core API group)"),
+        summary: "API group of the kind, e.g. apps or example.com",
+    },
+    OptionDoc {
+        name: "version",
+        required: false,
+        default: None,
+        summary: "API version, e.g. v1; required together with kind for any kind that \
+                  is not built in",
+    },
+    OptionDoc {
+        name: "kind",
+        required: false,
+        default: None,
+        summary: "singular CamelCase kind, e.g. Widget; required together with version \
+                  for any kind that is not built in",
+    },
+    OptionDoc {
+        name: "namespaced",
+        required: false,
+        default: Some("true"),
+        summary: "whether the kind is namespaced; false makes the namespace column \
+                  meaningless and it is omitted from generated DDL",
+    },
+    OptionDoc {
+        name: "writable",
+        required: false,
+        default: Some("false for built-in read-only kinds, true otherwise"),
+        summary: "whether INSERT, UPDATE and DELETE are offered; cannot be turned on \
+                  for kinds the extension keeps read-only, such as Pods",
+    },
+    OptionDoc {
+        name: "cache_mode",
+        required: false,
+        default: Some("on_demand"),
+        summary: "on_demand serves every scan by RPC; watch serves scans from the \
+                  watch-driven cache and starts a subscription for the kind",
+    },
+];
+
 const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
-fn allowed(catalog: Catalog) -> String {
-    let names: &[&str] = match catalog {
-        Catalog::Server => SERVER_OPTIONS,
-        Catalog::Table => TABLE_OPTIONS,
+/// The options accepted for `catalog`. Wrapper and user mapping accept none:
+/// the wrapper carries no configuration, and a user mapping will only start
+/// carrying one in Phase 7 (docs/AUTH.md).
+fn option_docs(catalog: Catalog) -> &'static [OptionDoc] {
+    match catalog {
+        Catalog::Server => SERVER_OPTION_DOCS,
+        Catalog::Table => TABLE_OPTION_DOCS,
         Catalog::Wrapper | Catalog::UserMapping => &[],
-    };
-    if names.is_empty() {
+    }
+}
+
+fn allowed(catalog: Catalog) -> String {
+    let docs = option_docs(catalog);
+    if docs.is_empty() {
         "no options are accepted".to_owned()
     } else {
+        let names: Vec<&str> = docs.iter().map(|d| d.name).collect();
         format!("valid options are {}", names.join(", "))
     }
 }
 
 /// Checks that every option name is allowed for `catalog` and none repeats.
 fn check_names(catalog: Catalog, opts: &[(String, String)]) -> Result<(), OptionsError> {
-    let names: &[&str] = match catalog {
-        Catalog::Server => SERVER_OPTIONS,
-        Catalog::Table => TABLE_OPTIONS,
-        Catalog::Wrapper | Catalog::UserMapping => &[],
-    };
+    let docs = option_docs(catalog);
     for (i, (k, _)) in opts.iter().enumerate() {
-        if !names.contains(&k.as_str()) {
+        if !docs.iter().any(|d| d.name == k.as_str()) {
             return Err(OptionsError::Unknown {
                 catalog,
                 name: k.clone(),

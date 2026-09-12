@@ -24,6 +24,21 @@ jobs:
         with: { setup_only: true }
       - run: make proto-check BUF=buf
 
+  docs:
+    name: generated docs drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: gateway/go.mod }
+      # Regenerate and fail on a difference, the same shape as proto-check.
+      # This catches a .proto comment, an FDW option or a column rule changed
+      # without the reference page being regenerated. It deliberately does not
+      # police the hand-written guides: a rule that every code change must
+      # touch docs/ false-positives on refactors and is satisfied by a
+      # whitespace edit (docs/PLAN.md Phase 6 Part 2).
+      - run: make docs-check
+
   gateway-unit:
     name: gateway unit tests + lint + vuln scan
     runs-on: ubuntu-latest

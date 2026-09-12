@@ -1,0 +1,53 @@
+# Publishes docs/ to GitHub Pages.
+#
+# Runs only on main, and only when something the site renders has changed. The
+# generated pages are committed to the tree rather than built here, because the
+# anti-drift check in the ci workflow needs them committed to have anything to
+# compare against; this job publishes what is in the tree, it does not
+# regenerate it.
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/**
+      - mkdocs.yml
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; a queued run supersedes an older one rather than
+# racing it. In-progress runs are not cancelled, so a publish always finishes.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install mkdocs-material==9.5.49
+      # --strict, set in mkdocs.yml, turns a broken internal link into a
+      # failure. A reference page that moves therefore fails here rather than
+      # publishing a 404.
+      - run: mkdocs build
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: site }
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
