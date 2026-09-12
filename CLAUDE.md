@@ -34,25 +34,33 @@ for architecture, phasing, and engineering rules.
 
 ## Delegating to `agy`
 
-Some work is delegated to the `agy` (Antigravity) CLI running Gemini, invoked
-through Bash. The Agent tool cannot do this — it only spawns Claude-family
-agents.
-
-Two roles, with standing briefs in [docs/agents/](docs/agents/) so context is
-not retyped each time:
-
-| Role | Model | Use for |
-|---|---|---|
-| [architect](docs/agents/architect.md) | `Gemini 3.8 Flash (Medium)` | adversarial design review, brainstorming a phase |
-| [junior](docs/agents/junior.md) | `Gemini 3.8 Flash (Low)` | mechanical edits, scaffolding, small changes |
-| [worker](docs/agents/worker.md) | `Gemini 3.8 Flash (Low)` | long-running jobs; reports facts, changes nothing |
+**Use `agy` for architectural brainstorming and adversarial design review only.**
+Not for writing code, not for running jobs.
 
 ```sh
 scripts/agy-role architect "Review docs/AUTH.md for ..."
-scripts/agy-role worker --timeout 1800s "Run make e2e and report"
 ```
 
-Three things learned the hard way, all verified rather than assumed:
+That is where it has repeatedly earned its cost: a different model family brings
+different priors, so it attacks conclusions rather than confirming them. It
+found a real privilege-escalation hole in `docs/AUTH.md` — a role holding
+`USAGE ON FOREIGN SERVER` can rewrite its own user mapping — that had been
+written down as a confident assertion and was wrong.
+
+It is *not* worth using for implementation or for running commands, which was
+tried and measured. Generated code needed correcting both times (a Kubernetes
+gRPC readiness probe against a TLS-only server, which would never have become
+ready; a `--serve` list baked into a manifest that several gates need to vary),
+and reviewing it costs about what writing it costs. One run crashed mid-task
+having modified twelve files without running a test or reporting. For running
+commands there is no saving either: Bash with a background job and a grep puts
+the same few lines in context, without a layer that can misreport.
+
+Expect roughly half of any finding set to be overstated or already handled, and
+**verify anything load-bearing before acting on it** — `agy` has confidently
+misreported facts about its own behaviour.
+
+Mechanics, all verified rather than assumed:
 
 - **Effort is part of the model name.** `--effort` is rejected for these models.
 - **`--dangerously-skip-permissions` is required.** Headless mode cannot prompt,
@@ -63,11 +71,3 @@ Three things learned the hard way, all verified rather than assumed:
   only from user-level plugins, and this project keeps no user-level config.
   See [docs/agents/README.md](docs/agents/README.md) for the full matrix.
 - **The working directory is not the repo root**, which the wrapper pins.
-
-**Verify anything load-bearing that comes back.** The architect role found a
-real privilege-escalation hole in `docs/AUTH.md` that empirical testing then
-confirmed, so the reviews are worth running — but roughly half of a given set of
-findings is overstated or already handled, and `agy` has confidently misreported
-facts about its own behaviour. Delegation is most valuable for long-running
-commands whose output would otherwise flood context; it is worth least for
-debugging, where the detail is the point.

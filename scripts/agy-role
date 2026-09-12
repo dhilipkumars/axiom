@@ -2,9 +2,6 @@
 # Runs a task through the agy (Antigravity) CLI in one of this repo's roles.
 #
 #   scripts/agy-role architect "Review docs/AUTH.md for ..."
-#   scripts/agy-role junior    "Add a test that ..."
-#   scripts/agy-role worker    "Run make e2e and report"
-#   scripts/agy-role worker --timeout 1800s "Run the full suite"
 #
 # The role brief in docs/agents/<role>.md is prepended to the task. agy does not
 # auto-load project context: AGENTS.md, GEMINI.md, .agents/rules/,
@@ -17,7 +14,7 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 timeout=600s
 
-usage() { echo "usage: $(basename "$0") <architect|junior|worker> [--timeout DUR] <task>" >&2; exit 2; }
+usage() { echo "usage: $(basename "$0") architect [--timeout DUR] <task>" >&2; exit 2; }
 [[ $# -lt 2 ]] && usage
 role="$1"; shift
 if [[ "${1:-}" == "--timeout" ]]; then timeout="$2"; shift 2; fi
@@ -27,10 +24,10 @@ brief="$here/docs/agents/${role}.md"
 [[ -f "$brief" ]] || { echo "no such role: $role (expected $brief)" >&2; exit 2; }
 
 # Effort is part of the model name; --effort is rejected for these models.
+# Brainstorming only -- see CLAUDE.md for why the other roles were dropped.
 case "$role" in
-  architect) model="Gemini 3.8 Flash (Medium)" ;;   # design review wants the reasoning
-  junior|worker) model="Gemini 3.8 Flash (Low)" ;;  # mechanical work does not
-  *) echo "no model mapping for role: $role" >&2; exit 2 ;;
+  architect) model="Gemini 3.8 Flash (Medium)" ;;
+  *) echo "only the architect role is supported; see CLAUDE.md" >&2; exit 2 ;;
 esac
 
 # --dangerously-skip-permissions is required: headless mode cannot prompt, so

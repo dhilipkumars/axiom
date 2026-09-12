@@ -9,15 +9,18 @@ the brief:
 
 ```sh
 scripts/agy-role architect "Review docs/AUTH.md for ..."
-scripts/agy-role junior    "Add a test that ..."
-scripts/agy-role worker --timeout 1800s "Run make e2e and report"
 ```
 
 | Brief | Model | Use for |
 |---|---|---|
 | [architect.md](./architect.md) | `Gemini 3.8 Flash (Medium)` | design review, adversarial brainstorming |
-| [junior.md](./junior.md) | `Gemini 3.8 Flash (Low)` | mechanical edits, scaffolding, small changes |
-| [worker.md](./worker.md) | `Gemini 3.8 Flash (Low)` | long-running jobs; reports facts, changes nothing |
+
+**Only this one role.** Junior-engineer and worker roles were tried and dropped:
+generated code needed correcting both times and reviewing it cost about what
+writing it costs, one run crashed mid-task having modified twelve files without
+running a test, and delegating command execution saved no context over a
+backgrounded Bash job and a grep. Brainstorming is where a different model
+family's priors pay for themselves.
 
 ## Why a wrapper and not agy's own agent/skill mechanism
 
