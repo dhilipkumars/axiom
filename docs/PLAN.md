@@ -423,6 +423,23 @@ Tasks:
   user-visible behaviour, with an explicit opt-out label for changes that are
   genuinely internal. Enforcement belongs in review, not in a regex over a diff.
 
+### Found while using Phase 5 by hand
+
+- [ ] **A whole-cluster `IMPORT` can exceed `rpc_timeout_secs`.** RBAC-bounded
+  discovery made it materially slower: one access review per kind on top of the
+  OpenAPI fetches. On a bare kind cluster with `--serve '*.*'` it exceeded a 10s
+  timeout outright, and the 30s default is not obviously enough on a cluster
+  with many kinds. Either give `IMPORT` its own longer budget, batch the access
+  reviews, or both — but the current failure mode is a `Cancelled: Timeout
+  expired` that gives the operator no hint that the fix is a timeout.
+- [ ] **Nothing tells an operator that a re-import is needed.** Changing RBAC or
+  `--serve` and restarting the gateway changes what it offers, but foreign
+  tables are catalog objects and do not move. The kinds simply fail to appear,
+  with nothing pointing at the cause. Surfacing the drift — even just a
+  `WARNING` when a scan hits a table the gateway no longer serves — would save
+  the guesswork. This is also the friction the reconciler idea in
+  `docs/AUTH.md`'s neighbourhood would remove entirely.
+
 **E2E/CI test (`docs-check`)**: a deliberate change to a `.proto` comment and to
 an FDW option fails CI until the generated docs are regenerated and committed;
 a purely internal refactor does not.
