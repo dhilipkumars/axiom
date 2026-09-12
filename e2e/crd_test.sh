@@ -9,10 +9,16 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# The gateway runs in-cluster (Phase 6); Postgres stays in compose and reaches
+# it over the Service's NodePort. This must be set *before* sourcing stack.sh,
+# which resolves E2E_GATEWAY_ENDPOINT from it at source time.
+E2E_GATEWAY_MODE=incluster
+
 source "$here/lib/stack.sh"
 source "$here/lib/kind.sh"
 
-E2E_COMPOSE_OVERLAYS="${E2E_COMPOSE_OVERLAYS:-} $E2E_ROOT/deploy/compose/docker-compose.kind.yml"
+E2E_COMPOSE_OVERLAYS="${E2E_COMPOSE_OVERLAYS:-} $E2E_ROOT/deploy/compose/docker-compose.kind.yml $E2E_ROOT/deploy/compose/docker-compose.incluster.yml"
 NS="axiom-e2e"
 SA="system:serviceaccount:$E2E_GATEWAY_SA_NS:$E2E_GATEWAY_SA"
 
@@ -36,6 +42,17 @@ kubectl_e2e apply -f "$E2E_ROOT/e2e/fixtures/widgets.yaml" >/dev/null || fail "a
 # The gateway is started after the CRD exists, but discovery must also cope with
 # a CRD created later; that is asserted further down.
 stack_up
+# gizmos is deliberately absent: this gate asserts that a kind outside
+# --serve is withheld even though discovery can see it.
+kind_deploy_gateway "pods,configmaps,widgets.example.com"
+
+log "the gateway is running on in-cluster credentials, not a kubeconfig"
+gw_args="$(kubectl_e2e -n "$E2E_GATEWAY_SA_NS" get deploy/axiom-gateway -o jsonpath='{.spec.template.spec.containers[0].args}')"
+grep -q 'kubeconfig' <<<"$gw_args" && fail "gateway still uses -kubeconfig: $gw_args"
+kubectl_e2e -n "$E2E_GATEWAY_SA_NS" get pod -l app.kubernetes.io/name=axiom-gateway \
+  -o jsonpath='{.items[0].spec.volumes[*].projected.sources[*].serviceAccountToken.path}' 2>/dev/null \
+  | grep -q token || fail "gateway Pod has no projected ServiceAccount token"
+echo "in-cluster credentials confirmed"
 
 log "IMPORT FOREIGN SCHEMA discovers the CRD and writes its DDL"
 psql_axiom "CREATE EXTENSION IF NOT EXISTS axiom;"
@@ -79,13 +96,14 @@ uid="$(psql_axiom "SELECT uid FROM k8s.widgets WHERE namespace = '$NS' AND name 
 [[ "$uid" == "$(kubectl_e2e -n "$NS" get widget sprocket -o jsonpath='{.metadata.uid}')" ]] || fail "uid column disagrees with kubectl"
 
 log "namespace and name quals are pushed down to the gateway, not filtered locally"
-before="$(stack_logs "$E2E_SVC_GATEWAY" | grep -c '"msg":"list"' || true)"
+gw_lists() { psql_axiom "SELECT list_calls FROM axiom_gateway_stats('kind');"; }
+before="$(gw_lists)"
 psql_axiom "SELECT count(*) FROM k8s.widgets WHERE namespace = '$NS' AND name = 'cog';" >/dev/null
 stack_logs "$E2E_SVC_GATEWAY" | grep '"msg":"list"' | tail -1 | grep -q "\"name\":\"cog\"" \
   || fail "name qual was not pushed down"
 stack_logs "$E2E_SVC_GATEWAY" | grep '"msg":"list"' | tail -1 | grep -q "\"namespace\":\"$NS\"" \
   || fail "namespace qual was not pushed down"
-after="$(stack_logs "$E2E_SVC_GATEWAY" | grep -c '"msg":"list"' || true)"
+after="$(gw_lists)"
 [[ "$after" -gt "$before" ]] || fail "the scan issued no List at all"
 
 log "a nonexistent widget is an empty result, not an error"
@@ -169,7 +187,10 @@ wait_state() {
 wait_state ACTIVE 120
 echo "subscription is ACTIVE"
 
-lists_now() { stack_logs "$E2E_SVC_GATEWAY" | grep -c '"msg":"list"' || true; }
+# Counters, not log lines: a Pod restart starts a fresh log, and this gate
+# restarts nothing but the cluster gate does. axiom_gateway_stats() asks the
+# gateway process directly.
+lists_now() { gw_lists; }
 L0="$(lists_now)"
 
 log "a kubectl-side change appears in SQL within watch latency, with no new List"

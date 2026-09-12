@@ -34,7 +34,20 @@ E2E_SVC_GATEWAY="gateway"
 E2E_SVC_CERTS="certs"
 E2E_PG_USER="axiom"
 E2E_PG_DB="axiom"
-E2E_GATEWAY_ENDPOINT="https://gateway:8443"
+# Where Postgres dials the gateway. `compose` is the container on the compose
+# network; `incluster` is the Deployment, reached through its NodePort on the
+# kind node. Gates that need a cluster use `incluster`; the Phase 0 ping gate has
+# no cluster and stays on `compose`.
+# Set by the caller *before* sourcing this file: the endpoint is resolved here,
+# once, and a gate that sets the mode afterwards would silently keep dialling
+# the compose service. stack_up re-checks and fails loudly if that happens.
+E2E_GATEWAY_MODE="${E2E_GATEWAY_MODE:-compose}"
+E2E_GATEWAY_MODE_AT_SOURCE="$E2E_GATEWAY_MODE"
+if [[ "$E2E_GATEWAY_MODE" == "incluster" ]]; then
+  E2E_GATEWAY_ENDPOINT="https://${E2E_KIND_CLUSTER:-axiom-e2e}-control-plane:${E2E_GATEWAY_NODEPORT:-30443}"
+else
+  E2E_GATEWAY_ENDPOINT="https://gateway:8443"
+fi
 
 # --- output helpers ---------------------------------------------------------
 
@@ -76,6 +89,9 @@ e2e_teardown() {
 # stack_up: build (unless E2E_NO_BUILD=1) and start the stack, waiting until
 # Postgres reports healthy. Registers stack_down to run on exit.
 stack_up() {
+  [[ "$E2E_GATEWAY_MODE" == "$E2E_GATEWAY_MODE_AT_SOURCE" ]] || fail \
+    "E2E_GATEWAY_MODE was changed to '$E2E_GATEWAY_MODE' after lib/stack.sh was sourced; \
+the endpoint is still '$E2E_GATEWAY_ENDPOINT'. Set it before the source line."
   # Preserve the script's exit status across teardown (bash 3.2 compatible).
   trap 'rc=$?; e2e_teardown; exit $rc' EXIT
   local build="--build"
@@ -95,7 +111,17 @@ psql_axiom() {
 }
 
 # stack_logs SERVICE: full log of one service, never failing the caller.
-stack_logs() { compose logs --no-color "$1" 2>/dev/null || true; }
+# stack_logs SERVICE: one service's log. The gateway's comes from the Pod when
+# it runs in-cluster, so callers do not have to know which mode they are in.
+# Counting assertions should use axiom_gateway_stats() instead: a Pod restart
+# starts a fresh log, and a restart mid-watch is exactly what gets tested.
+stack_logs() {
+  if [[ "$1" == "$E2E_SVC_GATEWAY" && "$E2E_GATEWAY_MODE" == "incluster" ]]; then
+    kind_gateway_logs
+    return 0
+  fi
+  compose logs --no-color "$1" 2>/dev/null || true
+}
 
 # stack_wait_for_log SERVICE PATTERN [TIMEOUT_SECS]: poll SERVICE's log until a
 # line matches PATTERN (grep -E). Fails the test on timeout. Captures logs into a

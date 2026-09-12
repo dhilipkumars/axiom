@@ -1,0 +1,33 @@
+# Overlay for running the gateway as an in-cluster Deployment instead of a
+# compose container (docs/PLAN.md Phase 6).
+#
+# Postgres stays in compose on purpose. Axiom exists so a database that cannot
+# reach the cluster's network can still query it, and running Postgres inside
+# would hide the routing and TLS-boundary failures the design is meant to
+# survive. It keeps the kind Docker network, which is how it reaches the
+# gateway's NodePort on the control-plane node.
+#
+# The compose gateway is scaled to zero rather than deleted: compose cannot
+# remove a service an overlay inherits, and Postgres depends on it. The `certs`
+# service still runs, because both sides use the same CA -- the E2E harness
+# copies that material into a Secret for the in-cluster gateway.
+services:
+  gateway:
+    deploy:
+      replicas: 0
+    # Nothing depends on this container being healthy any more, and a zero-scaled
+    # service with a healthcheck makes `up --wait` hang.
+    healthcheck:
+      disable: true
+
+  postgres:
+    depends_on:
+      certs:
+        condition: service_completed_successfully
+    networks:
+      - default
+      - kind
+
+networks:
+  kind:
+    external: true

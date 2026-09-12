@@ -16,6 +16,13 @@ metadata:
     app.kubernetes.io/part-of: axiom
 spec:
   replicas: 1
+  # Recreate, not RollingUpdate. One replica means a rolling update briefly runs
+  # two gateways, and the Service can route to the terminating one -- observed
+  # as a ListKinds that hung until its deadline. Two gateways would also mean
+  # two independent discovery and access caches answering alternate requests,
+  # which is not a state worth supporting for a single-replica workload.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: axiom-gateway
