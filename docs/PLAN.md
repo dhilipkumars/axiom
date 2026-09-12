@@ -432,6 +432,14 @@ Tasks:
   with many kinds. Either give `IMPORT` its own longer budget, batch the access
   reviews, or both — but the current failure mode is a `Cancelled: Timeout
   expired` that gives the operator no hint that the fix is a timeout.
+- [ ] **A removed CRD stays on offer until the gateway restarts.** Discovery
+  invalidates and retries once on a *miss*, so a newly added CRD resolves with
+  no restart — that direction is tested. A group-version's resource list, once
+  fetched successfully, is never refreshed, so a kind that disappears keeps
+  being offered and `IMPORT` keeps generating a table for it. Observed by
+  uninstalling an operator and re-importing: its four kinds came back until the
+  gateway was restarted. The fix is a bounded TTL on the cached resource list,
+  or invalidating when a resolved kind starts returning NotFound.
 - [ ] **Nothing tells an operator that a re-import is needed.** Changing RBAC or
   `--serve` and restarting the gateway changes what it offers, but foreign
   tables are catalog objects and do not move. The kinds simply fail to appear,
