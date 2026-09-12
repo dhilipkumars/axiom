@@ -210,10 +210,38 @@ kind_wait_gateway_endpoint() {
            -l kubernetes.io/service-name=axiom-gateway \
            -o jsonpath='{range .items[*]}{range .endpoints[?(@.conditions.ready==true)]}{.addresses[0]}{"\n"}{end}{end}' 2>/dev/null \
          | grep -c . || true)"
-    [[ "$n" == "1" ]] && return 0
+    [[ "$n" == "1" ]] && break
     (( SECONDS < deadline )) || fail "gateway Service has $n ready endpoints, want exactly 1"
     sleep 1
   done
+  kind_wait_gateway_nodeport
+}
+
+# kind_wait_gateway_nodeport: block until the NodePort actually accepts a
+# connection from the Docker network Postgres is on.
+#
+# A ready endpoint is not the same as a reachable NodePort. kube-proxy programs
+# the node's forwarding rules asynchronously after the EndpointSlice changes,
+# and until it has, a connection to the node port is refused. Under `Recreate`
+# there is no old Pod to carry the traffic in the meantime, so the window is a
+# real outage rather than a brief inconsistency.
+#
+# That window is short enough to miss on a fast machine and long enough to lose
+# on a loaded CI runner, which is exactly how it showed up: every gate passing
+# locally, and the cluster gate failing in CI with `Unavailable: tcp connect
+# error` on the first query after a restart.
+#
+# The probe runs from a throwaway container on kind's network because that is
+# the path Postgres takes. Probing from the host would test a different route,
+# and probing from inside the cluster would not test the NodePort at all.
+kind_wait_gateway_nodeport() {
+  local node="${E2E_KIND_CLUSTER}-control-plane" port="$E2E_GATEWAY_NODEPORT"
+  # One container with an internal retry loop, rather than one per attempt:
+  # `docker run` costs more than the wait usually does.
+  docker run --rm --network kind alpine:3.20 sh -c \
+    "for i in \$(seq 1 60); do nc -z -w 2 $node $port && exit 0; sleep 1; done; exit 1" \
+    >/dev/null 2>&1 \
+    || fail "gateway NodePort $node:$port did not accept connections within 60s"
 }
 
 # kind_gateway_logs: the in-cluster gateway's logs, for assertions that inspect
