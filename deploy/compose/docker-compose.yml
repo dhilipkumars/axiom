@@ -60,10 +60,18 @@ services:
       gateway:
         condition: service_started
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U axiom -d axiom"]
+      # -h 127.0.0.1 is load-bearing. The official entrypoint runs init scripts
+      # against a *temporary* server started with listen_addresses='', then
+      # shuts it down and starts the real one. A socket-based pg_isready (the
+      # default with no -h) succeeds against that temporary server, so compose
+      # reports the container healthy and the next command hits "the database
+      # system is shutting down". Only the real server accepts TCP.
+      test: ["CMD-SHELL", "pg_isready -U axiom -d axiom -h 127.0.0.1"]
       interval: 2s
       timeout: 2s
       retries: 30
+      # Failures during initdb are expected and must not burn the retry budget.
+      start_period: 30s
 
 volumes:
   certs:
