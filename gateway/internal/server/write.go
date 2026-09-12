@@ -85,6 +85,7 @@ func decodeBody(op string, id identity, body []byte) (*unstructured.Unstructured
 
 // Create creates one object. Contract: see axiom.proto.
 func (s *Server) Create(ctx context.Context, req *axiomv1.CreateRequest) (*axiomv1.CreateResponse, error) {
+	s.createCalls.Add(1)
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "create: request must not be nil")
 	}
@@ -111,6 +112,7 @@ func (s *Server) Create(ctx context.Context, req *axiomv1.CreateRequest) (*axiom
 // Update replaces one object with optimistic concurrency. Contract: see
 // axiom.proto. A stale resource_version surfaces as codes.Aborted.
 func (s *Server) Update(ctx context.Context, req *axiomv1.UpdateRequest) (*axiomv1.UpdateResponse, error) {
+	s.updateCalls.Add(1)
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "update: request must not be nil")
 	}
@@ -143,6 +145,7 @@ func (s *Server) Update(ctx context.Context, req *axiomv1.UpdateRequest) (*axiom
 
 // Delete deletes one object. Contract: see axiom.proto.
 func (s *Server) Delete(ctx context.Context, req *axiomv1.DeleteRequest) (*axiomv1.DeleteResponse, error) {
+	s.deleteCalls.Add(1)
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "delete: request must not be nil")
 	}

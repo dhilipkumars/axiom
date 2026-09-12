@@ -9,6 +9,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -31,6 +32,20 @@ type Server struct {
 	now     Clock
 	k8s     k8s.Client
 	log     *slog.Logger
+
+	startedAtUnixSeconds int64
+
+	getCalls           atomic.Uint64
+	listCalls          atomic.Uint64
+	createCalls        atomic.Uint64
+	updateCalls        atomic.Uint64
+	deleteCalls        atomic.Uint64
+	subscribeCalls     atomic.Uint64
+	subscribeListCalls atomic.Uint64
+
+	accessReviews        atomic.Uint64
+	openapiFetches       atomic.Uint64
+	openapiGroupVersions atomic.Uint64
 }
 
 // New returns a Server that reports version in Ping replies, uses now as its
@@ -47,7 +62,13 @@ func New(version string, now Clock, client k8s.Client, logger *slog.Logger) *Ser
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	return &Server{version: version, now: now, k8s: client, log: logger}
+	return &Server{
+		version:              version,
+		now:                  now,
+		k8s:                  client,
+		log:                  logger,
+		startedAtUnixSeconds: now().Unix(),
+	}
 }
 
 // Ping echoes the caller's nonce and reports gateway version and clock.

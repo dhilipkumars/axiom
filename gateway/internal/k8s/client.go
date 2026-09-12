@@ -62,6 +62,17 @@ type Client interface {
 	Watch(ctx context.Context, gvk schema.GroupVersionKind, namespace, resourceVersion string) (watch.Interface, error)
 }
 
+// StatsReporter exposes discovery and authorization statistics gathered by the
+// underlying client components.
+type StatsReporter interface {
+	// OpenAPIFetches reports the total number of OpenAPI v3 document fetches performed.
+	OpenAPIFetches() uint64
+	// OpenAPIGroupVersions reports the number of distinct group-versions currently cached.
+	OpenAPIGroupVersions() uint64
+	// AccessReviews reports the total number of SelfSubjectAccessReview calls issued.
+	AccessReviews() uint64
+}
+
 // ErrUnsupportedKind is returned for a GVK the gateway does not serve.
 var ErrUnsupportedKind = errors.New("unsupported kind")
 
@@ -73,6 +84,30 @@ var ErrNoCluster = errors.New("gateway has no cluster credentials configured")
 type Dynamic struct {
 	dyn dynamic.Interface
 	Mapper
+}
+
+// OpenAPIFetches implements StatsReporter by delegating to Mapper if supported.
+func (c *Dynamic) OpenAPIFetches() uint64 {
+	if sr, ok := c.Mapper.(StatsReporter); ok {
+		return sr.OpenAPIFetches()
+	}
+	return 0
+}
+
+// OpenAPIGroupVersions implements StatsReporter by delegating to Mapper if supported.
+func (c *Dynamic) OpenAPIGroupVersions() uint64 {
+	if sr, ok := c.Mapper.(StatsReporter); ok {
+		return sr.OpenAPIGroupVersions()
+	}
+	return 0
+}
+
+// AccessReviews implements StatsReporter by delegating to Mapper if supported.
+func (c *Dynamic) AccessReviews() uint64 {
+	if sr, ok := c.Mapper.(StatsReporter); ok {
+		return sr.AccessReviews()
+	}
+	return 0
 }
 
 // NewDynamic wraps an existing dynamic client (real or fake) and the Mapper

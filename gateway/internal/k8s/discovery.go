@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -75,6 +76,8 @@ type Discovery struct {
 	// RBAC, not the allowlist, is the real boundary; the allowlist narrows
 	// further for deployments that want to hide kinds they could read.
 	access AccessChecker
+
+	openapiFetches atomic.Uint64
 
 	mu    sync.RWMutex
 	cache map[schema.GroupVersion]resourceCacheEntry
@@ -432,6 +435,7 @@ func (d *Discovery) schemaFor(gv schema.GroupVersion) (map[schema.GroupVersionKi
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return nil, fmt.Errorf("openapi: parse schema for %s: %w", gv.String(), err)
 	}
+	d.openapiFetches.Add(1)
 	d.log.Info("openapi_fetch",
 		slog.String("group_version", gv.String()),
 		slog.Int("bytes", len(raw)),
@@ -449,6 +453,27 @@ func (d *Discovery) schemaFor(gv schema.GroupVersion) (map[schema.GroupVersionKi
 	}
 	d.schemaCache[gv] = out
 	return out, nil
+}
+
+// OpenAPIFetches reports the total number of OpenAPI v3 document fetches performed.
+func (d *Discovery) OpenAPIFetches() uint64 {
+	return d.openapiFetches.Load()
+}
+
+// OpenAPIGroupVersions reports the number of distinct group-versions currently cached.
+func (d *Discovery) OpenAPIGroupVersions() uint64 {
+	d.schemaMu.Lock()
+	defer d.schemaMu.Unlock()
+	return uint64(len(d.schemaCache))
+}
+
+// AccessReviews reports the total number of SelfSubjectAccessReview calls issued,
+// if the underlying AccessChecker tracks reviews.
+func (d *Discovery) AccessReviews() uint64 {
+	if ar, ok := d.access.(interface{ AccessReviews() uint64 }); ok {
+		return ar.AccessReviews()
+	}
+	return 0
 }
 
 // topLevelFields returns the names of a kind's own top-level schema properties,

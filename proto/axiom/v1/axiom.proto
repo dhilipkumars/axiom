@@ -131,6 +131,24 @@ service GatewayService {
   // the gateway has no cluster configured; UNAVAILABLE if the API server
   // cannot be reached.
   rpc ListKinds(ListKindsRequest) returns (ListKindsResponse);
+
+  // Stats reports monotonic counters for the work this gateway process has
+  // done since it started, plus when that was.
+  //
+  // It exists because counting is the only honest way to assert things like
+  // "the cache served that scan without touching the API server" or "the
+  // resumed watch did not relist". Those were asserted by grepping the
+  // gateway's stdout, which does not survive the process being restarted --
+  // and a restart mid-watch is exactly the scenario worth testing. Counters
+  // reset with the process, which makes "since you came back, how many
+  // listings have you done" directly expressible.
+  //
+  // Operationally it answers "what is this gateway actually doing", which is
+  // otherwise only visible by reading logs.
+  //
+  // Errors: none beyond transport. Deliberately cheap and side-effect free, so
+  // it is safe to poll.
+  rpc Stats(StatsRequest) returns (StatsResponse);
 }
 
 message PingRequest {
@@ -331,4 +349,37 @@ message ListKindsRequest {
 
 message ListKindsResponse {
   repeated KindSchema kinds = 1;
+}
+
+message StatsRequest {}
+
+// StatsResponse carries counters for one gateway *process*. Every counter is
+// monotonic within a process lifetime and resets when it restarts;
+// started_at_unix_seconds is how a caller tells a restart from a quiet period.
+message StatsResponse {
+  // Wall-clock time the process started, for detecting a restart.
+  int64 started_at_unix_seconds = 1;
+
+  // Unary RPCs served, by kind of call.
+  uint64 get_calls = 2;
+  uint64 list_calls = 3;
+  uint64 create_calls = 4;
+  uint64 update_calls = 5;
+  uint64 delete_calls = 6;
+
+  // Subscribe streams opened, and how many of those performed a full initial
+  // listing rather than resuming from a bookmark. A resume that relists shows
+  // up here as an increment the caller did not expect.
+  uint64 subscribe_calls = 7;
+  uint64 subscribe_list_calls = 8;
+
+  // Discovery: OpenAPI documents fetched and parsed, and how many distinct
+  // group-versions those covered. Serving a whole cluster should fetch one
+  // document per group-version, not one per kind.
+  uint64 openapi_fetches = 9;
+  uint64 openapi_group_versions = 10;
+
+  // Access reviews issued against the authorization API while deciding which
+  // kinds this gateway may serve.
+  uint64 access_reviews = 11;
 }

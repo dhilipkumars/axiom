@@ -179,3 +179,24 @@ func TestAllowAllAndDenyAll(t *testing.T) {
 		t.Errorf("DenyAll = %v, %v, want false, nil", ok, err)
 	}
 }
+
+func TestSelfAccessTracksReviews(t *testing.T) {
+	t.Parallel()
+	a, _, _ := ssarClient(t, allow(true))
+	if got := a.AccessReviews(); got != 0 {
+		t.Fatalf("initial reviews = %d, want 0", got)
+	}
+	if _, err := a.CanList(context.Background(), podsGVR); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.AccessReviews(); got != 1 {
+		t.Fatalf("reviews after 1 CanList = %d, want 1", got)
+	}
+	// Cached query does not increment reviews.
+	if _, err := a.CanList(context.Background(), podsGVR); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.AccessReviews(); got != 1 {
+		t.Fatalf("reviews after cached CanList = %d, want 1", got)
+	}
+}

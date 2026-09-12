@@ -38,6 +38,7 @@ const (
 	GatewayService_Subscribe_FullMethodName      = "/axiom.v1.GatewayService/Subscribe"
 	GatewayService_DiscoverSchema_FullMethodName = "/axiom.v1.GatewayService/DiscoverSchema"
 	GatewayService_ListKinds_FullMethodName      = "/axiom.v1.GatewayService/ListKinds"
+	GatewayService_Stats_FullMethodName          = "/axiom.v1.GatewayService/Stats"
 )
 
 // GatewayServiceClient is the client API for GatewayService service.
@@ -152,6 +153,23 @@ type GatewayServiceClient interface {
 	// the gateway has no cluster configured; UNAVAILABLE if the API server
 	// cannot be reached.
 	ListKinds(ctx context.Context, in *ListKindsRequest, opts ...grpc.CallOption) (*ListKindsResponse, error)
+	// Stats reports monotonic counters for the work this gateway process has
+	// done since it started, plus when that was.
+	//
+	// It exists because counting is the only honest way to assert things like
+	// "the cache served that scan without touching the API server" or "the
+	// resumed watch did not relist". Those were asserted by grepping the
+	// gateway's stdout, which does not survive the process being restarted --
+	// and a restart mid-watch is exactly the scenario worth testing. Counters
+	// reset with the process, which makes "since you came back, how many
+	// listings have you done" directly expressible.
+	//
+	// Operationally it answers "what is this gateway actually doing", which is
+	// otherwise only visible by reading logs.
+	//
+	// Errors: none beyond transport. Deliberately cheap and side-effect free, so
+	// it is safe to poll.
+	Stats(ctx context.Context, in *StatsRequest, opts ...grpc.CallOption) (*StatsResponse, error)
 }
 
 type gatewayServiceClient struct {
@@ -255,6 +273,16 @@ func (c *gatewayServiceClient) ListKinds(ctx context.Context, in *ListKindsReque
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListKindsResponse)
 	err := c.cc.Invoke(ctx, GatewayService_ListKinds_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayServiceClient) Stats(ctx context.Context, in *StatsRequest, opts ...grpc.CallOption) (*StatsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StatsResponse)
+	err := c.cc.Invoke(ctx, GatewayService_Stats_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -373,6 +401,23 @@ type GatewayServiceServer interface {
 	// the gateway has no cluster configured; UNAVAILABLE if the API server
 	// cannot be reached.
 	ListKinds(context.Context, *ListKindsRequest) (*ListKindsResponse, error)
+	// Stats reports monotonic counters for the work this gateway process has
+	// done since it started, plus when that was.
+	//
+	// It exists because counting is the only honest way to assert things like
+	// "the cache served that scan without touching the API server" or "the
+	// resumed watch did not relist". Those were asserted by grepping the
+	// gateway's stdout, which does not survive the process being restarted --
+	// and a restart mid-watch is exactly the scenario worth testing. Counters
+	// reset with the process, which makes "since you came back, how many
+	// listings have you done" directly expressible.
+	//
+	// Operationally it answers "what is this gateway actually doing", which is
+	// otherwise only visible by reading logs.
+	//
+	// Errors: none beyond transport. Deliberately cheap and side-effect free, so
+	// it is safe to poll.
+	Stats(context.Context, *StatsRequest) (*StatsResponse, error)
 	mustEmbedUnimplementedGatewayServiceServer()
 }
 
@@ -409,6 +454,9 @@ func (UnimplementedGatewayServiceServer) DiscoverSchema(context.Context, *Discov
 }
 func (UnimplementedGatewayServiceServer) ListKinds(context.Context, *ListKindsRequest) (*ListKindsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListKinds not implemented")
+}
+func (UnimplementedGatewayServiceServer) Stats(context.Context, *StatsRequest) (*StatsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Stats not implemented")
 }
 func (UnimplementedGatewayServiceServer) mustEmbedUnimplementedGatewayServiceServer() {}
 func (UnimplementedGatewayServiceServer) testEmbeddedByValue()                        {}
@@ -586,6 +634,24 @@ func _GatewayService_ListKinds_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _GatewayService_Stats_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StatsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServiceServer).Stats(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GatewayService_Stats_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServiceServer).Stats(ctx, req.(*StatsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // GatewayService_ServiceDesc is the grpc.ServiceDesc for GatewayService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -624,6 +690,10 @@ var GatewayService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListKinds",
 			Handler:    _GatewayService_ListKinds_Handler,
+		},
+		{
+			MethodName: "Stats",
+			Handler:    _GatewayService_Stats_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -185,6 +185,26 @@ fn raise_client(op: &str, server: &ServerOptions, e: &ClientError) -> ! {
 
 // --- catalog access -------------------------------------------------------------
 
+/// Looks up a foreign server by name and returns its validated options.
+///
+/// For SQL-callable helpers that take a server name rather than running inside
+/// a scan. Errors carry the server name so the message is actionable:
+/// "no such server" and "the server exists but its options are wrong" are
+/// different problems for whoever is reading them.
+pub fn server_options_by_name(name: &str) -> Result<ServerOptions, String> {
+    let cname = std::ffi::CString::new(name)
+        .map_err(|_| format!("server name {name:?} contains an interior NUL byte"))?;
+    // SAFETY: a NUL-terminated name; missing_ok=true returns null rather than
+    // raising, so the not-found case is ours to report.
+    let server = unsafe { pg_sys::GetForeignServerByName(cname.as_ptr(), true) };
+    if server.is_null() {
+        return Err(format!("server {name:?} does not exist"));
+    }
+    // SAFETY: non-null FormData_pg_foreign_server from the catalog lookup.
+    let opts = unsafe { options_from_list((*server).options) };
+    ServerOptions::parse(&opts).map_err(|e| format!("server {name:?}: {e}"))
+}
+
 /// Reads a `List` of `DefElem` options into `(name, value)` pairs.
 unsafe fn options_from_list(list: *mut pg_sys::List) -> Vec<(String, String)> {
     // SAFETY: called by the executor/planner with valid node pointers; see module docs.
