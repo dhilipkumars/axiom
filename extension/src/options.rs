@@ -258,7 +258,7 @@ impl TableOptions {
 
 /// Validates an option list for `catalog` the way `CREATE ...` DDL needs:
 /// names must be known and unique, and values must parse. Wrapper and user
-/// mapping accept no options in Phase 1 (user mappings arrive in Phase 7).
+/// mapping accept no options in Phase 1 (user mappings arrive in Phase 6).
 pub fn validate(catalog: Catalog, opts: &[(String, String)]) -> Result<(), OptionsError> {
     match catalog {
         Catalog::Server => ServerOptions::parse(opts).map(|_| ()),

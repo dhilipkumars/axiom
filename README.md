@@ -25,6 +25,7 @@ That is the end goal. Read the three design documents for the full picture:
 |---|---|
 | [docs/DESIGN.md](docs/DESIGN.md) | Architecture, why a gateway, consistency tiers, schema mapping, multi-cluster, auth |
 | [docs/PLAN.md](docs/PLAN.md) | Six phases from plumbing to hardened multi-cluster, each with its own E2E test |
+| [docs/AUTH.md](docs/AUTH.md) | Per-caller identity: the options, the threat model, and the recommended flow |
 | [docs/RULES.md](docs/RULES.md) | Engineering gates every phase must meet: quality, testability, security, E2E |
 
 ## How it works (one paragraph)
@@ -53,7 +54,8 @@ Phases 0-3 built the gateway boundary, reads, writes and the watch-driven
 cache. Phase 4 removed the hardcoded kinds. Phase 5 makes a whole cluster the
 unit of work: point Axiom at one, and every kind the gateway's RBAC permits
 becomes a table in a schema named for that cluster. Still to come are
-multi-cluster (Phase 6) and the real auth model (Phase 7).
+per-caller identity and auth hardening (Phase 6), then
+multi-cluster (Phase 7).
 
 ```sql
 CREATE SCHEMA prod;

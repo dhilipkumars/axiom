@@ -181,14 +181,42 @@ avoid torn reads during a concurrent scan.
 - `CREATE FOREIGN TABLE` per GVK per server, or generated via `IMPORT FOREIGN
   SCHEMA`.
 
-## 7. Auth (gateway ↔ Postgres) — deferred detail, tracked for Phase 4+
+## 7. Auth (gateway ↔ Postgres) — designed in Phase 6
 
-Placeholder design, to be firmed up before any non-POC deployment:
-- Transport: mTLS between the extension's gRPC client and the gateway.
+**Full design: [AUTH.md](./AUTH.md).** This section is the summary.
+
+Firmed up when Phase 6 was scheduled ahead of multi-cluster, on the grounds that
+`CREATE USER MAPPING` is the per-cluster credential mechanism, so building
+multi-cluster first would give every registered cluster one shared ambient trust
+relationship and then require revisiting each. The shape:
+- Transport: TLS always; mTLS where the deployment can manage client PKI.
 - Principal: a credential held in `CREATE USER MAPPING`, mapped by the gateway to a
   Kubernetes RBAC identity (e.g. a `ServiceAccount` token or an OIDC-issued token the
   gateway exchanges), so Postgres-side SQL roles get real, auditable, scoped k8s RBAC
   — not a single shared superuser token for all Postgres users.
+- **Authorization by impersonation.** The gateway impersonates rather than
+  reimplements, so the API server makes every decision, the audit log names the
+  real principal, and the gateway's own RBAC narrows to `impersonate` over a
+  bounded set instead of broad resource access.
+- **Authentication by a gateway-minted, signed token**, carried in gRPC
+  metadata. §3 of RULES.md forbids a credential in a payload *field*, which a
+  metadata header is not — this is how Kubernetes itself carries bearer
+  credentials. The mechanism is chosen for deployability: `ca_cert` is currently
+  a file path, so a private-CA gateway is already unusable from managed Postgres
+  (RDS, Cloud SQL), and a file-based client certificate would exclude that class
+  permanently. Signing keeps the gateway stateless; an opaque token would force
+  it to persist and replicate a token-to-identity table. mTLS client certificates
+  remain supported for deployments that can manage PKI and want proof of
+  possession, which a bearer token does not give.
+- **Kubernetes denies rather than filters.** A cluster-wide LIST by an identity
+  without cluster-wide permission is a 403, not a filtered result, so per-caller
+  identity changes query semantics for namespace-scoped roles. See PLAN.md
+  Phase 6 for the options.
+- **Per-caller identity and the shared watch cache are in tension.** The Phase 3
+  cache is keyed `(cluster, kind, namespace)` with no caller dimension, so a
+  shared cache would serve one identity rows another fetched. PLAN.md Phase 6
+  lists the options and requires the chosen tier to be visible in
+  `axiom_watch_status()` rather than silently applied.
 - Out of scope for the POC phases below; flagged explicitly so it isn't
   accidentally skipped before any real cluster access is granted.
 
@@ -199,6 +227,16 @@ Placeholder design, to be firmed up before any non-POC deployment:
   **Revisited in Phase 4 and closed for now**: the mapping never explodes a CRD
   schema at all, promoting metadata scalars and leaving every structured field
   as top-level `jsonb`, so a pathological CRD costs nothing beyond a wider row.
+- **`NOTIFY axiom_events` is a global channel** (found while scoping Phase 6,
+  open): any Postgres role may LISTEN and learn that an object of a given kind,
+  namespace and name changed, whether or not it may read that object. Harmless
+  under one shared identity; an information leak once identity is per-caller.
+- **Server option surface** (found while scoping Phase 6, open): a role granted
+  `USAGE ON FOREIGN DATA WRAPPER` can point a `CREATE SERVER` at any endpoint,
+  making the Postgres backend open TLS connections to a host it chose, and
+  `ca_cert` is a server-read path whose errors distinguish missing from
+  unparseable. Unreachable while only superusers may define servers; live the
+  moment that is delegated, which least privilege calls for.
 - **Status subresources** (found in Phase 4, open): a kind with
   `subresources: status` has its status ignored by a PUT to the main resource,
   so a SQL `UPDATE` of a `status` column would appear to succeed and change
