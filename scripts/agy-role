@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Runs a task through the agy (Antigravity) CLI in one of this repo's roles.
+#
+#   scripts/agy-role architect "Review docs/AUTH.md for ..."
+#   scripts/agy-role junior    "Add a test that ..."
+#   scripts/agy-role worker    "Run make e2e and report"
+#   scripts/agy-role worker --timeout 1800s "Run the full suite"
+#
+# The role brief in docs/agents/<role>.md is prepended to the task. agy does not
+# auto-load project context: AGENTS.md, GEMINI.md, .agents/rules/,
+# .agents/agents/ and project-local skill directories were all tested against
+# agy 1.2.2 and none is read. Only user-level plugin skills under
+# ~/.gemini/config/plugins are discovered, and this project keeps no user-level
+# config, so the brief is passed inline instead.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+timeout=600s
+
+usage() { echo "usage: $(basename "$0") <architect|junior|worker> [--timeout DUR] <task>" >&2; exit 2; }
+[[ $# -lt 2 ]] && usage
+role="$1"; shift
+if [[ "${1:-}" == "--timeout" ]]; then timeout="$2"; shift 2; fi
+[[ $# -ge 1 ]] || usage
+
+brief="$here/docs/agents/${role}.md"
+[[ -f "$brief" ]] || { echo "no such role: $role (expected $brief)" >&2; exit 2; }
+
+# Effort is part of the model name; --effort is rejected for these models.
+case "$role" in
+  architect) model="Gemini 3.8 Flash (Medium)" ;;   # design review wants the reasoning
+  junior|worker) model="Gemini 3.8 Flash (Low)" ;;  # mechanical work does not
+  *) echo "no model mapping for role: $role" >&2; exit 2 ;;
+esac
+
+# --dangerously-skip-permissions is required: headless mode cannot prompt, so
+# without it every tool call is auto-denied and the run produces nothing.
+# agy does not necessarily start in the repository root, and a relative command
+# like `make gateway-test` then fails with "No rule to make target" -- observed.
+# Pin it explicitly rather than hoping.
+exec agy -p "$(cat "$brief")
+
+---
+
+REPOSITORY ROOT: $here
+Run every command from that directory. If you are somewhere else, cd there first.
+
+TASK: $*" \
+  --model "$model" \
+  --dangerously-skip-permissions \
+  --print-timeout "$timeout"

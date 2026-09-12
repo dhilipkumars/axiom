@@ -44,14 +44,12 @@ not retyped each time:
 | Role | Model | Use for |
 |---|---|---|
 | [architect](docs/agents/architect.md) | `Gemini 3.8 Flash (Medium)` | adversarial design review, brainstorming a phase |
-| [junior](docs/agents/junior.md) | `Gemini 3.8 Flash (Low)` | running known commands, mechanical edits, scaffolding |
+| [junior](docs/agents/junior.md) | `Gemini 3.8 Flash (Low)` | mechanical edits, scaffolding, small changes |
+| [worker](docs/agents/worker.md) | `Gemini 3.8 Flash (Low)` | long-running jobs; reports facts, changes nothing |
 
 ```sh
-agy -p "$(cat docs/agents/junior.md)
-
-TASK: <the specific thing>" \
-  --model "Gemini 3.8 Flash (Low)" \
-  --dangerously-skip-permissions --print-timeout 300s
+scripts/agy-role architect "Review docs/AUTH.md for ..."
+scripts/agy-role worker --timeout 1800s "Run make e2e and report"
 ```
 
 Three things learned the hard way, all verified rather than assumed:
@@ -59,9 +57,12 @@ Three things learned the hard way, all verified rather than assumed:
 - **Effort is part of the model name.** `--effort` is rejected for these models.
 - **`--dangerously-skip-permissions` is required.** Headless mode cannot prompt,
   so without it every tool call is auto-denied and the run produces nothing.
-- **Briefs are not auto-loaded.** `agy` reports that it reads `AGENTS.md` or
-  `GEMINI.md`; it was tested in a scratch directory and in this repo, and it
-  reads neither. Pipe the brief in.
+- **Nothing project-local is auto-loaded**, so the wrapper passes the brief
+  inline. `AGENTS.md`, `GEMINI.md`, `.agents/rules/`, `.agents/agents/` and
+  project-local skill directories were all tested and none is read; skills load
+  only from user-level plugins, and this project keeps no user-level config.
+  See [docs/agents/README.md](docs/agents/README.md) for the full matrix.
+- **The working directory is not the repo root**, which the wrapper pins.
 
 **Verify anything load-bearing that comes back.** The architect role found a
 real privilege-escalation hole in `docs/AUTH.md` that empirical testing then
