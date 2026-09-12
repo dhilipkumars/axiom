@@ -1,6 +1,6 @@
 #!/bin/sh
 # Generates a throwaway CA + gateway server certificate into /certs for the
-# local compose stack. Test-only material, never committed. Phase 7 adds a
+# local compose stack. Test-only material, never committed. Phase 6 adds a
 # client cert here for mTLS.
 #
 # Generation is idempotent on purpose. This runs on every `compose up`, and

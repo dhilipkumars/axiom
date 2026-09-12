@@ -61,12 +61,12 @@ this mechanically as possible rather than relying on review discipline alone.
 - **Least privilege, always**: the gateway's own k8s RBAC (its `ServiceAccount`)
   is scoped to exactly the GVKs/verbs/namespaces a given deployment is configured
   to serve — never a cluster-admin binding for convenience, even in the POC phases.
-  Extend this per-caller once Phase 7 auth lands (per-Postgres-role RBAC identity,
-  DESIGN.md §7) — Phase 7 is not "add auth," it's "add the *per-caller* layer" on
+  Extend this per-caller once Phase 6 auth lands (per-Postgres-role RBAC identity,
+  DESIGN.md §7) — Phase 6 is not "add auth," it's "add the *per-caller* layer" on
   top of a gateway that was already least-privilege from Phase 0.
 - **Every trust boundary gets an explicit control, from Phase 0**:
   - Postgres ↔ gateway: TLS from the first phase that has a real network hop
-    (not deferred to "later hardening" as plaintext-then-retrofit) — Phase 7
+    (not deferred to "later hardening" as plaintext-then-retrofit) — Phase 6
     upgrades this from TLS to mTLS + RBAC-mapped identity, it doesn't introduce
     encryption that wasn't there before.
   - Gateway ↔ k8s API server: standard `client-go` in-cluster or kubeconfig auth,
@@ -92,8 +92,8 @@ this mechanically as possible rather than relying on review discipline alone.
 - **Secrets hygiene**: no credential ever appears in a log line, panic message, SQL
   error text, or test fixture committed to the repo. CI includes a secret-scan
   (e.g. `gitleaks`) on every push.
-- **Phase 7 is a hardening phase, not the *only* security phase**: rules above
-  apply from Phase 0 onward. Phase 7's job is specifically the per-caller RBAC
+- **Phase 6 is a hardening phase, not the *only* security phase**: rules above
+  apply from Phase 0 onward. Phase 6's job is specifically the per-caller RBAC
   mapping and mTLS upgrade described in DESIGN.md §7 — everything else in this
   section is a standing requirement for every phase, including the POC ones.
 
@@ -106,7 +106,7 @@ this mechanically as possible rather than relying on review discipline alone.
   3. Rules 1–3 above are satisfied for all code introduced in that phase — no
      "we'll harden it in a later phase" deferral for anything that isn't
      explicitly scoped as a later phase's job in PLAN.md (e.g. mTLS is
-     legitimately Phase 7's job; a `panic!` on a malformed RPC response in Phase 1
+     legitimately Phase 6's job; a `panic!` on a malformed RPC response in Phase 1
      is not something any later phase is scoped to clean up, so it must be fixed
      in Phase 1).
 - No phase is reopened to bolt on tests/hardening after the fact as a separate

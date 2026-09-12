@@ -1,7 +1,7 @@
 // Package tlsconfig builds the server-side TLS configuration for the gateway.
 //
 // The Postgres↔gateway hop is a real network hop from Phase 0, so it is TLS
-// from Phase 0 (docs/RULES.md §3). Phase 7 upgrades this to mTLS by adding a
+// from Phase 0 (docs/RULES.md §3). Phase 6 upgrades this to mTLS by adding a
 // client CA + RequireAndVerifyClientCert; nothing here should need to be torn
 // out for that.
 package tlsconfig

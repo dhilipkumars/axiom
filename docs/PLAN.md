@@ -335,7 +335,119 @@ Then revoke one kind's RBAC and assert a re-import drops it.
 
 ---
 
-## Phase 6 — Multi-cluster
+## Phase 6 — Per-caller identity and auth hardening
+
+**Goal**: every SQL role's query reaches Kubernetes as a *distinct*, RBAC-scoped
+identity, with the API server making the authorization decision. Today the
+gateway holds one ServiceAccount and every Postgres user who can `SELECT` from a
+foreign table gets all of it — the "single shared superuser token" DESIGN.md §7
+exists to eliminate.
+
+**Why before multi-cluster.** `CREATE USER MAPPING` is the per-cluster
+credential mechanism (DESIGN.md §6), so building multi-cluster first would mean
+every registered cluster shares one ambient trust relationship and then having
+to revisit each one's credential story anyway. Multi-cluster also multiplies the
+blast radius of a weak trust model from one cluster to N, and mTLS is far
+cheaper to get right against one gateway than against several. Phase 5 made RBAC
+the boundary for the *gateway's* identity; this phase makes it per *caller*,
+which is the same thread (RULES.md §3).
+
+### Design decisions to settle first
+
+These are load-bearing and cheap to decide now, expensive to discover halfway in.
+
+**1. Authentication by mTLS, authorization by impersonation.** RULES.md §3
+forbids a credential travelling as a payload field, which rules out passing a
+caller's token through the data plane. A client certificate is carried by the
+*transport*, not the payload, so mTLS is how the caller proves who it is. For
+what the caller may *do*, the gateway should impersonate rather than
+reimplement: hold a ServiceAccount permitted to `impersonate` a bounded set of
+users/groups, and set the impersonation headers per request. The API server then
+makes every authorization decision, the audit log names the real principal, and
+the gateway needs no per-caller kubeconfig. The gateway's own RBAC becomes
+`impersonate` on a narrow set rather than broad access to resources — strictly
+less privilege than it holds today.
+
+**2. The watch cache has no caller dimension, and that is a leak.** Phase 3
+keys a subscription on `(endpoint, CA, kind, namespace)` and serves it to any
+backend. Per-caller RBAC plus a shared cache means role B reads rows that role
+A's identity fetched. Options, to be chosen deliberately:
+  - key subscriptions on identity too, accepting one watch stream and one cache
+    per identity (correct, potentially expensive);
+  - restrict `cache_mode 'watch'` to servers whose user mapping resolves to a
+    single shared identity, leaving per-caller tables on-demand (cheap, honest,
+    narrower);
+  - serve the cache only to the identity that requested it, treating others as
+    a miss (simple, wasteful under fan-out).
+  The narrow option is probably right for this phase, with the general one
+  deferred — but it must be an explicit decision, and the chosen tier must be
+  visible in `axiom_watch_status()` rather than silently applied.
+
+**3. Kubernetes denies, it does not filter.** A cluster-wide `LIST` by an
+identity without cluster-wide list permission returns 403 — it does not return
+the subset that identity may see. So `SELECT * FROM prod.pods` for a
+namespace-scoped role fails outright rather than returning that role's
+namespaces. Either that becomes documented behaviour ("add a namespace qual"),
+or the gateway discovers the caller's permitted namespaces and fans out per
+namespace. The second is friendlier and costs a `SelfSubjectRulesReview` per
+namespace, cacheable. Decide explicitly; do not let it emerge as a confusing
+error.
+
+**4. `NOTIFY axiom_events` is a global channel.** Any role may `LISTEN` and
+learn that an object of a given kind, namespace and name changed, regardless of
+whether it may read that object. Harmless with one shared identity, an
+information leak with per-caller RBAC. Either scope the payload to what the
+listener may see (Postgres `NOTIFY` cannot address a subscriber, so this means
+dropping detail), or gate notifications behind a role and document it.
+
+**5. Cached gRPC channels must key on the caller.** `CHANNELS` in the extension
+is keyed `(Target, rpc_timeout)`. Add a client certificate and that key no
+longer identifies the peer: within one backend, `SET ROLE` could hand one role a
+channel authenticated as another. The key has to include whatever the user
+mapping resolves to.
+
+### Tasks
+
+- [ ] mTLS between the extension's gRPC client and the gateway, in both
+  directions, with the gateway rejecting unauthenticated connections outright.
+- [ ] `CREATE USER MAPPING` carries the per-role credential; the gateway maps it
+  to a Kubernetes identity and impersonates it for every call made on that
+  caller's behalf.
+- [ ] Key the extension's channel cache on the resolved caller identity, so a
+  role can never reuse a channel authenticated as another.
+- [ ] Settle and implement the cache/caller interaction from decision 2, with
+  the chosen tier surfaced in `axiom_watch_status()`.
+- [ ] Settle and implement the deny-vs-filter behaviour from decision 3.
+- [ ] Close the `CREATE SERVER` option surface. A role with delegated `USAGE ON
+  FOREIGN DATA WRAPPER` can currently point a server at any endpoint, making the
+  Postgres backend open TLS connections to a host of its choosing (server-side
+  request forgery), and `ca_cert` is a server-read file path whose error text
+  distinguishes a missing file from an unparseable one. Neither is reachable
+  while only superusers may define servers, and both go live the moment that is
+  delegated — which least privilege calls for. `postgres_fdw`'s
+  `password_required` is the precedent: constrain what a non-superuser may put
+  in server options, and require the credential to come from the user mapping
+  rather than from the server's ambient position.
+- [ ] Decide and document the `NOTIFY` exposure from decision 4.
+- [ ] Audit: every gateway log line for a data-plane call names the impersonated
+  principal, so "which SQL role read this" is answerable.
+- [ ] Credential rotation: the gateway reloads its server certificate without a
+  restart, and a rotated client certificate is picked up by the extension. The
+  channel-eviction fix from Phase 5 covers the client half; the server half is
+  new.
+
+**E2E test (`e2e-phase6`)**: two Postgres roles with two `CREATE USER MAPPING`s
+pointing at two RBAC-scoped identities on one cluster. Assert role A reads and
+writes exactly what its identity permits; role B is denied out-of-scope
+resources with a SQL error rather than a crash or an empty result; neither can
+see the other's rows through a shared cache; a plaintext or
+non-client-authenticated connection to the gateway is rejected; and the gateway
+log attributes each call to the right principal. Add a negative test that a
+non-superuser cannot define a server pointing at an arbitrary endpoint.
+
+---
+
+## Phase 7 — Multi-cluster
 
 **Goal**: prove the `CREATE SERVER`-per-cluster abstraction actually holds up with
 ≥2 independent clusters/gateways simultaneously.
@@ -346,36 +458,18 @@ Tasks:
 - [ ] Cache key already includes `cluster_id` (from Phase 3) — this phase is mostly
   a concurrency/isolation test, plus config surface (`CREATE SERVER ... OPTIONS
   (endpoint ...)` per cluster wired end to end).
-- [ ] With Phase 5's schema-per-cluster model in place, a second cluster is a
-  second `CREATE SERVER` plus a second `IMPORT ... INTO <name>`; the naming
-  question is already settled, so this phase is isolation and concurrency only.
+- [ ] With Phase 5's schema-per-cluster model and Phase 6's per-caller
+  credentials both in place, a second cluster is a second `CREATE SERVER`, a
+  second `CREATE USER MAPPING`, and a second `IMPORT ... INTO <name>`. Naming
+  and credentials are already settled, so this phase is isolation and
+  concurrency only.
 - [ ] Verify a failure/degradation in one cluster's stream doesn't affect another
   cluster's `ACTIVE` state or block its scans (isolation, not just "it also works").
 
-**E2E test (`e2e-phase6`)**: two `kind` clusters in CI, two gateways, two `CREATE
+**E2E test (`e2e-phase7`)**: two `kind` clusters in CI, two gateways, two `CREATE
 SERVER`s. Query both, mutate one cluster's data, assert only that cluster's cached
 table updates. Kill one gateway, assert the other cluster's `ACTIVE`/live queries
 are unaffected (isolation test), then bring it back and assert it resyncs.
-
----
-
-## Phase 7 — Gateway auth hardening
-
-**Goal**: replace the POC's placeholder auth with the real model from DESIGN.md §7.
-
-Tasks:
-- [ ] mTLS between extension gRPC client and gateway.
-- [ ] `CREATE USER MAPPING` credential → gateway-side mapping to a scoped k8s RBAC
-  identity (not a shared superuser token).
-- [ ] Negative tests: a Postgres role mapped to a restricted identity cannot read/
-  write resources outside its RBAC scope, even though the underlying gateway
-  connection is shared infrastructure.
-
-**E2E test (`e2e-phase7`)**: two Postgres roles with two different `CREATE USER
-MAPPING`s pointing at two different RBAC-scoped identities on the same cluster;
-assert role A can read/write only what its RBAC identity permits, role B is
-correctly denied (SQL error, not a crash) for out-of-scope resources; assert
-plaintext/non-mTLS connections to the gateway are rejected.
 
 ---
 
