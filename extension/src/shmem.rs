@@ -12,7 +12,7 @@
 //! Locking: one `LWLock` for everything. The worker takes it exclusively for
 //! writes; backends take it shared to copy matching objects out, then decode
 //! outside the lock. Adequate for this phase; partitioned locking (dshash)
-//! is a Phase 5 concern once contention is measurable. dshash itself has no
+//! is a Phase 6 concern once contention is measurable. dshash itself has no
 //! pgrx bindings and its parameter struct changed layout in pg17, which is why
 //! the index is self-managed here.
 //!
@@ -543,7 +543,7 @@ struct EntryView<'a> {
     name: &'a [u8],
     #[allow(
         dead_code,
-        reason = "per-object resourceVersion is stored for Phase 5 diagnostics"
+        reason = "per-object resourceVersion is stored for Phase 6 diagnostics"
     )]
     rv: &'a [u8],
     json: &'a [u8],

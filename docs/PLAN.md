@@ -131,7 +131,7 @@ Tasks:
   store would duplicate the extension's cache and its resync semantics hide the
   resourceVersion bookkeeping the extension needs for honest tiers. Sharing one
   upstream watch across subscribers to the same `(gvk, namespace)` (the
-  informer-factory fan-out concern, DESIGN.md §8) is Phase 5's job.
+  informer-factory fan-out concern, DESIGN.md §8) is Phase 6's job.
 - [x] Extension bgworker: opens one persistent `Subscribe` stream per configured
   cluster+GVK, reconnect/backoff on drop, relist on resume.
 - [x] Shared-memory cache (`dshash`) keyed `(cluster_id, gvk, namespace, name)`,
@@ -148,7 +148,7 @@ Tasks:
 Notes from implementation: the cache is a **DSA-backed hash index managed by the
 extension** rather than `dshash`: pgrx exposes DSA but not dshash, and dshash's
 parameter struct changed layout in pg17; one `LWLock` guards the whole cache,
-which is adequate here (partitioned locking is revisited in Phase 5 once
+which is adequate here (partitioned locking is revisited in Phase 6 once
 contention is measurable). Subscriptions are **requested by scans**: the first
 scan of a `cache_mode 'watch'` table registers `(server, kind, namespace)` in a
 shared slot table and is served on demand; the background worker opens one
@@ -249,7 +249,67 @@ i.e. re-run the Phase 1–3 test suite generically against a CRD to prove generi
 
 ---
 
-## Phase 5 — Multi-cluster
+## Phase 5 — Data model: a schema per cluster, a table per kind
+
+**Goal**: point Axiom at a cluster and query anything in it, without naming
+kinds one at a time. Phase 4 proved discovery works per kind; this phase makes
+"everything the gateway may see" the unit of work, and fixes what breaks at
+that scale.
+
+The ordering matters: this lands *before* multi-cluster, because the schema
+naming and the cluster identity it implies are the same decision, and doing
+multi-cluster first would mean choosing them twice.
+
+Tasks:
+- [ ] **Schema per cluster, table per kind** as the documented default.
+  Already expressible today (`IMPORT FOREIGN SCHEMA k8s FROM SERVER prod INTO
+  prod`), but the docs and the E2E model it as `INTO k8s`, which reads as if
+  the remote-schema argument were the target schema rather than an API-group
+  filter. Make the cluster-named form the example everywhere, and accept the
+  server's own name as a synonym for "every group this gateway serves".
+- [ ] **RBAC-bounded discovery**: filter the served set by
+  `SelfSubjectAccessReview` against the gateway's own identity, so what is
+  offered follows what the ServiceAccount can actually read. `system:basic-user`
+  grants `create` on `selfsubjectaccessreviews` to `system:authenticated` by
+  default, so this needs no extra permission. Today `--serve` and the
+  ServiceAccount's RBAC are two lists that must be hand-synced — a comment in
+  `deploy/k8s/gateway-rbac.yaml` says exactly that, which is the tell. After
+  this, RBAC is the single source of truth and `--serve` defaults to everything,
+  surviving only as optional narrowing for operators who want to hide kinds they
+  could otherwise read.
+- [ ] **Cache the OpenAPI document per group-version.** `Paths()` and
+  `Schema()` are both uncached in `client-go`, and `Discovery.topLevelFields`
+  calls them per kind. A bare `kind` cluster has 65 listable kinds across 13
+  group-versions, and the core/v1 document alone is 1.6 MB, so serving a whole
+  cluster currently re-fetches and re-parses it once per core kind. This is the
+  actual blocker for the goal above, not a nice-to-have.
+- [ ] **Collision-safe table naming.** `events` exists in both the core group
+  and `events.k8s.io`. Under one schema per cluster both want the same table
+  name, the second `CREATE` fails, and the whole `IMPORT` fails with it. Use the
+  bare plural when it is unique and suffix the group only when ambiguous, so one
+  collision does not uglify the other 64 names.
+- [ ] **`api_version`, `kind` and `metadata` as columns.** These are the only
+  three fields guaranteed on every Kubernetes object — `spec` is present on 67%
+  of built-in kinds and `status` on 47%, so neither is a safe basis for anything
+  cross-kind. `apiVersion` and `kind` are currently dropped as "fixed by the
+  table options" and `metadata` as "already exploded into scalars", but a query
+  spanning kinds has nothing else to key on, and `metadata` carries fields not
+  promoted individually (`ownerReferences`, `finalizers`, `deletionTimestamp`).
+
+**E2E test (`e2e-phase5`)**: against a `kind` cluster with the Phase 4 test CRD
+still applied, grant the gateway a deliberately partial RBAC set, then
+`IMPORT FOREIGN SCHEMA` the whole cluster into one schema named for it. Assert:
+every kind the ServiceAccount may list became a table and nothing else did
+(including a kind that exists but is not granted); the `events` collision
+produced two distinct, queryable tables; `api_version`/`kind`/`metadata` are
+populated on a row from each of a built-in and a CRD; and the import issues one
+OpenAPI fetch per group-version rather than one per kind (assert via a
+gateway-side counter, the same technique the Phase 3 gate uses for List calls).
+Then revoke one kind's RBAC and assert a re-import drops it.
+
+---
+
+## Phase 6 — Multi-cluster
 
 **Goal**: prove the `CREATE SERVER`-per-cluster abstraction actually holds up with
 ≥2 independent clusters/gateways simultaneously.
@@ -260,17 +320,20 @@ Tasks:
 - [ ] Cache key already includes `cluster_id` (from Phase 3) — this phase is mostly
   a concurrency/isolation test, plus config surface (`CREATE SERVER ... OPTIONS
   (endpoint ...)` per cluster wired end to end).
+- [ ] With Phase 5's schema-per-cluster model in place, a second cluster is a
+  second `CREATE SERVER` plus a second `IMPORT ... INTO <name>`; the naming
+  question is already settled, so this phase is isolation and concurrency only.
 - [ ] Verify a failure/degradation in one cluster's stream doesn't affect another
   cluster's `ACTIVE` state or block its scans (isolation, not just "it also works").
 
-**E2E test (`e2e-phase5`)**: two `kind` clusters in CI, two gateways, two `CREATE
+**E2E test (`e2e-phase6`)**: two `kind` clusters in CI, two gateways, two `CREATE
 SERVER`s. Query both, mutate one cluster's data, assert only that cluster's cached
 table updates. Kill one gateway, assert the other cluster's `ACTIVE`/live queries
 are unaffected (isolation test), then bring it back and assert it resyncs.
 
 ---
 
-## Phase 6 — Gateway auth hardening
+## Phase 7 — Gateway auth hardening
 
 **Goal**: replace the POC's placeholder auth with the real model from DESIGN.md §7.
 
@@ -282,7 +345,7 @@ Tasks:
   write resources outside its RBAC scope, even though the underlying gateway
   connection is shared infrastructure.
 
-**E2E test (`e2e-phase6`)**: two Postgres roles with two different `CREATE USER
+**E2E test (`e2e-phase7`)**: two Postgres roles with two different `CREATE USER
 MAPPING`s pointing at two different RBAC-scoped identities on the same cluster;
 assert role A can read/write only what its RBAC identity permits, role B is
 correctly denied (SQL error, not a crash) for out-of-scope resources; assert
@@ -298,7 +361,7 @@ plaintext/non-mTLS connections to the gateway are rejected.
   before declaring the new phase's own test authoritative.
 - Track the open risks from DESIGN.md §8 (CRD schema explosion, watch/informer
   scaling, shared-memory eviction policy) as they become concretely testable —
-  Phase 4 is the natural point to revisit CRD schema explosion, Phase 5 for
+  Phase 4 is the natural point to revisit CRD schema explosion, Phase 6 for
   informer scaling, and cache eviction should get its own task once a phase
   exercises a high-object-count cluster (not yet scheduled — flag if that becomes a
   near-term need rather than scheduling it speculatively now).

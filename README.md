@@ -52,7 +52,8 @@ Phases 0-3 built the gateway boundary, reads, writes and the watch-driven
 cache for two hardcoded kinds. Phase 4 removes the hardcoding: the gateway
 resolves kinds through Kubernetes discovery, and `IMPORT FOREIGN SCHEMA`
 generates foreign tables for whatever it serves, CRDs included. Still to come
-are multi-cluster (Phase 5) and the real auth model (Phase 6).
+are the whole-cluster data model (Phase 5), multi-cluster (Phase 6),
+and the real auth model (Phase 7).
 
 | Component | Path | What it does today |
 |---|---|---|
