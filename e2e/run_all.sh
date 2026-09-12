@@ -69,6 +69,12 @@ fi
 # --- one cluster for every gate ---------------------------------------------
 t0=$SECONDS
 kind_up
+# Side-load the gateway image here rather than letting the first gate pay for
+# it: every gate deploys the gateway in-cluster, the load costs 20-40s, and
+# attributing it to one arbitrary gate makes the timing summary misleading.
+# Gates still call it themselves (it no-ops when the node has the image), so
+# running one standalone keeps working.
+[[ "${E2E_GATEWAY_MODE:-incluster}" == "compose" ]] || kind_load_gateway_image
 cluster_secs=$(( SECONDS - t0 ))
 log "cluster ready in $(hms "$cluster_secs")"
 

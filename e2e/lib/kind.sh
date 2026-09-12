@@ -213,6 +213,7 @@ kind_restart_gateway() {
     || fail "rollout restart"
   kubectl_e2e -n "$E2E_GATEWAY_SA_NS" rollout status deploy/axiom-gateway --timeout=120s >/dev/null \
     || fail "gateway did not come back after restart"
+  kind_wait_gateway_endpoint
 }
 
 # kind_stop_gateway / kind_start_gateway: take the gateway away and bring it
@@ -225,4 +226,5 @@ kind_start_gateway() {
   kubectl_e2e -n "$E2E_GATEWAY_SA_NS" scale deploy/axiom-gateway --replicas=1 >/dev/null || fail "scale to 1"
   kubectl_e2e -n "$E2E_GATEWAY_SA_NS" rollout status deploy/axiom-gateway --timeout=120s >/dev/null \
     || fail "gateway did not come back"
+  kind_wait_gateway_endpoint
 }

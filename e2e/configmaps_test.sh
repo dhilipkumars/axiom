@@ -6,16 +6,20 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Must precede the source: stack.sh resolves the gateway endpoint from it.
+E2E_GATEWAY_MODE=incluster
+
 source "$here/lib/stack.sh"
 source "$here/lib/kind.sh"
 
-E2E_COMPOSE_OVERLAYS="${E2E_COMPOSE_OVERLAYS:-} $E2E_ROOT/deploy/compose/docker-compose.kind.yml"
+E2E_COMPOSE_OVERLAYS="${E2E_COMPOSE_OVERLAYS:-} $E2E_ROOT/deploy/compose/docker-compose.kind.yml $E2E_ROOT/deploy/compose/docker-compose.incluster.yml"
 NS="axiom-e2e"
 SA="system:serviceaccount:$E2E_GATEWAY_SA_NS:$E2E_GATEWAY_SA"
 
 kind_up
 e2e_on_teardown kind_down
 stack_up
+kind_deploy_gateway "pods,configmaps"
 
 log "namespace and DDL"
 kubectl_e2e create namespace "$NS" --dry-run=client -o yaml | kubectl_e2e apply -f - >/dev/null
