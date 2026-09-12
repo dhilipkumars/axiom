@@ -143,9 +143,26 @@ kind_gateway_tls_secret() {
   tmp="$(mktemp -d)"
   # The certs live in a Docker volume, not on the host; copy them out through a
   # throwaway container rather than duplicating the generation logic.
+  #
+  # The copy is chowned to the invoking user because gen.sh leaves the key as
+  # mode 0600 owned by uid 65532 (the distroless `nonroot` the gateway runs as)
+  # and busybox `cp` carries those bits onto the copy. On Linux that makes the
+  # copy unreadable to whoever runs the gate -- kubectl fails with "permission
+  # denied" and the secret is never created. Docker Desktop's file sharing
+  # remaps ownership on the way out, which is why this only ever failed in CI.
+  #
+  # Chowning rather than chmodding: the key stays 0600, just owned by the user
+  # who needs it, so a private key is never briefly world-readable on disk.
   docker run --rm -v "$vol":/certs:ro -v "$tmp":/out alpine:3.20 \
-    sh -c 'cp /certs/gateway.crt /certs/gateway.key /certs/ca.crt /out/' >/dev/null 2>&1 \
+    sh -c "cp /certs/gateway.crt /certs/gateway.key /certs/ca.crt /out/ &&
+           chown $(id -u):$(id -g) /out/gateway.crt /out/gateway.key /out/ca.crt &&
+           chmod 0600 /out/gateway.key" >/dev/null 2>&1 \
     || fail "could not read certificates from volume $vol (is the stack up?)"
+  # Fail here rather than letting kubectl report it: a secret built from an
+  # unreadable file is the failure this guard exists for.
+  [[ -r "$tmp/gateway.key" && -r "$tmp/gateway.crt" ]] \
+    || fail "copied certificates are not readable as $(id -un) (uid $(id -u)); \
+check ownership in $tmp"
   kubectl_e2e -n "$E2E_GATEWAY_SA_NS" create secret generic axiom-gateway-tls \
     --from-file=tls.crt="$tmp/gateway.crt" \
     --from-file=tls.key="$tmp/gateway.key" \
