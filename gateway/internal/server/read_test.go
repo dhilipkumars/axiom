@@ -95,8 +95,12 @@ func TestList(t *testing.T) {
 	}{
 		{name: "all", req: &axiomv1.ListRequest{Gvk: podGVK}, wantNames: map[string]bool{"web": true, "db": true, "dns": true}},
 		{name: "namespace", req: &axiomv1.ListRequest{Gvk: podGVK, Namespace: "default"}, wantNames: map[string]bool{"web": true, "db": true}},
-		{name: "namespace+name", req: &axiomv1.ListRequest{Gvk: podGVK, Namespace: "default", Name: "db"}, wantNames: map[string]bool{"db": true}},
-		{name: "name miss is empty", req: &axiomv1.ListRequest{Gvk: podGVK, Namespace: "default", Name: "zzz"}, wantNames: map[string]bool{}},
+		// A name filter is a metadata.name field selector, which client-go's
+		// fake dynamic client ignores, so the handler tests cover validation
+		// and error mapping for it rather than the filtering itself.
+		// TestListByNameSendsAFieldSelectorAndNeverAGet asserts the request the
+		// gateway builds, and e2e/cluster_test.sh covers the result against a
+		// real API server.
 		{name: "nil request", req: nil, wantCode: codes.InvalidArgument},
 		{name: "missing gvk", req: &axiomv1.ListRequest{}, wantCode: codes.InvalidArgument},
 		{name: "bad namespace", req: &axiomv1.ListRequest{Gvk: podGVK, Namespace: "UPPER"}, wantCode: codes.InvalidArgument},

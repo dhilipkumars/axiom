@@ -23,6 +23,7 @@ import (
 
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/discovery/cached/memory"
+	authv1client "k8s.io/client-go/kubernetes/typed/authorization/v1"
 
 	axiomv1 "github.com/dhilipkumars/axiom/gateway/gen/axiom/v1"
 	"github.com/dhilipkumars/axiom/gateway/internal/k8s"
@@ -86,13 +87,26 @@ func run(ctx context.Context, args []string, stderr *os.File) error {
 		if err != nil {
 			return fmt.Errorf("k8s: discovery client: %w", err)
 		}
-		mapper := k8s.NewDiscovery(memory.NewMemCacheClient(disco), allow)
+		// RBAC is the boundary: the gateway asks the API server which kinds
+		// its own identity may list, so the served set follows the
+		// ServiceAccount rather than a second list that must be hand-synced.
+		authz, err := authv1client.NewForConfig(cfg)
+		if err != nil {
+			return fmt.Errorf("k8s: authorization client: %w", err)
+		}
+		access := k8s.NewSelfAccess(authz.SelfSubjectAccessReviews())
+		mapper := k8s.NewDiscovery(memory.NewMemCacheClient(disco), allow, access, logger)
 		dyn, err := k8s.NewFromConfig(cfg, mapper)
 		if err != nil {
 			return err
 		}
 		client = dyn
-		logger.Info("kubernetes client configured", "api_server", cfg.Host, "serve", allow.String())
+		// Which of the two bounds is actually narrowing is worth knowing when
+		// a kind is unexpectedly missing.
+		logger.Info("kubernetes client configured",
+			"api_server", cfg.Host,
+			"serve", allow.String(),
+			"bounded_by", map[bool]string{true: "rbac", false: "rbac+serve"}[allow.ServesEverything()])
 	}
 
 	tlsCfg, err := tlsconfig.Load(*certPath, *keyPath)

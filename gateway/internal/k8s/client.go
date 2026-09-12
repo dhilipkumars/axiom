@@ -12,9 +12,9 @@ import (
 	"fmt"
 	"os"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
@@ -37,9 +37,16 @@ type Client interface {
 	// Get returns one object. Namespace must be empty for cluster-scoped kinds.
 	Get(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) (*unstructured.Unstructured, error)
 	// List returns objects of one kind. Empty namespace means all namespaces.
-	// If name is non-empty the result holds at most that one object; this is
-	// served with a point Get (cheaper for the API server than a filtered
-	// LIST, which scans the whole collection server-side) and a miss yields an
+	//
+	// A non-empty name narrows to objects of that name, applied server-side as
+	// a metadata.name field selector. It is never served by a point Get: `get`
+	// and `list` are independent RBAC verbs, and a kind is admitted on `list`,
+	// so using `get` anywhere on the read path would make a list-only kind
+	// importable but unqueryable once a name filter appeared.
+	//
+	// A name filter yields at most one object when paired with a namespace, or
+	// for a cluster-scoped kind. Across all namespaces it can yield several,
+	// since a name is unique only within one. A filter matching nothing is an
 	// empty list, not an error.
 	List(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) (*unstructured.UnstructuredList, error)
 	// Create creates obj. apiVersion/kind must already match gvk.
@@ -135,21 +142,24 @@ func (c *Dynamic) Get(ctx context.Context, gvk schema.GroupVersionKind, namespac
 
 // List implements Client.
 func (c *Dynamic) List(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) (*unstructured.UnstructuredList, error) {
-	if name != "" {
-		obj, err := c.Get(ctx, gvk, namespace, name)
-		if apierrors.IsNotFound(err) {
-			return &unstructured.UnstructuredList{}, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-		return &unstructured.UnstructuredList{Items: []unstructured.Unstructured{*obj}}, nil
-	}
 	ri, err := c.resourceFor(ctx, gvk, namespace)
 	if err != nil {
 		return nil, err
 	}
-	return ri.List(ctx, metav1.ListOptions{})
+	opts := metav1.ListOptions{}
+	if name != "" {
+		// Narrow server-side. A point Get would be marginally cheaper when the
+		// object can be named in full, and Phase 1 used one for exactly that
+		// reason, but `get` and `list` are independent RBAC verbs and Phase 5
+		// admits a kind on `list` alone. Serving any part of the read path with
+		// `get` would let a list-only kind import cleanly and then fail with
+		// PERMISSION_DENIED the moment a query added a name filter. One verb
+		// for the whole read path keeps what is offered and what works the
+		// same thing. metadata.name is an indexed field selector, so the API
+		// server does not scan the collection to answer this.
+		opts.FieldSelector = fields.OneTermEqualSelector("metadata.name", name).String()
+	}
+	return ri.List(ctx, opts)
 }
 
 // Create implements Client.

@@ -80,7 +80,8 @@ pub struct ImportOptions {
     /// `cache_mode` applied to every generated table.
     pub cache_mode: CacheMode,
     /// `prefix` prepended to every generated table name, for importing two
-    /// clusters into one schema without a collision.
+    /// clusters into one schema without a collision. Applied by
+    /// [`assign_table_names`], not here.
     pub prefix: String,
 }
 
@@ -137,6 +138,118 @@ pub fn quote_literal(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
+/// Normalizes an API group into an identifier fragment, for disambiguating a
+/// table name. `events.k8s.io` becomes `events_k8s_io`; the core group, whose
+/// real name is the empty string, becomes `core`.
+fn group_suffix(group: &str) -> String {
+    if group.is_empty() {
+        return "core".to_owned();
+    }
+    group
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' {
+                c
+            } else if c.is_ascii_uppercase() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// A short, stable hex digest of `group`, for the last-resort disambiguation
+/// step. FNV-1a: tiny, deterministic across runs and machines, and not used for
+/// anything security-sensitive -- only to separate two API groups whose names
+/// normalize to the same identifier fragment.
+fn group_digest(group: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in group.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{:06x}", hash & 0x00ff_ffff)
+}
+
+/// Assigns a table name to every kind being imported, in the order given.
+///
+/// A plural is only unique within an API group, so importing a whole cluster
+/// into one schema collides: `events` exists in both the core group and
+/// `events.k8s.io`, and under one schema per cluster both want the same table.
+/// Left alone, the second `CREATE` fails and takes the entire import with it.
+///
+/// A kind whose plural is unique across the set keeps the bare name. When two
+/// or more share a plural, *none* of them gets it and each is suffixed with its
+/// group: `events_core` and `events_events_k8s_io`. Handing the bare name to
+/// one of them would make `events` mean whichever the rule happened to favour,
+/// which is exactly the ambiguity worth avoiding; the same reasoning drops both
+/// sides of a colliding column rather than picking a winner.
+///
+/// Returns one name per input kind, positionally. A name that cannot be made
+/// into a safe identifier is returned empty, and the caller skips that kind.
+pub fn assign_table_names(kinds: &[ImportKind], prefix: &str) -> Vec<String> {
+    // Three tiers of increasing specificity. A kind uses the least specific one
+    // that nothing else is also using: the bare plural, the plural suffixed
+    // with its API group, or that plus a digest of the group. The digest tier
+    // exists because the suffix alone cannot always separate two groups --
+    // `a-b.io` and `a.b.io` both normalize to `a_b_io` -- and because a kind
+    // genuinely named `events_core` collides with the generated name for core
+    // events.
+    let tiers = |k: &ImportKind| {
+        let suffixed = format!("{}_{}", k.plural, group_suffix(&k.group));
+        [
+            format!("{prefix}{}", k.plural),
+            format!("{prefix}{suffixed}"),
+            format!("{prefix}{suffixed}_{}", group_digest(&k.group)),
+        ]
+    };
+    let all: Vec<[String; 3]> = kinds.iter().map(tiers).collect();
+
+    // Start everyone at the least specific tier, then promote *every* member of
+    // any colliding set until nothing collides. Promoting the whole set rather
+    // than the later claimant is what makes the result independent of the order
+    // discovery returned kinds in, so re-importing the same cluster produces
+    // the same table names. It also keeps the rule consistent with colliding
+    // columns: an ambiguous name goes to nobody rather than to whoever asked
+    // first.
+    let mut tier = vec![0usize; kinds.len()];
+    loop {
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for (i, t) in tier.iter().enumerate() {
+            *counts.entry(all[i][*t].as_str()).or_default() += 1;
+        }
+        let mut promoted = false;
+        for i in 0..kinds.len() {
+            let name = all[i][tier[i]].as_str();
+            // An unusable name is promoted for the same reason a colliding one
+            // is: a more specific tier may well be usable.
+            let bad = !is_safe_ident(name) || counts.get(name).copied().unwrap_or(0) > 1;
+            if bad && tier[i] + 1 < all[i].len() {
+                tier[i] += 1;
+                promoted = true;
+            }
+        }
+        if !promoted {
+            break;
+        }
+    }
+
+    // Anything still unusable or duplicated has exhausted its tiers: a hostile
+    // plural, or a name too long at every tier. The caller warns and skips it.
+    let mut taken: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(kinds.len());
+    for i in 0..kinds.len() {
+        let name = all[i][tier[i]].as_str();
+        if !is_safe_ident(name) || !taken.insert(name) {
+            out.push(String::new());
+            continue;
+        }
+        out.push(name.to_owned());
+    }
+    out
+}
+
 /// Generates the `CREATE FOREIGN TABLE` statement for one kind.
 ///
 /// Returns the statement, plus the names of any columns that were dropped
@@ -150,13 +263,13 @@ pub fn quote_literal(s: &str) -> String {
 /// or nothing left to select after dropping columns.
 pub fn create_table_sql(
     kind: &ImportKind,
+    table: &str,
     server: &str,
     local_schema: &str,
     opts: &ImportOptions,
 ) -> Result<(String, Vec<String>), SkipReason> {
-    let table = format!("{}{}", opts.prefix, kind.plural);
-    if !is_safe_ident(&table) {
-        return Err(SkipReason::BadTableName(table));
+    if !is_safe_ident(table) {
+        return Err(SkipReason::BadTableName(table.to_owned()));
     }
     for (what, v) in [
         ("version", &kind.version),
@@ -196,7 +309,7 @@ pub fn create_table_sql(
         sql,
         "CREATE FOREIGN TABLE {}.{} (",
         quote_ident(local_schema),
-        quote_ident(&table)
+        quote_ident(table)
     )
     .expect("writing to a String cannot fail");
     for (i, (name, ty)) in cols.iter().enumerate() {
@@ -239,14 +352,23 @@ pub fn create_table_sql(
 }
 
 /// Resolves the `remote_schema` of an `IMPORT FOREIGN SCHEMA` to an API group
-/// filter.
+/// filter, or `None` for "every kind this gateway serves".
 ///
-/// `k8s` means every kind the gateway serves. `core` and `v1` both mean the
-/// core API group, whose real name is the empty string and so cannot be typed
-/// as a schema name. Anything else is taken as the API group verbatim.
-pub fn group_filter(remote_schema: &str) -> Option<String> {
+/// Kubernetes has no schemas, so the remote-schema slot names an API group.
+/// Two spellings mean "everything": the literal `k8s`, and the server's own
+/// name. The latter exists because the model is one schema per cluster, which
+/// makes `IMPORT FOREIGN SCHEMA prod FROM SERVER prod INTO prod` the natural
+/// thing to type -- and without this it would silently filter for an API group
+/// called `prod` and import nothing.
+///
+/// `core` and `v1` both mean the core API group, whose real name is the empty
+/// string and so cannot be typed as a schema name. Anything else is taken as an
+/// API group verbatim.
+pub fn group_filter(remote_schema: &str, server_name: &str) -> Option<String> {
+    if remote_schema == "k8s" || remote_schema == server_name {
+        return None;
+    }
     match remote_schema {
-        "k8s" => None,
         "core" | "v1" => Some(String::new()),
         other => Some(other.to_owned()),
     }
@@ -288,8 +410,14 @@ mod tests {
 
     #[test]
     fn generates_ddl_a_table_definition_round_trips_from() {
-        let (sql, dropped) =
-            create_table_sql(&widget(), "prod", "k8s", &ImportOptions::default()).expect("valid");
+        let (sql, dropped) = create_table_sql(
+            &widget(),
+            "widgets",
+            "prod",
+            "k8s",
+            &ImportOptions::default(),
+        )
+        .expect("valid");
         assert!(dropped.is_empty());
         assert_eq!(
             sql,
@@ -306,8 +434,8 @@ mod tests {
         pod.group = String::new();
         pod.kind = "Pod".into();
         pod.plural = "pods".into();
-        let (sql, _) =
-            create_table_sql(&pod, "prod", "k8s", &ImportOptions::default()).expect("valid");
+        let (sql, _) = create_table_sql(&pod, "widgets", "prod", "k8s", &ImportOptions::default())
+            .expect("valid");
         assert!(!sql.contains("group"), "{sql}");
         assert!(sql.contains("resource 'pods'"), "{sql}");
     }
@@ -317,8 +445,8 @@ mod tests {
         let mut k = widget();
         k.namespaced = false;
         k.writable = false;
-        let (sql, _) =
-            create_table_sql(&k, "prod", "k8s", &ImportOptions::default()).expect("valid");
+        let (sql, _) = create_table_sql(&k, "widgets", "prod", "k8s", &ImportOptions::default())
+            .expect("valid");
         assert!(sql.contains("namespaced 'false'"), "{sql}");
         assert!(sql.contains("writable 'false'"), "{sql}");
     }
@@ -329,12 +457,13 @@ mod tests {
             cache_mode: CacheMode::Watch,
             prefix: String::new(),
         };
-        let (sql, _) = create_table_sql(&widget(), "prod", "k8s", &opts).expect("valid");
+        let (sql, _) = create_table_sql(&widget(), "widgets", "prod", "k8s", &opts).expect("valid");
         assert!(sql.contains("cache_mode 'watch'"), "{sql}");
 
         let mut unwatchable = widget();
         unwatchable.watchable = false;
-        let (sql, _) = create_table_sql(&unwatchable, "prod", "k8s", &opts).expect("valid");
+        let (sql, _) =
+            create_table_sql(&unwatchable, "widgets", "prod", "k8s", &opts).expect("valid");
         assert!(
             !sql.contains("cache_mode"),
             "a kind the API server will not watch must not be given a watch table: {sql}"
@@ -342,43 +471,60 @@ mod tests {
     }
 
     #[test]
-    fn prefix_option_renames_the_table_only() {
-        let opts = ImportOptions {
-            cache_mode: CacheMode::OnDemand,
-            prefix: "prod_".into(),
-        };
-        let (sql, _) = create_table_sql(&widget(), "prod", "k8s", &opts).expect("valid");
-        assert!(sql.contains("\"prod_widgets\""), "{sql}");
+    fn the_table_name_is_independent_of_the_resource_option() {
+        // Naming is decided by assign_table_names, which may prefix or
+        // disambiguate; the `resource` option must always stay the plural the
+        // gateway will be asked for.
+        let (sql, _) = create_table_sql(
+            &widget(),
+            "prod_widgets_example_com",
+            "prod",
+            "k8s",
+            &ImportOptions::default(),
+        )
+        .expect("valid");
+        assert!(sql.contains("\"prod_widgets_example_com\""), "{sql}");
         assert!(
             sql.contains("resource 'widgets'"),
-            "the prefix must not change the resource option: {sql}"
+            "a renamed table must not change the resource option: {sql}"
         );
     }
 
     #[test]
     fn hostile_names_cannot_escape_the_generated_ddl() {
         // A CRD name is attacker-influenceable in a multi-tenant cluster.
-        let mut k = widget();
-        k.plural = "widgets\"; DROP TABLE users; --".into();
         assert!(
             matches!(
-                create_table_sql(&k, "prod", "k8s", &ImportOptions::default()),
+                create_table_sql(
+                    &widget(),
+                    "widgets\"; DROP TABLE users; --",
+                    "prod",
+                    "k8s",
+                    &ImportOptions::default()
+                ),
                 Err(SkipReason::BadTableName(_))
             ),
             "a table name outside the safe character set must be refused, not quoted and hoped for"
+        );
+        // And the naming pass refuses to produce such a name in the first place.
+        let hostile = kind_named("", "widgets\"; DROP TABLE users; --");
+        assert_eq!(
+            assign_table_names(&[hostile], ""),
+            vec![String::new()],
+            "a hostile plural must yield no table name at all"
         );
 
         let mut k = widget();
         k.group = "example.com'); DROP TABLE users; --".into();
         assert!(matches!(
-            create_table_sql(&k, "prod", "k8s", &ImportOptions::default()),
+            create_table_sql(&k, "widgets", "prod", "k8s", &ImportOptions::default()),
             Err(SkipReason::BadIdentity("group", _))
         ));
 
         let mut k = widget();
         k.version = "v1/../../secrets".into();
         assert!(matches!(
-            create_table_sql(&k, "prod", "k8s", &ImportOptions::default()),
+            create_table_sql(&k, "widgets", "prod", "k8s", &ImportOptions::default()),
             Err(SkipReason::BadIdentity("version", _))
         ));
     }
@@ -394,7 +540,8 @@ mod tests {
             },
         );
         let (sql, dropped) =
-            create_table_sql(&k, "prod", "k8s", &ImportOptions::default()).expect("valid");
+            create_table_sql(&k, "widgets", "prod", "k8s", &ImportOptions::default())
+                .expect("valid");
         assert_eq!(dropped, vec!["Bad Name\"".to_owned()]);
         assert!(!sql.contains("Bad Name"), "{sql}");
         assert!(
@@ -411,7 +558,8 @@ mod tests {
             sql_type: "jsonb",
         });
         let (sql, dropped) =
-            create_table_sql(&k, "prod", "k8s", &ImportOptions::default()).expect("valid");
+            create_table_sql(&k, "widgets", "prod", "k8s", &ImportOptions::default())
+                .expect("valid");
         assert_eq!(dropped, vec!["spec".to_owned()]);
         assert_eq!(sql.matches("\"spec\"").count(), 1, "{sql}");
     }
@@ -424,7 +572,7 @@ mod tests {
             sql_type: "jsonb",
         }];
         assert_eq!(
-            create_table_sql(&k, "prod", "k8s", &ImportOptions::default()),
+            create_table_sql(&k, "widgets", "prod", "k8s", &ImportOptions::default()),
             Err(SkipReason::NoColumns)
         );
     }
@@ -437,6 +585,7 @@ mod tests {
         // rather than validated.
         let (sql, _) = create_table_sql(
             &widget(),
+            "widgets",
             "weird\"server",
             "sch\"ema",
             &ImportOptions::default(),
@@ -461,15 +610,203 @@ mod tests {
         );
     }
 
+    /// Builds a kind with a given group and plural, for naming tests.
+    fn kind_named(group: &str, plural: &str) -> ImportKind {
+        let mut k = widget();
+        k.group = group.into();
+        k.plural = plural.into();
+        k
+    }
+
+    #[test]
+    fn unique_plurals_keep_their_bare_name() {
+        let kinds = vec![
+            kind_named("", "pods"),
+            kind_named("apps", "deployments"),
+            kind_named("example.com", "widgets"),
+        ];
+        assert_eq!(
+            assign_table_names(&kinds, ""),
+            vec!["pods", "deployments", "widgets"]
+        );
+    }
+
+    #[test]
+    fn a_colliding_plural_disambiguates_both_sides_by_group() {
+        // `events` really does exist in both the core group and events.k8s.io.
+        let kinds = vec![
+            kind_named("", "events"),
+            kind_named("events.k8s.io", "events"),
+            kind_named("", "pods"),
+        ];
+        let got = assign_table_names(&kinds, "");
+        assert_eq!(got, vec!["events_core", "events_events_k8s_io", "pods"]);
+        assert!(
+            !got.contains(&"events".to_owned()),
+            "neither side may keep the bare name: `events` would silently mean \
+             whichever the rule favoured"
+        );
+    }
+
+    #[test]
+    fn three_way_collisions_all_disambiguate() {
+        let kinds = vec![
+            kind_named("", "things"),
+            kind_named("a.io", "things"),
+            kind_named("b.io", "things"),
+        ];
+        assert_eq!(
+            assign_table_names(&kinds, ""),
+            vec!["things_core", "things_a_io", "things_b_io"]
+        );
+    }
+
+    #[test]
+    fn the_prefix_applies_after_disambiguation() {
+        let kinds = vec![
+            kind_named("", "events"),
+            kind_named("events.k8s.io", "events"),
+        ];
+        assert_eq!(
+            assign_table_names(&kinds, "c1_"),
+            vec!["c1_events_core", "c1_events_events_k8s_io"]
+        );
+    }
+
+    #[test]
+    fn a_name_that_cannot_be_an_identifier_is_skipped_not_mangled() {
+        let kinds = vec![
+            kind_named("", &"a".repeat(MAX_IDENT + 1)),
+            kind_named("", "pods"),
+        ];
+        let got = assign_table_names(&kinds, "");
+        assert_eq!(got[0], "", "an over-long name yields no table");
+        assert_eq!(got[1], "pods", "and does not disturb the others");
+    }
+
+    #[test]
+    fn a_disambiguated_name_colliding_with_a_real_kind_still_gets_one() {
+        // A cluster with both a colliding `events` pair and a kind genuinely
+        // called `events_core`. Every one of the three is permitted, so every
+        // one must get a table: dropping any would contradict the point of
+        // importing a whole cluster.
+        let kinds = vec![
+            kind_named("", "events"),
+            kind_named("events.k8s.io", "events"),
+            kind_named("other.io", "events_core"),
+        ];
+        let got = assign_table_names(&kinds, "");
+        assert_eq!(
+            got.iter().filter(|n| n.is_empty()).count(),
+            0,
+            "every permitted kind must get a table: {got:?}"
+        );
+        let unique: std::collections::HashSet<&String> = got.iter().collect();
+        assert_eq!(unique.len(), 3, "names must be distinct: {got:?}");
+        assert_eq!(got[1], "events_events_k8s_io");
+        // Core events and the real `events_core` both wanted `events_core`, so
+        // neither keeps it -- the same rule as any other ambiguous name.
+        assert!(got[0].starts_with("events_core"), "{got:?}");
+        assert!(got[2].starts_with("events_core"), "{got:?}");
+    }
+
+    #[test]
+    fn groups_that_normalize_alike_are_separated_by_a_digest() {
+        // `a-b.io` and `a.b.io` are different API groups that both normalize to
+        // `a_b_io`, so the group suffix alone cannot tell them apart.
+        let kinds = vec![
+            kind_named("a-b.io", "things"),
+            kind_named("a.b.io", "things"),
+        ];
+        let got = assign_table_names(&kinds, "");
+        assert_eq!(got.len(), 2);
+        assert!(
+            got.iter().all(|n| !n.is_empty()),
+            "neither may be dropped: {got:?}"
+        );
+        assert_ne!(got[0], got[1], "the two must get distinct names: {got:?}");
+        assert!(got[0].starts_with("things_a_b_io"), "{got:?}");
+        assert!(got[1].starts_with("things_a_b_io"), "{got:?}");
+    }
+
+    #[test]
+    fn assigned_names_are_stable_regardless_of_order() {
+        // The digest is of the group itself, not of position, so re-importing
+        // the same cluster yields the same table names whatever order
+        // discovery happened to return.
+        let a = kind_named("a-b.io", "things");
+        let b = kind_named("a.b.io", "things");
+        let forward = assign_table_names(&[a.clone(), b.clone()], "");
+        let reverse = assign_table_names(&[b, a], "");
+        assert_eq!(forward[0], reverse[1]);
+        assert_eq!(forward[1], reverse[0]);
+    }
+
+    #[test]
+    fn every_permitted_kind_receives_a_unique_name() {
+        let kinds = vec![
+            kind_named("", "events"),
+            kind_named("events.k8s.io", "events"),
+            kind_named("a-b.io", "things"),
+            kind_named("a.b.io", "things"),
+            kind_named("other.io", "events_core"),
+            kind_named("", "pods"),
+        ];
+        let got = assign_table_names(&kinds, "");
+        assert_eq!(got.iter().filter(|n| n.is_empty()).count(), 0, "{got:?}");
+        let unique: std::collections::HashSet<&String> = got.iter().collect();
+        assert_eq!(unique.len(), got.len(), "names are not unique: {got:?}");
+    }
+
+    #[test]
+    fn group_digest_is_stable_and_distinguishes_similar_groups() {
+        assert_eq!(group_digest("a-b.io"), group_digest("a-b.io"));
+        assert_ne!(group_digest("a-b.io"), group_digest("a.b.io"));
+        assert_eq!(group_digest("example.com").len(), 6);
+        assert!(group_digest("example.com")
+            .chars()
+            .all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn group_suffix_normalizes_to_an_identifier_fragment() {
+        assert_eq!(group_suffix(""), "core");
+        assert_eq!(group_suffix("events.k8s.io"), "events_k8s_io");
+        assert_eq!(group_suffix("example.com"), "example_com");
+        assert_eq!(group_suffix("Mixed.Case"), "mixed_case");
+    }
+
     #[test]
     fn remote_schema_maps_to_an_api_group() {
-        assert_eq!(group_filter("k8s"), None, "k8s means every served kind");
-        assert_eq!(group_filter("core"), Some(String::new()));
         assert_eq!(
-            group_filter("v1"),
+            group_filter("k8s", "prod"),
+            None,
+            "k8s means every served kind"
+        );
+        assert_eq!(group_filter("core", "prod"), Some(String::new()));
+        assert_eq!(
+            group_filter("v1", "prod"),
             Some(String::new()),
             "the core group's real name is empty and cannot be typed as a schema"
         );
-        assert_eq!(group_filter("example.com"), Some("example.com".to_owned()));
+        assert_eq!(
+            group_filter("example.com", "prod"),
+            Some("example.com".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_servers_own_name_means_every_served_kind() {
+        // One schema per cluster makes `IMPORT FOREIGN SCHEMA prod FROM SERVER
+        // prod INTO prod` the natural spelling. Without the synonym it would
+        // filter for an API group called "prod" and import nothing at all.
+        assert_eq!(group_filter("prod", "prod"), None);
+        assert_eq!(group_filter("axiom_e2e", "axiom_e2e"), None);
+        // A different server's name is still just a group name.
+        assert_eq!(group_filter("prod", "staging"), Some("prod".to_owned()));
+        // And a real group that happens to share the server's name resolves to
+        // everything, which is the safe direction: a narrower-than-expected
+        // import would look like the cluster is empty.
+        assert_eq!(group_filter("example.com", "example.com"), None);
     }
 }

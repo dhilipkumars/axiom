@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -65,19 +67,50 @@ type Discovery struct {
 	// unavailable, and only Describe/Kinds need it.
 	openapi openapi.Client
 	allow   Allowlist
+	// log records each OpenAPI document fetch, so the E2E can assert that a
+	// cluster-wide import pays for one per group-version rather than one per
+	// kind. nil discards.
+	log *slog.Logger
+	// access decides whether the gateway's identity may actually list a kind.
+	// RBAC, not the allowlist, is the real boundary; the allowlist narrows
+	// further for deployments that want to hide kinds they could read.
+	access AccessChecker
 
 	mu    sync.RWMutex
 	cache map[schema.GroupVersion]resourceCacheEntry
+
+	// schemaMu guards schemaCache and pathsCache. Separate from mu because a
+	// schema fetch is slow and must not block resource lookups, which sit on
+	// the scan path.
+	schemaMu sync.Mutex
+	// schemaCache maps a group-version to the top-level properties of every
+	// kind it describes, parsed once. Without it, enumerating a cluster
+	// re-fetches and re-parses each group-version's document once per kind in
+	// it: 65 listable kinds across 13 group-versions on a bare cluster, with
+	// the core/v1 document alone at 1.6 MB.
+	schemaCache map[schema.GroupVersion]map[schema.GroupVersionKind][]string
+	// pathsCache is the /openapi/v3 index, which client-go refetches on every
+	// Paths() call.
+	pathsCache map[string]openapi.GroupVersion
 }
 
 // NewDiscovery builds a Mapper over a cached discovery client, serving only
 // what allow permits.
-func NewDiscovery(disco discovery.CachedDiscoveryInterface, allow Allowlist) *Discovery {
+func NewDiscovery(disco discovery.CachedDiscoveryInterface, allow Allowlist, access AccessChecker, logger *slog.Logger) *Discovery {
+	if access == nil {
+		access = AllowAll{}
+	}
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
 	return &Discovery{
-		disco:   disco,
-		openapi: disco.OpenAPIV3(),
-		allow:   allow,
-		cache:   make(map[schema.GroupVersion]resourceCacheEntry),
+		log:         logger,
+		disco:       disco,
+		access:      access,
+		openapi:     disco.OpenAPIV3(),
+		allow:       allow,
+		cache:       make(map[schema.GroupVersion]resourceCacheEntry),
+		schemaCache: make(map[schema.GroupVersion]map[schema.GroupVersionKind][]string),
 	}
 }
 
@@ -186,11 +219,66 @@ func (d *Discovery) Describe(ctx context.Context, gvk schema.GroupVersionKind) (
 	if !d.allow.Permits(gvk.Group, r.Name) {
 		return KindInfo{}, fmt.Errorf("%w: %s", ErrUnsupportedKind, gvk.String())
 	}
+	// A kind the gateway cannot list has no rows, and generating a table for
+	// it would turn an RBAC gap into a confusing runtime error on every scan.
+	gvr := gvk.GroupVersion().WithResource(r.Name)
+	allowed, err := d.access.CanList(ctx, gvr)
+	if err != nil {
+		return KindInfo{}, err
+	}
+	if !allowed {
+		return KindInfo{}, fmt.Errorf("%w: %s", ErrUnsupportedKind, gvk.String())
+	}
 	topLevel, err := d.topLevelFields(ctx, gvk)
 	if err != nil {
 		return KindInfo{}, err
 	}
 	return kindInfo(gvk, r, topLevel), nil
+}
+
+// candidate is a kind that passed the allowlist, pending an access check.
+type candidate struct {
+	gvk schema.GroupVersionKind
+	res metav1.APIResource
+}
+
+// maxAccessConcurrency bounds in-flight SelfSubjectAccessReviews. High enough
+// that ~65 checks complete quickly, low enough not to burst the API server's
+// priority-and-fairness budget on a shared control plane.
+const maxAccessConcurrency = 8
+
+// filterByAccess returns the candidates the gateway may list, preserving order.
+//
+// A check that fails to complete aborts the enumeration rather than dropping
+// the kind: silently omitting a table because the authorization API blipped
+// would look identical to the kind not existing (docs/RULES.md §1).
+func (d *Discovery) filterByAccess(ctx context.Context, in []candidate) ([]candidate, error) {
+	keep := make([]bool, len(in))
+	errs := make([]error, len(in))
+	sem := make(chan struct{}, maxAccessConcurrency)
+	var wg sync.WaitGroup
+	for i, c := range in {
+		wg.Add(1)
+		go func(i int, c candidate) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			gvr := c.gvk.GroupVersion().WithResource(c.res.Name)
+			keep[i], errs[i] = d.access.CanList(ctx, gvr)
+		}(i, c)
+	}
+	wg.Wait()
+
+	out := make([]candidate, 0, len(in))
+	for i := range in {
+		if errs[i] != nil {
+			return nil, errs[i]
+		}
+		if keep[i] {
+			out = append(out, in[i])
+		}
+	}
+	return out, nil
 }
 
 // Kinds implements Mapper.
@@ -211,6 +299,7 @@ func (d *Discovery) Kinds(ctx context.Context, group *string, plurals []string) 
 	}
 
 	var out []KindInfo
+	var candidates []candidate
 	for _, g := range groups.Groups {
 		if group != nil && g.Name != *group {
 			continue
@@ -238,13 +327,23 @@ func (d *Discovery) Kinds(ctx context.Context, group *string, plurals []string) 
 				// Not a table: a kind that cannot be listed has no rows.
 				continue
 			}
-			gvk := gv.WithKind(kind)
-			topLevel, err := d.topLevelFields(ctx, gvk)
-			if err != nil {
-				continue
-			}
-			out = append(out, kindInfo(gvk, r, topLevel))
+			candidates = append(candidates, candidate{gvk: gv.WithKind(kind), res: r})
 		}
+	}
+
+	// Ask the API server which of these the gateway may actually list. One
+	// review per kind, bounded concurrency: a cluster has ~65 listable kinds
+	// and serial round-trips would make an import feel broken.
+	permitted, err := d.filterByAccess(ctx, candidates)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range permitted {
+		topLevel, err := d.topLevelFields(ctx, c.gvk)
+		if err != nil {
+			continue
+		}
+		out = append(out, kindInfo(c.gvk, c.res, topLevel))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].GVK.Group != out[j].GVK.Group {
@@ -279,21 +378,48 @@ func openAPIPath(gv schema.GroupVersion) string {
 	return "apis/" + gv.Group + "/" + gv.Version
 }
 
-// topLevelFields returns the names of a kind's own top-level schema properties.
+// paths returns the /openapi/v3 index, fetched at most once.
 //
-// The schema is located by its x-kubernetes-group-version-kind extension rather
-// than by guessing at the component key's Go-package-derived spelling, which
-// differs between built-ins ("io.k8s.api.core.v1.Pod") and CRDs and is not part
-// of any stable contract.
-func (d *Discovery) topLevelFields(_ context.Context, gvk schema.GroupVersionKind) ([]string, error) {
-	if d.openapi == nil {
-		return nil, fmt.Errorf("openapi: gateway has no OpenAPI client configured")
+// client-go's Paths() issues a request every call, so without this a
+// cluster-wide enumeration pays for the index once per kind on top of the
+// documents themselves. Caller must hold schemaMu.
+func (d *Discovery) paths() (map[string]openapi.GroupVersion, error) {
+	if d.pathsCache != nil {
+		return d.pathsCache, nil
 	}
-	paths, err := d.openapi.Paths()
+	p, err := d.openapi.Paths()
 	if err != nil {
 		return nil, fmt.Errorf("openapi: paths: %w", err)
 	}
-	gv := gvk.GroupVersion()
+	d.pathsCache = p
+	return p, nil
+}
+
+// forgetSchema drops a group-version's parsed document and the paths index, so
+// the next lookup refetches both. Caller must hold schemaMu.
+func (d *Discovery) forgetSchema(gv schema.GroupVersion) {
+	delete(d.schemaCache, gv)
+	// The index is dropped too: a group-version that did not exist when the
+	// index was fetched has no entry in it, so keeping it would make the
+	// refetch fail to find the document at all.
+	d.pathsCache = nil
+}
+
+// schemaFor returns every kind described by one group-version's OpenAPI
+// document, mapped to its top-level property names, parsing the document once.
+//
+// Kinds are located by their x-kubernetes-group-version-kind extension rather
+// than by the component key's Go-package-derived spelling, which differs
+// between built-ins ("io.k8s.api.core.v1.Pod") and CRDs and is not a stable
+// contract. Caller must hold schemaMu.
+func (d *Discovery) schemaFor(gv schema.GroupVersion) (map[schema.GroupVersionKind][]string, error) {
+	if cached, ok := d.schemaCache[gv]; ok {
+		return cached, nil
+	}
+	paths, err := d.paths()
+	if err != nil {
+		return nil, err
+	}
 	page, ok := paths[openAPIPath(gv)]
 	if !ok {
 		return nil, fmt.Errorf("openapi: no schema document for %s", gv.String())
@@ -306,16 +432,53 @@ func (d *Discovery) topLevelFields(_ context.Context, gvk schema.GroupVersionKin
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return nil, fmt.Errorf("openapi: parse schema for %s: %w", gv.String(), err)
 	}
-	for _, s := range doc.Components.Schemas {
-		for _, t := range s.GVKs {
-			if t.Group != gvk.Group || t.Version != gvk.Version || t.Kind != gvk.Kind {
-				continue
+	d.log.Info("openapi_fetch",
+		slog.String("group_version", gv.String()),
+		slog.Int("bytes", len(raw)),
+		slog.Int("schemas", len(doc.Components.Schemas)))
+	out := make(map[schema.GroupVersionKind][]string, len(doc.Components.Schemas))
+	for _, sch := range doc.Components.Schemas {
+		fields := make([]string, 0, len(sch.Properties))
+		for name := range sch.Properties {
+			fields = append(fields, name)
+		}
+		sort.Strings(fields)
+		for _, t := range sch.GVKs {
+			out[schema.GroupVersionKind{Group: t.Group, Version: t.Version, Kind: t.Kind}] = fields
+		}
+	}
+	d.schemaCache[gv] = out
+	return out, nil
+}
+
+// topLevelFields returns the names of a kind's own top-level schema properties,
+// served from the group-version's parsed document.
+func (d *Discovery) topLevelFields(_ context.Context, gvk schema.GroupVersionKind) ([]string, error) {
+	if d.openapi == nil {
+		return nil, fmt.Errorf("openapi: gateway has no OpenAPI client configured")
+	}
+	d.schemaMu.Lock()
+	defer d.schemaMu.Unlock()
+
+	gv := gvk.GroupVersion()
+	// Retry once through a cache drop, mirroring what resource discovery does
+	// on a miss. A CRD created after this group-version's document was parsed
+	// resolves through the RESTMapper but is absent from the cached schema, so
+	// without this it could not be described until the gateway restarted --
+	// which would undo the "a new CRD needs no restart" property for the
+	// describe path while leaving it true for Resolve.
+	for _, refresh := range []bool{false, true} {
+		if refresh {
+			d.forgetSchema(gv)
+		}
+		byKind, err := d.schemaFor(gv)
+		if err != nil {
+			if refresh {
+				return nil, err
 			}
-			fields := make([]string, 0, len(s.Properties))
-			for name := range s.Properties {
-				fields = append(fields, name)
-			}
-			sort.Strings(fields)
+			continue
+		}
+		if fields, ok := byKind[gvk]; ok {
 			return fields, nil
 		}
 	}

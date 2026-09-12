@@ -117,6 +117,31 @@ fn with_runtime<T>(f: impl FnOnce(&tokio::runtime::Runtime) -> T) -> Result<T, C
     })
 }
 
+/// Number of channels currently cached in this process. Test-only
+/// observability for the eviction path: without it a test cannot tell a
+/// rebuilt channel from a reused one, since both fail identically against an
+/// unreachable gateway.
+#[cfg(test)]
+pub fn cached_channel_count() -> usize {
+    CHANNELS.with(|cell| cell.borrow().len())
+}
+
+/// Drops any cached channel for `server`, so the next call rebuilds one.
+///
+/// A channel carries the TLS trust configuration read when it was built, which
+/// means a cached channel outlives the certificate it trusts. When the gateway's
+/// certificate is rotated -- routine renewal in a real deployment, and every
+/// `compose up` in the local stack -- every call on the stale channel fails with
+/// `invalid peer certificate: BadSignature` and keeps failing, because nothing
+/// ever rebuilds it. Evicting on a connection-class failure makes the next
+/// attempt re-read the CA and recover on its own.
+fn forget_channel(server: &ServerOptions) {
+    let key = (server.target.clone(), server.rpc_timeout);
+    CHANNELS.with(|cell| {
+        cell.borrow_mut().remove(&key);
+    });
+}
+
 /// Returns a channel for `server`, reusing one already open in this backend.
 fn channel_for(
     rt: &tokio::runtime::Runtime,
@@ -158,7 +183,7 @@ where
     with_runtime(|rt| {
         let ch = channel_for(rt, server)?;
         let client = GatewayServiceClient::new(ch);
-        rt.block_on(async {
+        let out: Result<T, ClientError> = rt.block_on(async {
             match tokio::time::timeout(timeout, f(client)).await {
                 Ok(Ok(resp)) => Ok(resp.into_inner()),
                 Ok(Err(status)) => Err(ClientError::Rpc(Box::new(status))),
@@ -169,7 +194,16 @@ where
                     )),
                 ))),
             }
-        })
+        });
+        // A connection-class failure may mean the channel itself is no longer
+        // usable -- most often a rotated certificate, which no amount of
+        // retrying on the same channel will recover from.
+        if let Err(e) = &out {
+            if e.class() == ErrorClass::Connection {
+                forget_channel(server);
+            }
+        }
+        out
     })?
 }
 
@@ -305,6 +339,38 @@ mod tests {
         drop(t);
     }
 
+    /// The failure this eviction exists for is a rotated certificate: the
+    /// channel is a fine socket, but its trust material no longer matches what
+    /// the gateway serves, and retrying on it never recovers. Staging a real
+    /// rotation needs a live TLS peer, so this covers the mechanism that
+    /// recovery depends on -- a connection-class failure leaves no channel
+    /// behind, so the next call is guaranteed to rebuild against the current
+    /// CA. Removing the eviction makes this fail.
+    #[test]
+    fn a_connection_failure_leaves_no_channel_to_reuse() {
+        let server = ServerOptions::parse(&[
+            ("endpoint".to_owned(), "https://127.0.0.1:1".to_owned()),
+            ("rpc_timeout_secs".to_owned(), "1".to_owned()),
+        ])
+        .expect("valid");
+
+        for attempt in 1..=3 {
+            let err =
+                list(&server, &pods(), &Filter::default()).expect_err("nothing listens on port 1");
+            assert_eq!(
+                err.class(),
+                ErrorClass::Connection,
+                "attempt {attempt}: {err}"
+            );
+            assert_eq!(
+                cached_channel_count(),
+                0,
+                "attempt {attempt}: the channel must not survive a connection failure, \
+                 or a rotated certificate would keep failing until the backend restarts"
+            );
+        }
+    }
+
     #[test]
     fn list_against_unreachable_gateway_is_connection_error() {
         let server = ServerOptions::parse(&[
@@ -315,7 +381,13 @@ mod tests {
         let err =
             list(&server, &pods(), &Filter::default()).expect_err("nothing listens on port 1");
         assert_eq!(err.class(), ErrorClass::Connection, "{err}");
-        // Second call reuses the cached channel and fails the same way.
+        // The failure evicted the channel, so the next call rebuilds rather
+        // than retrying on one that may hold stale trust material.
+        assert_eq!(
+            cached_channel_count(),
+            0,
+            "a connection failure must evict the cached channel"
+        );
         let err = list(&server, &pods(), &Filter::default()).expect_err("still unreachable");
         assert_eq!(err.class(), ErrorClass::Connection, "{err}");
         // Writes go through the same path and never succeed silently.

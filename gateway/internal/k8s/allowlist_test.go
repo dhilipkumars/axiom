@@ -16,8 +16,20 @@ func TestParseAllowlist(t *testing.T) {
 		denies  []string
 	}{
 		{
-			name:    "default serves exactly the phase 1-3 kinds",
+			// As of Phase 5 the served set is bounded by the gateway's RBAC,
+			// so the allowlist defaults to imposing no narrowing of its own.
+			name:    "the default narrows nothing; RBAC is the boundary",
 			in:      DefaultServe,
+			permits: []string{"/pods", "/configmaps", "/secrets", "example.com/widgets", "apps/deployments"},
+		},
+		{
+			name:    "the every-group wildcard spans groups",
+			in:      "*.*",
+			permits: []string{"/pods", "a.io/things", "b.io/others"},
+		},
+		{
+			name:    "a narrower list still hides kinds RBAC would allow",
+			in:      "pods,configmaps",
 			permits: []string{"/pods", "/configmaps"},
 			denies:  []string{"/secrets", "/nodes", "example.com/widgets"},
 		},
@@ -121,6 +133,29 @@ func TestAllowlistGroups(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("Groups() = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestServesEverything(t *testing.T) {
+	t.Parallel()
+	if DefaultServe != "*.*" {
+		t.Fatalf("DefaultServe = %q; this test assumes the default narrows nothing", DefaultServe)
+	}
+	for in, want := range map[string]bool{
+		"*.*":             true,
+		"pods,*.*":        true,
+		"pods,configmaps": false,
+		"*":               false,
+		"*.example.com":   false,
+		"":                false,
+	} {
+		a, err := ParseAllowlist(in)
+		if err != nil {
+			t.Fatalf("ParseAllowlist(%q) = %v", in, err)
+		}
+		if got := a.ServesEverything(); got != want {
+			t.Errorf("ServesEverything(%q) = %v, want %v", in, got, want)
 		}
 	}
 }
