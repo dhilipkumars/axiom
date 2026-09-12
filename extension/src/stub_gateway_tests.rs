@@ -407,6 +407,8 @@ fn stub_kind(kind: &str) -> Option<KindSchema> {
     };
     let meta = || {
         vec![
+            text("api_version", "apiVersion"),
+            text("kind", "kind"),
             text("name", "metadata.name"),
             text("namespace", "metadata.namespace"),
             text("uid", "metadata.uid"),
@@ -414,6 +416,7 @@ fn stub_kind(kind: &str) -> Option<KindSchema> {
             text("creation_timestamp", "metadata.creationTimestamp"),
             jsonb("labels", "metadata.labels"),
             jsonb("annotations", "metadata.annotations"),
+            jsonb("metadata", "metadata"),
         ]
     };
     let (group, plural, writable) = match kind {
@@ -1016,6 +1019,8 @@ fn import_foreign_schema_generates_usable_tables() {
     assert_eq!(
         cols,
         vec![
+            "api_version",
+            "kind",
             "name",
             "namespace",
             "uid",
@@ -1023,6 +1028,7 @@ fn import_foreign_schema_generates_usable_tables() {
             "creation_timestamp",
             "labels",
             "annotations",
+            "metadata",
             "spec",
             "status",
             "raw"

@@ -113,9 +113,18 @@ const fn json(name: &'static str, pointer: &'static str, empty_object: bool) -> 
     }
 }
 
-/// Columns every kind has, whatever its schema. Mirrors `metadataColumns` in
-/// the gateway, plus `raw`.
+/// Columns every kind has, whatever its schema. Mirrors `universalColumns` in
+/// the gateway.
+///
+/// `api_version`, `kind` and `metadata` are the only three fields guaranteed to
+/// exist on every Kubernetes object, so they are what a query spanning kinds
+/// keys on. All three are read-only: the first two are fixed by the table's
+/// options, and writing `metadata` wholesale would race the `name`, `namespace`,
+/// `labels` and `annotations` columns that project out of it. Set those, or use
+/// `raw`, to write metadata.
 const META_COLUMNS: &[Column] = &[
+    text("api_version", "/apiVersion", false),
+    text("kind", "/kind", false),
     text("name", "/metadata/name", true),
     text("namespace", "/metadata/namespace", true),
     text("uid", "/metadata/uid", false),
@@ -123,6 +132,15 @@ const META_COLUMNS: &[Column] = &[
     text("creation_timestamp", "/metadata/creationTimestamp", false),
     json("labels", "/metadata/labels", false),
     json("annotations", "/metadata/annotations", false),
+    Column {
+        name: "metadata",
+        sql_type: SqlType::Jsonb,
+        projection: Projection::Json {
+            pointer: "/metadata",
+            empty_object: false,
+        },
+        writable: false,
+    },
 ];
 
 const POD_PROMOTED: &[Column] = &[

@@ -76,21 +76,21 @@ func TestColumns(t *testing.T) {
 			gvk:        widget,
 			namespaced: true,
 			topLevel:   []string{"apiVersion", "kind", "metadata", "spec", "status"},
-			want:       "name,namespace,uid,resource_version,creation_timestamp,labels,annotations,spec,status,raw",
+			want:       "api_version,kind,name,namespace,uid,resource_version,creation_timestamp,labels,annotations,metadata,spec,status,raw",
 		},
 		{
 			name:       "pods keep their hand-mapped phase and node columns",
 			gvk:        pod,
 			namespaced: true,
 			topLevel:   []string{"apiVersion", "kind", "metadata", "spec", "status"},
-			want:       "name,namespace,uid,resource_version,creation_timestamp,labels,annotations,phase,node,spec,status,raw",
+			want:       "api_version,kind,name,namespace,uid,resource_version,creation_timestamp,labels,annotations,metadata,phase,node,spec,status,raw",
 		},
 		{
 			name:       "deployments keep their hand-mapped replica columns",
 			gvk:        schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"},
 			namespaced: true,
 			topLevel:   []string{"apiVersion", "kind", "metadata", "spec", "status"},
-			want: "name,namespace,uid,resource_version,creation_timestamp,labels,annotations," +
+			want: "api_version,kind,name,namespace,uid,resource_version,creation_timestamp,labels,annotations,metadata," +
 				"replicas,ready_replicas,available_replicas,updated_replicas,spec,status,raw",
 		},
 		{
@@ -98,56 +98,56 @@ func TestColumns(t *testing.T) {
 			gvk:        schema.GroupVersionKind{Group: "example.com", Version: "v1", Kind: "Deployment"},
 			namespaced: true,
 			topLevel:   []string{"spec", "status"},
-			want:       "name,namespace,uid,resource_version,creation_timestamp,labels,annotations,spec,status,raw",
+			want:       "api_version,kind,name,namespace,uid,resource_version,creation_timestamp,labels,annotations,metadata,spec,status,raw",
 		},
 		{
 			name:       "a cluster-scoped kind has no namespace column",
 			gvk:        widget,
 			namespaced: false,
 			topLevel:   []string{"spec"},
-			want:       "name,uid,resource_version,creation_timestamp,labels,annotations,spec,raw",
+			want:       "api_version,kind,name,uid,resource_version,creation_timestamp,labels,annotations,metadata,spec,raw",
 		},
 		{
 			name:       "camelCase top-level fields are normalized",
 			gvk:        schema.GroupVersionKind{Version: "v1", Kind: "Secret"},
 			namespaced: true,
 			topLevel:   []string{"data", "stringData", "type"},
-			want:       "name,namespace,uid,resource_version,creation_timestamp,labels,annotations,data,string_data,type,raw",
+			want:       "api_version,kind,name,namespace,uid,resource_version,creation_timestamp,labels,annotations,metadata,data,string_data,type,raw",
 		},
 		{
 			name:       "top-level fields are emitted in sorted order regardless of input order",
 			gvk:        widget,
 			namespaced: true,
 			topLevel:   []string{"status", "spec", "alpha"},
-			want:       "name,namespace,uid,resource_version,creation_timestamp,labels,annotations,alpha,spec,status,raw",
+			want:       "api_version,kind,name,namespace,uid,resource_version,creation_timestamp,labels,annotations,metadata,alpha,spec,status,raw",
 		},
 		{
 			name:       "a top-level field colliding with a metadata column is dropped, not renamed",
 			gvk:        widget,
 			namespaced: true,
 			topLevel:   []string{"labels", "spec"},
-			want:       "name,namespace,uid,resource_version,creation_timestamp,labels,annotations,spec,raw",
+			want:       "api_version,kind,name,namespace,uid,resource_version,creation_timestamp,labels,annotations,metadata,spec,raw",
 		},
 		{
 			name:       "two fields normalizing to one name drop both rather than picking a winner",
 			gvk:        widget,
 			namespaced: true,
 			topLevel:   []string{"myField", "my_field", "spec"},
-			want:       "name,namespace,uid,resource_version,creation_timestamp,labels,annotations,spec,raw",
+			want:       "api_version,kind,name,namespace,uid,resource_version,creation_timestamp,labels,annotations,metadata,spec,raw",
 		},
 		{
 			name:       "an over-long field name is dropped rather than truncated into a collision",
 			gvk:        widget,
 			namespaced: true,
 			topLevel:   []string{strings.Repeat("a", maxIdentLen+1), "spec"},
-			want:       "name,namespace,uid,resource_version,creation_timestamp,labels,annotations,spec,raw",
+			want:       "api_version,kind,name,namespace,uid,resource_version,creation_timestamp,labels,annotations,metadata,spec,raw",
 		},
 		{
 			name:       "a kind with no top-level fields still gets metadata and raw",
 			gvk:        widget,
 			namespaced: true,
 			topLevel:   nil,
-			want:       "name,uid,resource_version,creation_timestamp,labels,annotations,raw",
+			want:       "api_version,kind,name,uid,resource_version,creation_timestamp,labels,annotations,metadata,raw",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -155,7 +155,7 @@ func TestColumns(t *testing.T) {
 			ns := tc.namespaced
 			// The "no top-level fields" case is written cluster-scoped in its
 			// expectation; keep the table honest by deriving from want.
-			if !strings.Contains(tc.want, "namespace") {
+			if !strings.Contains(tc.want, ",namespace,") {
 				ns = false
 			}
 			got := Columns(tc.gvk, ns, tc.topLevel)
@@ -220,6 +220,7 @@ func TestColumnTypes(t *testing.T) {
 	cols := Columns(schema.GroupVersionKind{Group: "example.com", Version: "v1", Kind: "Widget"}, true,
 		[]string{"spec", "status"})
 	want := map[string]ColumnType{
+		"api_version": ColumnText, "kind": ColumnText, "metadata": ColumnJSONB,
 		"name": ColumnText, "namespace": ColumnText, "uid": ColumnText,
 		"resource_version": ColumnText, "creation_timestamp": ColumnText,
 		"labels": ColumnJSONB, "annotations": ColumnJSONB,

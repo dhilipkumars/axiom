@@ -128,10 +128,21 @@ func NormalizeFieldName(field string) string {
 // distinct fields onto one column, so such a field is dropped instead.
 const maxIdentLen = 63
 
-// metadataColumns are the promoted scalars and maps every kind gets, in the
-// order they appear in generated DDL. `namespace` is filtered out for
-// cluster-scoped kinds by Columns.
-var metadataColumns = []Column{
+// universalColumns are the columns every kind gets regardless of its schema,
+// in the order they appear in generated DDL. The order mirrors a Kubernetes
+// object's own: the type identity, then metadata exploded into the scalars
+// people filter on, then metadata whole.
+//
+// `api_version`, `kind` and `metadata` are the only three fields guaranteed to
+// exist on every object -- `spec` is present on about two thirds of built-in
+// kinds and `status` on under half -- so they are what a query spanning kinds
+// has to key on. `metadata` also carries fields not promoted individually,
+// such as ownerReferences, finalizers and deletionTimestamp.
+//
+// `namespace` is filtered out for cluster-scoped kinds by Columns.
+var universalColumns = []Column{
+	{Name: "api_version", Type: ColumnText, Source: "apiVersion"},
+	{Name: "kind", Type: ColumnText, Source: "kind"},
 	{Name: "name", Type: ColumnText, Source: "metadata.name"},
 	{Name: "namespace", Type: ColumnText, Source: "metadata.namespace"},
 	{Name: "uid", Type: ColumnText, Source: "metadata.uid"},
@@ -139,6 +150,7 @@ var metadataColumns = []Column{
 	{Name: "creation_timestamp", Type: ColumnText, Source: "metadata.creationTimestamp"},
 	{Name: "labels", Type: ColumnJSONB, Source: "metadata.labels"},
 	{Name: "annotations", Type: ColumnJSONB, Source: "metadata.annotations"},
+	{Name: "metadata", Type: ColumnJSONB, Source: "metadata"},
 }
 
 // promoted holds the hand-mapped columns for built-in kinds whose useful
@@ -168,9 +180,8 @@ var promoted = map[schema.GroupVersionKind][]Column{
 	},
 }
 
-// skipTopLevel are the object-identity fields that never become columns of
-// their own: apiVersion and kind are fixed by the table's options, and metadata
-// is already exploded into the promoted scalars above.
+// skipTopLevel are the fields already covered by universalColumns, so the
+// generic top-level rule must not emit a second column for them.
 var skipTopLevel = map[string]struct{}{
 	"apiVersion": {},
 	"kind":       {},
@@ -185,6 +196,10 @@ var skipTopLevel = map[string]struct{}{
 // promoted metadata scalars, then any hand-mapped columns for the kind, then
 // the kind's own top-level fields in sorted order, then `raw` last.
 //
+// Every kind gets `api_version`, `kind` and `metadata` whatever its schema:
+// they are the only fields present on every object, and therefore the only
+// basis for a query spanning kinds.
+//
 // A top-level field is dropped, rather than renamed or truncated, when its
 // normalized name collides with a column already emitted, exceeds a Postgres
 // identifier's length, or normalizes to the same name as another top-level
@@ -192,8 +207,8 @@ var skipTopLevel = map[string]struct{}{
 // whereas a silently renamed column would be a column whose value the extension
 // could not find (docs/RULES.md §1, no silent degrade).
 func Columns(gvk schema.GroupVersionKind, namespaced bool, topLevel []string) []Column {
-	cols := make([]Column, 0, len(metadataColumns)+len(topLevel)+3)
-	taken := make(map[string]struct{}, len(metadataColumns)+len(topLevel)+3)
+	cols := make([]Column, 0, len(universalColumns)+len(topLevel)+3)
+	taken := make(map[string]struct{}, len(universalColumns)+len(topLevel)+3)
 	add := func(c Column) bool {
 		if _, dup := taken[c.Name]; dup {
 			return false
@@ -203,7 +218,7 @@ func Columns(gvk schema.GroupVersionKind, namespaced bool, topLevel []string) []
 		return true
 	}
 
-	for _, c := range metadataColumns {
+	for _, c := range universalColumns {
 		if c.Name == "namespace" && !namespaced {
 			continue
 		}

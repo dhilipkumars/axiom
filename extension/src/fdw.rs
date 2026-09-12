@@ -1189,15 +1189,25 @@ unsafe extern "C" fn import_foreign_schema(
             Err(e) => raise_client("list_kinds", &server_opts, &e),
         };
 
-        let mut statements = Vec::with_capacity(kinds.len());
-        for wire in &kinds {
-            let Some(kind) = import_kind_from_wire(wire) else {
-                continue;
-            };
-            if except && requested.contains(&kind.plural) {
+        // Decide every table name up front: a plural is only unique within an
+        // API group, so the name a kind gets depends on the rest of the set.
+        let selected: Vec<ImportKind> = kinds
+            .iter()
+            .filter_map(import_kind_from_wire)
+            .filter(|k| !(except && requested.contains(&k.plural)))
+            .collect();
+        let table_names = import::assign_table_names(&selected, &opts.prefix);
+
+        let mut statements = Vec::with_capacity(selected.len());
+        for (kind, table) in selected.iter().zip(&table_names) {
+            if table.is_empty() {
+                pgrx::warning!(
+                    "axiom: skipping {}: no usable table name is available for it",
+                    kind.plural
+                );
                 continue;
             }
-            match import::create_table_sql(&kind, &server_name, &local_schema, &opts) {
+            match import::create_table_sql(kind, table, &server_name, &local_schema, &opts) {
                 Ok((sql, dropped)) => {
                     if !dropped.is_empty() {
                         pgrx::warning!(

@@ -80,7 +80,8 @@ pub struct ImportOptions {
     /// `cache_mode` applied to every generated table.
     pub cache_mode: CacheMode,
     /// `prefix` prepended to every generated table name, for importing two
-    /// clusters into one schema without a collision.
+    /// clusters into one schema without a collision. Applied by
+    /// [`assign_table_names`], not here.
     pub prefix: String,
 }
 
@@ -137,6 +138,69 @@ pub fn quote_literal(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
+/// Normalizes an API group into an identifier fragment, for disambiguating a
+/// table name. `events.k8s.io` becomes `events_k8s_io`; the core group, whose
+/// real name is the empty string, becomes `core`.
+fn group_suffix(group: &str) -> String {
+    if group.is_empty() {
+        return "core".to_owned();
+    }
+    group
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' {
+                c
+            } else if c.is_ascii_uppercase() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Assigns a table name to every kind being imported, in the order given.
+///
+/// A plural is only unique within an API group, so importing a whole cluster
+/// into one schema collides: `events` exists in both the core group and
+/// `events.k8s.io`, and under one schema per cluster both want the same table.
+/// Left alone, the second `CREATE` fails and takes the entire import with it.
+///
+/// A kind whose plural is unique across the set keeps the bare name. When two
+/// or more share a plural, *none* of them gets it and each is suffixed with its
+/// group: `events_core` and `events_events_k8s_io`. Handing the bare name to
+/// one of them would make `events` mean whichever the rule happened to favour,
+/// which is exactly the ambiguity worth avoiding; the same reasoning drops both
+/// sides of a colliding column rather than picking a winner.
+///
+/// Returns one name per input kind, positionally. A name that cannot be made
+/// into a safe identifier is returned empty, and the caller skips that kind.
+pub fn assign_table_names(kinds: &[ImportKind], prefix: &str) -> Vec<String> {
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for k in kinds {
+        *counts.entry(k.plural.as_str()).or_default() += 1;
+    }
+    let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(kinds.len());
+    for k in kinds {
+        let base = if counts.get(k.plural.as_str()).copied().unwrap_or(0) > 1 {
+            format!("{}_{}", k.plural, group_suffix(&k.group))
+        } else {
+            k.plural.clone()
+        };
+        let name = format!("{prefix}{base}");
+        // A disambiguated name can still be unusable (too long, or colliding
+        // with a real kind of that name). Skipping is better than emitting DDL
+        // that fails mid-import.
+        if !is_safe_ident(&name) || !taken.insert(name.clone()) {
+            out.push(String::new());
+            continue;
+        }
+        out.push(name);
+    }
+    out
+}
+
 /// Generates the `CREATE FOREIGN TABLE` statement for one kind.
 ///
 /// Returns the statement, plus the names of any columns that were dropped
@@ -150,13 +214,13 @@ pub fn quote_literal(s: &str) -> String {
 /// or nothing left to select after dropping columns.
 pub fn create_table_sql(
     kind: &ImportKind,
+    table: &str,
     server: &str,
     local_schema: &str,
     opts: &ImportOptions,
 ) -> Result<(String, Vec<String>), SkipReason> {
-    let table = format!("{}{}", opts.prefix, kind.plural);
-    if !is_safe_ident(&table) {
-        return Err(SkipReason::BadTableName(table));
+    if !is_safe_ident(table) {
+        return Err(SkipReason::BadTableName(table.to_owned()));
     }
     for (what, v) in [
         ("version", &kind.version),
@@ -196,7 +260,7 @@ pub fn create_table_sql(
         sql,
         "CREATE FOREIGN TABLE {}.{} (",
         quote_ident(local_schema),
-        quote_ident(&table)
+        quote_ident(table)
     )
     .expect("writing to a String cannot fail");
     for (i, (name, ty)) in cols.iter().enumerate() {
@@ -288,8 +352,14 @@ mod tests {
 
     #[test]
     fn generates_ddl_a_table_definition_round_trips_from() {
-        let (sql, dropped) =
-            create_table_sql(&widget(), "prod", "k8s", &ImportOptions::default()).expect("valid");
+        let (sql, dropped) = create_table_sql(
+            &widget(),
+            "widgets",
+            "prod",
+            "k8s",
+            &ImportOptions::default(),
+        )
+        .expect("valid");
         assert!(dropped.is_empty());
         assert_eq!(
             sql,
@@ -306,8 +376,8 @@ mod tests {
         pod.group = String::new();
         pod.kind = "Pod".into();
         pod.plural = "pods".into();
-        let (sql, _) =
-            create_table_sql(&pod, "prod", "k8s", &ImportOptions::default()).expect("valid");
+        let (sql, _) = create_table_sql(&pod, "widgets", "prod", "k8s", &ImportOptions::default())
+            .expect("valid");
         assert!(!sql.contains("group"), "{sql}");
         assert!(sql.contains("resource 'pods'"), "{sql}");
     }
@@ -317,8 +387,8 @@ mod tests {
         let mut k = widget();
         k.namespaced = false;
         k.writable = false;
-        let (sql, _) =
-            create_table_sql(&k, "prod", "k8s", &ImportOptions::default()).expect("valid");
+        let (sql, _) = create_table_sql(&k, "widgets", "prod", "k8s", &ImportOptions::default())
+            .expect("valid");
         assert!(sql.contains("namespaced 'false'"), "{sql}");
         assert!(sql.contains("writable 'false'"), "{sql}");
     }
@@ -329,12 +399,13 @@ mod tests {
             cache_mode: CacheMode::Watch,
             prefix: String::new(),
         };
-        let (sql, _) = create_table_sql(&widget(), "prod", "k8s", &opts).expect("valid");
+        let (sql, _) = create_table_sql(&widget(), "widgets", "prod", "k8s", &opts).expect("valid");
         assert!(sql.contains("cache_mode 'watch'"), "{sql}");
 
         let mut unwatchable = widget();
         unwatchable.watchable = false;
-        let (sql, _) = create_table_sql(&unwatchable, "prod", "k8s", &opts).expect("valid");
+        let (sql, _) =
+            create_table_sql(&unwatchable, "widgets", "prod", "k8s", &opts).expect("valid");
         assert!(
             !sql.contains("cache_mode"),
             "a kind the API server will not watch must not be given a watch table: {sql}"
@@ -342,43 +413,60 @@ mod tests {
     }
 
     #[test]
-    fn prefix_option_renames_the_table_only() {
-        let opts = ImportOptions {
-            cache_mode: CacheMode::OnDemand,
-            prefix: "prod_".into(),
-        };
-        let (sql, _) = create_table_sql(&widget(), "prod", "k8s", &opts).expect("valid");
-        assert!(sql.contains("\"prod_widgets\""), "{sql}");
+    fn the_table_name_is_independent_of_the_resource_option() {
+        // Naming is decided by assign_table_names, which may prefix or
+        // disambiguate; the `resource` option must always stay the plural the
+        // gateway will be asked for.
+        let (sql, _) = create_table_sql(
+            &widget(),
+            "prod_widgets_example_com",
+            "prod",
+            "k8s",
+            &ImportOptions::default(),
+        )
+        .expect("valid");
+        assert!(sql.contains("\"prod_widgets_example_com\""), "{sql}");
         assert!(
             sql.contains("resource 'widgets'"),
-            "the prefix must not change the resource option: {sql}"
+            "a renamed table must not change the resource option: {sql}"
         );
     }
 
     #[test]
     fn hostile_names_cannot_escape_the_generated_ddl() {
         // A CRD name is attacker-influenceable in a multi-tenant cluster.
-        let mut k = widget();
-        k.plural = "widgets\"; DROP TABLE users; --".into();
         assert!(
             matches!(
-                create_table_sql(&k, "prod", "k8s", &ImportOptions::default()),
+                create_table_sql(
+                    &widget(),
+                    "widgets\"; DROP TABLE users; --",
+                    "prod",
+                    "k8s",
+                    &ImportOptions::default()
+                ),
                 Err(SkipReason::BadTableName(_))
             ),
             "a table name outside the safe character set must be refused, not quoted and hoped for"
+        );
+        // And the naming pass refuses to produce such a name in the first place.
+        let hostile = kind_named("", "widgets\"; DROP TABLE users; --");
+        assert_eq!(
+            assign_table_names(&[hostile], ""),
+            vec![String::new()],
+            "a hostile plural must yield no table name at all"
         );
 
         let mut k = widget();
         k.group = "example.com'); DROP TABLE users; --".into();
         assert!(matches!(
-            create_table_sql(&k, "prod", "k8s", &ImportOptions::default()),
+            create_table_sql(&k, "widgets", "prod", "k8s", &ImportOptions::default()),
             Err(SkipReason::BadIdentity("group", _))
         ));
 
         let mut k = widget();
         k.version = "v1/../../secrets".into();
         assert!(matches!(
-            create_table_sql(&k, "prod", "k8s", &ImportOptions::default()),
+            create_table_sql(&k, "widgets", "prod", "k8s", &ImportOptions::default()),
             Err(SkipReason::BadIdentity("version", _))
         ));
     }
@@ -394,7 +482,8 @@ mod tests {
             },
         );
         let (sql, dropped) =
-            create_table_sql(&k, "prod", "k8s", &ImportOptions::default()).expect("valid");
+            create_table_sql(&k, "widgets", "prod", "k8s", &ImportOptions::default())
+                .expect("valid");
         assert_eq!(dropped, vec!["Bad Name\"".to_owned()]);
         assert!(!sql.contains("Bad Name"), "{sql}");
         assert!(
@@ -411,7 +500,8 @@ mod tests {
             sql_type: "jsonb",
         });
         let (sql, dropped) =
-            create_table_sql(&k, "prod", "k8s", &ImportOptions::default()).expect("valid");
+            create_table_sql(&k, "widgets", "prod", "k8s", &ImportOptions::default())
+                .expect("valid");
         assert_eq!(dropped, vec!["spec".to_owned()]);
         assert_eq!(sql.matches("\"spec\"").count(), 1, "{sql}");
     }
@@ -424,7 +514,7 @@ mod tests {
             sql_type: "jsonb",
         }];
         assert_eq!(
-            create_table_sql(&k, "prod", "k8s", &ImportOptions::default()),
+            create_table_sql(&k, "widgets", "prod", "k8s", &ImportOptions::default()),
             Err(SkipReason::NoColumns)
         );
     }
@@ -437,6 +527,7 @@ mod tests {
         // rather than validated.
         let (sql, _) = create_table_sql(
             &widget(),
+            "widgets",
             "weird\"server",
             "sch\"ema",
             &ImportOptions::default(),
@@ -459,6 +550,104 @@ mod tests {
             !is_safe_ident(&"a".repeat(MAX_IDENT + 1)),
             "an over-long name would be truncated by the server into a possible collision"
         );
+    }
+
+    /// Builds a kind with a given group and plural, for naming tests.
+    fn kind_named(group: &str, plural: &str) -> ImportKind {
+        let mut k = widget();
+        k.group = group.into();
+        k.plural = plural.into();
+        k
+    }
+
+    #[test]
+    fn unique_plurals_keep_their_bare_name() {
+        let kinds = vec![
+            kind_named("", "pods"),
+            kind_named("apps", "deployments"),
+            kind_named("example.com", "widgets"),
+        ];
+        assert_eq!(
+            assign_table_names(&kinds, ""),
+            vec!["pods", "deployments", "widgets"]
+        );
+    }
+
+    #[test]
+    fn a_colliding_plural_disambiguates_both_sides_by_group() {
+        // `events` really does exist in both the core group and events.k8s.io.
+        let kinds = vec![
+            kind_named("", "events"),
+            kind_named("events.k8s.io", "events"),
+            kind_named("", "pods"),
+        ];
+        let got = assign_table_names(&kinds, "");
+        assert_eq!(got, vec!["events_core", "events_events_k8s_io", "pods"]);
+        assert!(
+            !got.contains(&"events".to_owned()),
+            "neither side may keep the bare name: `events` would silently mean \
+             whichever the rule favoured"
+        );
+    }
+
+    #[test]
+    fn three_way_collisions_all_disambiguate() {
+        let kinds = vec![
+            kind_named("", "things"),
+            kind_named("a.io", "things"),
+            kind_named("b.io", "things"),
+        ];
+        assert_eq!(
+            assign_table_names(&kinds, ""),
+            vec!["things_core", "things_a_io", "things_b_io"]
+        );
+    }
+
+    #[test]
+    fn the_prefix_applies_after_disambiguation() {
+        let kinds = vec![
+            kind_named("", "events"),
+            kind_named("events.k8s.io", "events"),
+        ];
+        assert_eq!(
+            assign_table_names(&kinds, "c1_"),
+            vec!["c1_events_core", "c1_events_events_k8s_io"]
+        );
+    }
+
+    #[test]
+    fn a_name_that_cannot_be_an_identifier_is_skipped_not_mangled() {
+        let kinds = vec![
+            kind_named("", &"a".repeat(MAX_IDENT + 1)),
+            kind_named("", "pods"),
+        ];
+        let got = assign_table_names(&kinds, "");
+        assert_eq!(got[0], "", "an over-long name yields no table");
+        assert_eq!(got[1], "pods", "and does not disturb the others");
+    }
+
+    #[test]
+    fn a_disambiguated_name_colliding_with_a_real_kind_is_skipped() {
+        // A cluster containing both a colliding `events` pair and a kind
+        // genuinely called `events_core` must not produce two tables of that
+        // name; the later one loses rather than breaking the import.
+        let kinds = vec![
+            kind_named("", "events"),
+            kind_named("events.k8s.io", "events"),
+            kind_named("other.io", "events_core"),
+        ];
+        let got = assign_table_names(&kinds, "");
+        assert_eq!(got[0], "events_core");
+        assert_eq!(got[1], "events_events_k8s_io");
+        assert_eq!(got[2], "", "the second claimant of events_core is skipped");
+    }
+
+    #[test]
+    fn group_suffix_normalizes_to_an_identifier_fragment() {
+        assert_eq!(group_suffix(""), "core");
+        assert_eq!(group_suffix("events.k8s.io"), "events_k8s_io");
+        assert_eq!(group_suffix("example.com"), "example_com");
+        assert_eq!(group_suffix("Mixed.Case"), "mixed_case");
     }
 
     #[test]

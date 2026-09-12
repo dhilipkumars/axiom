@@ -45,7 +45,7 @@ func TestDiscoverSchema(t *testing.T) {
 	if got.GetPlural() != "pods" || !got.GetNamespaced() {
 		t.Errorf("plural=%q namespaced=%v", got.GetPlural(), got.GetNamespaced())
 	}
-	want := "name,namespace,uid,resource_version,creation_timestamp,labels,annotations,phase,node,spec,status,raw"
+	want := "api_version,kind,name,namespace,uid,resource_version,creation_timestamp,labels,annotations,metadata,phase,node,spec,status,raw"
 	if strings.Join(columnNames(got), ",") != want {
 		t.Errorf("columns = %v\n     want %s", columnNames(got), want)
 	}

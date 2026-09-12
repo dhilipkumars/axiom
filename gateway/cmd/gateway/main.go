@@ -23,6 +23,7 @@ import (
 
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/discovery/cached/memory"
+	authv1client "k8s.io/client-go/kubernetes/typed/authorization/v1"
 
 	axiomv1 "github.com/dhilipkumars/axiom/gateway/gen/axiom/v1"
 	"github.com/dhilipkumars/axiom/gateway/internal/k8s"
@@ -86,7 +87,15 @@ func run(ctx context.Context, args []string, stderr *os.File) error {
 		if err != nil {
 			return fmt.Errorf("k8s: discovery client: %w", err)
 		}
-		mapper := k8s.NewDiscovery(memory.NewMemCacheClient(disco), allow)
+		// RBAC is the boundary: the gateway asks the API server which kinds
+		// its own identity may list, so the served set follows the
+		// ServiceAccount rather than a second list that must be hand-synced.
+		authz, err := authv1client.NewForConfig(cfg)
+		if err != nil {
+			return fmt.Errorf("k8s: authorization client: %w", err)
+		}
+		access := k8s.NewSelfAccess(authz.SelfSubjectAccessReviews())
+		mapper := k8s.NewDiscovery(memory.NewMemCacheClient(disco), allow, access)
 		dyn, err := k8s.NewFromConfig(cfg, mapper)
 		if err != nil {
 			return err
