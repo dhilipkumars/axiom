@@ -31,3 +31,42 @@ architect**, not a generalist coder:
 This persona governs *how* to reason and what to weigh, not what to build —
 `docs/DESIGN.md`, `docs/PLAN.md`, and `docs/RULES.md` remain the source of truth
 for architecture, phasing, and engineering rules.
+
+## Delegating to `agy`
+
+Some work is delegated to the `agy` (Antigravity) CLI running Gemini, invoked
+through Bash. The Agent tool cannot do this — it only spawns Claude-family
+agents.
+
+Two roles, with standing briefs in [docs/agents/](docs/agents/) so context is
+not retyped each time:
+
+| Role | Model | Use for |
+|---|---|---|
+| [architect](docs/agents/architect.md) | `Gemini 3.8 Flash (Medium)` | adversarial design review, brainstorming a phase |
+| [junior](docs/agents/junior.md) | `Gemini 3.8 Flash (Low)` | running known commands, mechanical edits, scaffolding |
+
+```sh
+agy -p "$(cat docs/agents/junior.md)
+
+TASK: <the specific thing>" \
+  --model "Gemini 3.8 Flash (Low)" \
+  --dangerously-skip-permissions --print-timeout 300s
+```
+
+Three things learned the hard way, all verified rather than assumed:
+
+- **Effort is part of the model name.** `--effort` is rejected for these models.
+- **`--dangerously-skip-permissions` is required.** Headless mode cannot prompt,
+  so without it every tool call is auto-denied and the run produces nothing.
+- **Briefs are not auto-loaded.** `agy` reports that it reads `AGENTS.md` or
+  `GEMINI.md`; it was tested in a scratch directory and in this repo, and it
+  reads neither. Pipe the brief in.
+
+**Verify anything load-bearing that comes back.** The architect role found a
+real privilege-escalation hole in `docs/AUTH.md` that empirical testing then
+confirmed, so the reviews are worth running — but roughly half of a given set of
+findings is overstated or already handled, and `agy` has confidently misreported
+facts about its own behaviour. Delegation is most valuable for long-running
+commands whose output would otherwise flood context; it is worth least for
+debugging, where the detail is the point.

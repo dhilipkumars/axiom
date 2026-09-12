@@ -54,8 +54,9 @@ Phases 0-3 built the gateway boundary, reads, writes and the watch-driven
 cache. Phase 4 removed the hardcoded kinds. Phase 5 makes a whole cluster the
 unit of work: point Axiom at one, and every kind the gateway's RBAC permits
 becomes a table in a schema named for that cluster. Still to come are
-per-caller identity and auth hardening (Phase 6), then
-multi-cluster (Phase 7).
+the gateway as a real Kubernetes workload plus a documentation
+site (Phase 6), per-caller identity and auth hardening (Phase 7), then
+multi-cluster (Phase 8).
 
 ```sql
 CREATE SCHEMA prod;
