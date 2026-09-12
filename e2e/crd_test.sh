@@ -51,7 +51,7 @@ echo "imported: $got"
 
 log "generated columns match the CRD's schema (spec/status promoted, metadata scalars, raw)"
 got="$(psql_axiom "SELECT string_agg(a.attname || ' ' || format_type(a.atttypid, NULL), ', ' ORDER BY a.attnum) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'k8s' AND c.relname = 'widgets' AND a.attnum > 0 AND NOT a.attisdropped;")"
-want="name text, namespace text, uid text, resource_version text, creation_timestamp text, labels jsonb, annotations jsonb, spec jsonb, status jsonb, raw jsonb"
+want="api_version text, kind text, name text, namespace text, uid text, resource_version text, creation_timestamp text, labels jsonb, annotations jsonb, metadata jsonb, spec jsonb, status jsonb, raw jsonb"
 [[ "$got" == "$want" ]] || fail "widgets columns:
   got  $got
   want $want"
