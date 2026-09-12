@@ -25,6 +25,7 @@ That is the end goal. Read the three design documents for the full picture:
 |---|---|
 | [docs/DESIGN.md](docs/DESIGN.md) | Architecture, why a gateway, consistency tiers, schema mapping, multi-cluster, auth |
 | [docs/PLAN.md](docs/PLAN.md) | Six phases from plumbing to hardened multi-cluster, each with its own E2E test |
+| [docs/AUTH.md](docs/AUTH.md) | Per-caller identity: the options, the threat model, and the recommended flow |
 | [docs/RULES.md](docs/RULES.md) | Engineering gates every phase must meet: quality, testability, security, E2E |
 
 ## How it works (one paragraph)

@@ -183,6 +183,8 @@ avoid torn reads during a concurrent scan.
 
 ## 7. Auth (gateway ↔ Postgres) — designed in Phase 6
 
+**Full design: [AUTH.md](./AUTH.md).** This section is the summary.
+
 Firmed up when Phase 6 was scheduled ahead of multi-cluster, on the grounds that
 `CREATE USER MAPPING` is the per-cluster credential mechanism, so building
 multi-cluster first would give every registered cluster one shared ambient trust

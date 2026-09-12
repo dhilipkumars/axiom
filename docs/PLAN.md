@@ -354,6 +354,10 @@ which is the same thread (RULES.md §3).
 
 ### Design decisions to settle first
 
+**The full analysis is in [AUTH.md](./AUTH.md)** — options considered and
+rejected, the threat model, and an end-to-end flow. Summarised here so this
+phase reads on its own; AUTH.md is authoritative where they differ.
+
 These are load-bearing and cheap to decide now, expensive to discover halfway in.
 
 **1. Authorization by impersonation.** For what a caller may *do*, the gateway
@@ -446,6 +450,15 @@ mapping resolves to.
   usable from managed Postgres, which cannot mount files.
 - [ ] Decide how to keep the credential out of `pg_dump`: short expiry, a secret
   reference rather than the secret itself, or an accepted-and-documented risk.
+- [ ] Enforce the privilege model from AUTH.md §6.1: a role granted `USAGE ON
+  FOREIGN SERVER` can rewrite its own user mapping, so an identity stored there
+  is self-serve unless query roles are given table grants only. Warn loudly on a
+  configuration that holds both.
+- [ ] Impersonate groups as well as a username, and carry the Postgres role,
+  database and backend PID in `Impersonate-Extra-*` so cluster audit logs can
+  attribute a request to a SQL session.
+- [ ] Settle `current_user` versus `session_user` for the mapping lookup, and
+  test the `SECURITY DEFINER` and view paths either way.
 - [ ] Key the extension's channel cache on the resolved caller identity, so a
   role can never reuse a channel authenticated as another.
 - [ ] Settle and implement the cache/caller interaction from decision 2, with
