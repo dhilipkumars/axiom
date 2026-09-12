@@ -6,8 +6,8 @@
 # foreign tables, kinds that exist in the cluster but are absent here do not,
 # even though discovery can see them.
 #
-# Granted:  pods, configmaps, events (core), events (events.k8s.io), widgets
-# Withheld: secrets, nodes, deployments, and everything else
+# Granted:  pods, configmaps, events (core), events (events.k8s.io), widgets, apps/*
+# Withheld: secrets, nodes, and everything else
 #
 # The two `events` are both granted on purpose: they are the real collision
 # that a schema-per-cluster import has to disambiguate.
@@ -22,6 +22,9 @@ rules:
   - apiGroups: ["events.k8s.io"]
     resources: ["events"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
   - apiGroups: ["example.com"]
     resources: ["widgets"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]

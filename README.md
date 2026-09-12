@@ -12,6 +12,7 @@ conflicts surfaced as SQL errors.
 
 ```sql
 CREATE SERVER prod FOREIGN DATA WRAPPER axiom_fdw OPTIONS (endpoint 'https://gw.prod.example:8443');
+CREATE SCHEMA prod;
 IMPORT FOREIGN SCHEMA prod FROM SERVER prod INTO prod;
 
 SELECT name, namespace, phase FROM prod.pods WHERE namespace = 'payments' AND phase <> 'Running';

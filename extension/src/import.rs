@@ -159,6 +159,19 @@ fn group_suffix(group: &str) -> String {
         .collect()
 }
 
+/// A short, stable hex digest of `group`, for the last-resort disambiguation
+/// step. FNV-1a: tiny, deterministic across runs and machines, and not used for
+/// anything security-sensitive -- only to separate two API groups whose names
+/// normalize to the same identifier fragment.
+fn group_digest(group: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in group.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{:06x}", hash & 0x00ff_ffff)
+}
+
 /// Assigns a table name to every kind being imported, in the order given.
 ///
 /// A plural is only unique within an API group, so importing a whole cluster
@@ -176,27 +189,64 @@ fn group_suffix(group: &str) -> String {
 /// Returns one name per input kind, positionally. A name that cannot be made
 /// into a safe identifier is returned empty, and the caller skips that kind.
 pub fn assign_table_names(kinds: &[ImportKind], prefix: &str) -> Vec<String> {
-    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for k in kinds {
-        *counts.entry(k.plural.as_str()).or_default() += 1;
+    // Three tiers of increasing specificity. A kind uses the least specific one
+    // that nothing else is also using: the bare plural, the plural suffixed
+    // with its API group, or that plus a digest of the group. The digest tier
+    // exists because the suffix alone cannot always separate two groups --
+    // `a-b.io` and `a.b.io` both normalize to `a_b_io` -- and because a kind
+    // genuinely named `events_core` collides with the generated name for core
+    // events.
+    let tiers = |k: &ImportKind| {
+        let suffixed = format!("{}_{}", k.plural, group_suffix(&k.group));
+        [
+            format!("{prefix}{}", k.plural),
+            format!("{prefix}{suffixed}"),
+            format!("{prefix}{suffixed}_{}", group_digest(&k.group)),
+        ]
+    };
+    let all: Vec<[String; 3]> = kinds.iter().map(tiers).collect();
+
+    // Start everyone at the least specific tier, then promote *every* member of
+    // any colliding set until nothing collides. Promoting the whole set rather
+    // than the later claimant is what makes the result independent of the order
+    // discovery returned kinds in, so re-importing the same cluster produces
+    // the same table names. It also keeps the rule consistent with colliding
+    // columns: an ambiguous name goes to nobody rather than to whoever asked
+    // first.
+    let mut tier = vec![0usize; kinds.len()];
+    loop {
+        let mut counts: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        for (i, t) in tier.iter().enumerate() {
+            *counts.entry(all[i][*t].as_str()).or_default() += 1;
+        }
+        let mut promoted = false;
+        for i in 0..kinds.len() {
+            let name = all[i][tier[i]].as_str();
+            // An unusable name is promoted for the same reason a colliding one
+            // is: a more specific tier may well be usable.
+            let bad = !is_safe_ident(name) || counts.get(name).copied().unwrap_or(0) > 1;
+            if bad && tier[i] + 1 < all[i].len() {
+                tier[i] += 1;
+                promoted = true;
+            }
+        }
+        if !promoted {
+            break;
+        }
     }
-    let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Anything still unusable or duplicated has exhausted its tiers: a hostile
+    // plural, or a name too long at every tier. The caller warns and skips it.
+    let mut taken: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(kinds.len());
-    for k in kinds {
-        let base = if counts.get(k.plural.as_str()).copied().unwrap_or(0) > 1 {
-            format!("{}_{}", k.plural, group_suffix(&k.group))
-        } else {
-            k.plural.clone()
-        };
-        let name = format!("{prefix}{base}");
-        // A disambiguated name can still be unusable (too long, or colliding
-        // with a real kind of that name). Skipping is better than emitting DDL
-        // that fails mid-import.
-        if !is_safe_ident(&name) || !taken.insert(name.clone()) {
+    for i in 0..kinds.len() {
+        let name = all[i][tier[i]].as_str();
+        if !is_safe_ident(name) || !taken.insert(name) {
             out.push(String::new());
             continue;
         }
-        out.push(name);
+        out.push(name.to_owned());
     }
     out
 }
@@ -636,19 +686,79 @@ mod tests {
     }
 
     #[test]
-    fn a_disambiguated_name_colliding_with_a_real_kind_is_skipped() {
-        // A cluster containing both a colliding `events` pair and a kind
-        // genuinely called `events_core` must not produce two tables of that
-        // name; the later one loses rather than breaking the import.
+    fn a_disambiguated_name_colliding_with_a_real_kind_still_gets_one() {
+        // A cluster with both a colliding `events` pair and a kind genuinely
+        // called `events_core`. Every one of the three is permitted, so every
+        // one must get a table: dropping any would contradict the point of
+        // importing a whole cluster.
         let kinds = vec![
             kind_named("", "events"),
             kind_named("events.k8s.io", "events"),
             kind_named("other.io", "events_core"),
         ];
         let got = assign_table_names(&kinds, "");
-        assert_eq!(got[0], "events_core");
+        assert_eq!(
+            got.iter().filter(|n| n.is_empty()).count(),
+            0,
+            "every permitted kind must get a table: {got:?}"
+        );
+        let unique: std::collections::HashSet<&String> = got.iter().collect();
+        assert_eq!(unique.len(), 3, "names must be distinct: {got:?}");
         assert_eq!(got[1], "events_events_k8s_io");
-        assert_eq!(got[2], "", "the second claimant of events_core is skipped");
+        // Core events and the real `events_core` both wanted `events_core`, so
+        // neither keeps it -- the same rule as any other ambiguous name.
+        assert!(got[0].starts_with("events_core"), "{got:?}");
+        assert!(got[2].starts_with("events_core"), "{got:?}");
+    }
+
+    #[test]
+    fn groups_that_normalize_alike_are_separated_by_a_digest() {
+        // `a-b.io` and `a.b.io` are different API groups that both normalize to
+        // `a_b_io`, so the group suffix alone cannot tell them apart.
+        let kinds = vec![kind_named("a-b.io", "things"), kind_named("a.b.io", "things")];
+        let got = assign_table_names(&kinds, "");
+        assert_eq!(got.len(), 2);
+        assert!(got.iter().all(|n| !n.is_empty()), "neither may be dropped: {got:?}");
+        assert_ne!(got[0], got[1], "the two must get distinct names: {got:?}");
+        assert!(got[0].starts_with("things_a_b_io"), "{got:?}");
+        assert!(got[1].starts_with("things_a_b_io"), "{got:?}");
+    }
+
+    #[test]
+    fn assigned_names_are_stable_regardless_of_order() {
+        // The digest is of the group itself, not of position, so re-importing
+        // the same cluster yields the same table names whatever order
+        // discovery happened to return.
+        let a = kind_named("a-b.io", "things");
+        let b = kind_named("a.b.io", "things");
+        let forward = assign_table_names(&[a.clone(), b.clone()], "");
+        let reverse = assign_table_names(&[b, a], "");
+        assert_eq!(forward[0], reverse[1]);
+        assert_eq!(forward[1], reverse[0]);
+    }
+
+    #[test]
+    fn every_permitted_kind_receives_a_unique_name() {
+        let kinds = vec![
+            kind_named("", "events"),
+            kind_named("events.k8s.io", "events"),
+            kind_named("a-b.io", "things"),
+            kind_named("a.b.io", "things"),
+            kind_named("other.io", "events_core"),
+            kind_named("", "pods"),
+        ];
+        let got = assign_table_names(&kinds, "");
+        assert_eq!(got.iter().filter(|n| n.is_empty()).count(), 0, "{got:?}");
+        let unique: std::collections::HashSet<&String> = got.iter().collect();
+        assert_eq!(unique.len(), got.len(), "names are not unique: {got:?}");
+    }
+
+    #[test]
+    fn group_digest_is_stable_and_distinguishes_similar_groups() {
+        assert_eq!(group_digest("a-b.io"), group_digest("a-b.io"));
+        assert_ne!(group_digest("a-b.io"), group_digest("a.b.io"));
+        assert_eq!(group_digest("example.com").len(), 6);
+        assert!(group_digest("example.com").chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

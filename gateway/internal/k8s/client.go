@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"os"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/fields"
@@ -39,17 +38,16 @@ type Client interface {
 	Get(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) (*unstructured.Unstructured, error)
 	// List returns objects of one kind. Empty namespace means all namespaces.
 	//
-	// A non-empty name narrows to objects of that name, server-side. How that
-	// is served depends on whether the object can be addressed exactly: with a
-	// namespace, or for a cluster-scoped kind, it is a point Get, which is
-	// cheaper for the API server than a filtered LIST over the collection.
-	// Without one it is a LIST with a metadata.name field selector across every
-	// namespace, because a Get cannot express "wherever it lives".
+	// A non-empty name narrows to objects of that name, applied server-side as
+	// a metadata.name field selector. It is never served by a point Get: `get`
+	// and `list` are independent RBAC verbs, and a kind is admitted on `list`,
+	// so using `get` anywhere on the read path would make a list-only kind
+	// importable but unqueryable once a name filter appeared.
 	//
-	// So a name filter yields at most one object only when it was paired with a
-	// namespace, or the kind is cluster-scoped. Across all namespaces it can
-	// yield several, since a name is unique only within a namespace. A filter
-	// matching nothing is an empty list, not an error.
+	// A name filter yields at most one object when paired with a namespace, or
+	// for a cluster-scoped kind. Across all namespaces it can yield several,
+	// since a name is unique only within one. A filter matching nothing is an
+	// empty list, not an error.
 	List(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) (*unstructured.UnstructuredList, error)
 	// Create creates obj. apiVersion/kind must already match gvk.
 	Create(ctx context.Context, gvk schema.GroupVersionKind, namespace string, obj *unstructured.Unstructured) (*unstructured.Unstructured, error)
@@ -144,35 +142,21 @@ func (c *Dynamic) Get(ctx context.Context, gvk schema.GroupVersionKind, namespac
 
 // List implements Client.
 func (c *Dynamic) List(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) (*unstructured.UnstructuredList, error) {
-	_, namespaced, err := c.Resolve(ctx, gvk)
-	if err != nil {
-		return nil, err
-	}
-
-	// A point Get is the cheapest way to serve a name filter, but it can only
-	// address an object we can name in full. For a namespaced kind with no
-	// namespace that means every namespace, which a Get cannot express: the
-	// request would omit the namespace segment entirely and 404, turning
-	// "find this object wherever it lives" into an empty result.
-	if name != "" && (!namespaced || namespace != "") {
-		obj, err := c.Get(ctx, gvk, namespace, name)
-		if apierrors.IsNotFound(err) {
-			return &unstructured.UnstructuredList{}, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-		return &unstructured.UnstructuredList{Items: []unstructured.Unstructured{*obj}}, nil
-	}
-
 	ri, err := c.resourceFor(ctx, gvk, namespace)
 	if err != nil {
 		return nil, err
 	}
 	opts := metav1.ListOptions{}
 	if name != "" {
-		// Cross-namespace name lookup: let the API server do the filtering
-		// rather than fetching the collection and discarding most of it.
+		// Narrow server-side. A point Get would be marginally cheaper when the
+		// object can be named in full, and Phase 1 used one for exactly that
+		// reason, but `get` and `list` are independent RBAC verbs and Phase 5
+		// admits a kind on `list` alone. Serving any part of the read path with
+		// `get` would let a list-only kind import cleanly and then fail with
+		// PERMISSION_DENIED the moment a query added a name filter. One verb
+		// for the whole read path keeps what is offered and what works the
+		// same thing. metadata.name is an indexed field selector, so the API
+		// server does not scan the collection to answer this.
 		opts.FieldSelector = fields.OneTermEqualSelector("metadata.name", name).String()
 	}
 	return ri.List(ctx, opts)

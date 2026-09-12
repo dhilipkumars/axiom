@@ -55,14 +55,26 @@ echo "tables: $got"
 
 can_i() { kubectl_e2e --as="$SA" auth can-i "$1" "$2" -n "$NS" 2>/dev/null || true; }
 can_i_cluster() { kubectl_e2e --as="$SA" auth can-i "$1" "$2" 2>/dev/null || true; }
+# Listable kinds in the apps group, as table names. The fixture grants apps/*,
+# and which kinds that covers depends on the cluster version.
+apps_kinds() {
+  kubectl_e2e api-resources --api-group=apps --verbs=list -o name 2>/dev/null |
+    sed 's/\..*//' | sort -u
+}
 
 log "every kind RBAC permits became a table, and nothing else did"
-# Granted in the fixture.
+# Granted explicitly in the fixture.
 for want in configmaps pods widgets events_core events_events_k8s_io; do
   grep -q "\b$want\b" <<<"$got" || fail "expected a table for '$want', got: $got"
 done
+# The fixture grants apps/* , so every listable kind in that group must appear.
+# Derived rather than listed: which kinds `apps` holds varies by cluster version,
+# and hardcoding one version's set is what broke this gate in CI before.
+for want in $(apps_kinds); do
+  grep -q "\b$want\b" <<<"$got" || fail "apps/* is granted but '$want' was not offered: $got"
+done
 # Present in the cluster, allowed by --serve, but NOT granted to the identity.
-for unwanted in secrets nodes deployments namespaces serviceaccounts; do
+for unwanted in secrets nodes namespaces serviceaccounts persistentvolumes; do
   grep -q "\b$unwanted\b" <<<"$got" && fail "'$unwanted' is not granted by RBAC but was offered: $got"
 done
 # The set is exactly what the identity may list. That is the five kinds this
@@ -74,6 +86,7 @@ done
 # particular list. Following RBAC honestly means offering the extras, and that
 # is precisely why --serve survives as optional narrowing.
 want="configmaps,events_core,events_events_k8s_io,pods,widgets"
+for k in $(apps_kinds); do want="$want,$k"; done
 for extra in clustertrustbundles; do
   if [[ "$(can_i_cluster list "$extra")" == "yes" ]]; then
     want="$want,$extra"
@@ -86,9 +99,12 @@ want="$(tr ',' '\n' <<<"$want" | sort | paste -sd, -)"
   want '$want'"
 
 log "the gateway's own identity confirms the boundary"
-[[ "$(can_i list pods)" == "yes" ]]    || fail "SA cannot list pods"
-[[ "$(can_i list secrets)" == "no" ]]  || fail "SA can list secrets"
-[[ "$(can_i list deployments.apps)" == "no" ]] || fail "SA can list deployments"
+[[ "$(can_i list pods)" == "yes" ]] || fail "SA cannot list pods"
+[[ "$(can_i list deployments.apps)" == "yes" ]] || fail "SA cannot list deployments (apps/* is granted)"
+# Withheld, and therefore absent from the import above.
+for denied in secrets nodes namespaces serviceaccounts; do
+  [[ "$(can_i list "$denied")" == "no" ]] || fail "SA can list $denied but the fixture does not grant it"
+done
 
 # --- the events collision -----------------------------------------------------------
 
