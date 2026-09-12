@@ -96,5 +96,8 @@ e2e-crd:
 # PLAN.md name for the Phase 4 gate; the CRD test is that gate.
 e2e-phase4: e2e-crd
 
-# Every completed phase's gate, oldest first (regression order per RULES.md §4).
-e2e: e2e-ping e2e-pods e2e-configmaps e2e-watch e2e-crd
+# Every completed phase's gate, oldest first (regression order per RULES.md §4),
+# sharing one image build and one kind cluster across all of them. The
+# individual targets above still work standalone; this is what CI runs.
+e2e:
+	./e2e/run_all.sh

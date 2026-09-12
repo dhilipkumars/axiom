@@ -140,8 +140,15 @@ make e2e-pods        # Phase 1 gate (alias: make e2e-phase1), needs kind + kubec
 make e2e-configmaps  # Phase 2 gate (alias: make e2e-phase2), needs kind + kubectl
 make e2e-watch       # Phase 3 gate (alias: make e2e-phase3), needs kind + kubectl
 make e2e-crd         # Phase 4 gate (alias: make e2e-phase4), needs kind + kubectl
-make e2e             # all gates, oldest first
+make e2e             # all gates, oldest first, sharing one build and one cluster
 ```
+
+`make e2e` runs every gate through [e2e/run_all.sh](e2e/run_all.sh), which
+builds the images once and creates one kind cluster for the whole suite, then
+gives each gate a fresh compose stack. The individual targets above still stand
+alone; the driver exists because the image build dominates everything else.
+It prints a per-gate timing summary at the end, and takes a subset as
+arguments: `./e2e/run_all.sh watch crd`.
 
 Every gate but Phase 0 needs `kind` and `kubectl`. Each creates a cluster named
 `axiom-e2e`, applies the least-privilege RBAC and its own fixtures, and deletes
