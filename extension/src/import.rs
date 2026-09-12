@@ -215,8 +215,7 @@ pub fn assign_table_names(kinds: &[ImportKind], prefix: &str) -> Vec<String> {
     // first.
     let mut tier = vec![0usize; kinds.len()];
     loop {
-        let mut counts: std::collections::HashMap<&str, usize> =
-            std::collections::HashMap::new();
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
         for (i, t) in tier.iter().enumerate() {
             *counts.entry(all[i][*t].as_str()).or_default() += 1;
         }
@@ -715,10 +714,16 @@ mod tests {
     fn groups_that_normalize_alike_are_separated_by_a_digest() {
         // `a-b.io` and `a.b.io` are different API groups that both normalize to
         // `a_b_io`, so the group suffix alone cannot tell them apart.
-        let kinds = vec![kind_named("a-b.io", "things"), kind_named("a.b.io", "things")];
+        let kinds = vec![
+            kind_named("a-b.io", "things"),
+            kind_named("a.b.io", "things"),
+        ];
         let got = assign_table_names(&kinds, "");
         assert_eq!(got.len(), 2);
-        assert!(got.iter().all(|n| !n.is_empty()), "neither may be dropped: {got:?}");
+        assert!(
+            got.iter().all(|n| !n.is_empty()),
+            "neither may be dropped: {got:?}"
+        );
         assert_ne!(got[0], got[1], "the two must get distinct names: {got:?}");
         assert!(got[0].starts_with("things_a_b_io"), "{got:?}");
         assert!(got[1].starts_with("things_a_b_io"), "{got:?}");
@@ -758,7 +763,9 @@ mod tests {
         assert_eq!(group_digest("a-b.io"), group_digest("a-b.io"));
         assert_ne!(group_digest("a-b.io"), group_digest("a.b.io"));
         assert_eq!(group_digest("example.com").len(), 6);
-        assert!(group_digest("example.com").chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(group_digest("example.com")
+            .chars()
+            .all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
