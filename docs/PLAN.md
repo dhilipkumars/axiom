@@ -356,17 +356,43 @@ which is the same thread (RULES.md §3).
 
 These are load-bearing and cheap to decide now, expensive to discover halfway in.
 
-**1. Authentication by mTLS, authorization by impersonation.** RULES.md §3
-forbids a credential travelling as a payload field, which rules out passing a
-caller's token through the data plane. A client certificate is carried by the
-*transport*, not the payload, so mTLS is how the caller proves who it is. For
-what the caller may *do*, the gateway should impersonate rather than
-reimplement: hold a ServiceAccount permitted to `impersonate` a bounded set of
-users/groups, and set the impersonation headers per request. The API server then
-makes every authorization decision, the audit log names the real principal, and
-the gateway needs no per-caller kubeconfig. The gateway's own RBAC becomes
-`impersonate` on a narrow set rather than broad access to resources — strictly
-less privilege than it holds today.
+**1. Authorization by impersonation.** For what a caller may *do*, the gateway
+should impersonate rather than reimplement: hold a ServiceAccount permitted to
+`impersonate` a bounded set of users/groups, and set the impersonation headers
+per request. The API server then makes every authorization decision, the audit
+log names the real principal, and the gateway needs no per-caller kubeconfig.
+The gateway's own RBAC becomes `impersonate` over a narrow set rather than broad
+access to resources — strictly less privilege than it holds today.
+
+**1b. Authentication by gateway-minted token, with mTLS as the stronger
+option.** RULES.md §3 forbids a credential travelling as a *payload field*. That
+rules out putting a token in a request message, but not gRPC metadata, which is
+transport-adjacent and is how Kubernetes itself carries bearer credentials. Both
+a metadata token and an mTLS client certificate satisfy the rule.
+
+The deciding factor is deployability. `ca_cert` is already a *file path* read by
+the backend, so a private-CA gateway cannot be used from managed Postgres (RDS,
+Cloud SQL, Azure Flexible Server) at all today, and a file-based client
+certificate would lock that entire class out permanently. A token is a string: it
+fits an option, a Secret, an environment variable. So:
+  - the gateway mints tokens through a deliberately restricted flow — loopback
+    or in-cluster only, the shape of `kubeadm token create` — and the operator
+    puts one in `CREATE USER MAPPING`;
+  - the token is **signed, not opaque**, carrying the principal as a claim. An
+    opaque token would force the gateway to persist a token-to-identity table
+    and replicate it across replicas; a signed one keeps it stateless, verifying
+    with its own key. Revocation is then short expiry or a denylist;
+  - mTLS stays supported for deployments that can manage PKI, since a bearer
+    token has no proof of possession;
+  - `ca_cert` gains an inline-PEM form. Managed Postgres needs it whichever
+    authentication mechanism is chosen.
+
+Two costs to accept openly rather than discover. A bearer token is replayable by
+anything that can read it, and it now maps to Kubernetes privileges. And it is
+stored in `pg_user_mapping` in plaintext, so it appears in `pg_dump` output — a
+database backup would carry cluster credentials, where mTLS keeps only a path in
+the catalog. Supabase Wrappers addresses this by storing a secret *reference*
+rather than the secret; that indirection is worth evaluating before settling.
 
 **2. The watch cache has no caller dimension, and that is a leak.** Phase 3
 keys a subscription on `(endpoint, CA, kind, namespace)` and serves it to any
@@ -408,11 +434,18 @@ mapping resolves to.
 
 ### Tasks
 
-- [ ] mTLS between the extension's gRPC client and the gateway, in both
-  directions, with the gateway rejecting unauthenticated connections outright.
+- [ ] Gateway mints signed, principal-bearing tokens through a loopback or
+  in-cluster-only flow, and verifies them on every data-plane call. Unauthenticated
+  connections are rejected outright.
 - [ ] `CREATE USER MAPPING` carries the per-role credential; the gateway maps it
   to a Kubernetes identity and impersonates it for every call made on that
   caller's behalf.
+- [ ] mTLS client certificates as an alternative to tokens, for deployments that
+  can manage PKI and want proof of possession.
+- [ ] `ca_cert` accepts inline PEM as well as a path, so a private-CA gateway is
+  usable from managed Postgres, which cannot mount files.
+- [ ] Decide how to keep the credential out of `pg_dump`: short expiry, a secret
+  reference rather than the secret itself, or an accepted-and-documented risk.
 - [ ] Key the extension's channel cache on the resolved caller identity, so a
   role can never reuse a channel authenticated as another.
 - [ ] Settle and implement the cache/caller interaction from decision 2, with

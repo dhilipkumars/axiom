@@ -187,18 +187,25 @@ Firmed up when Phase 6 was scheduled ahead of multi-cluster, on the grounds that
 `CREATE USER MAPPING` is the per-cluster credential mechanism, so building
 multi-cluster first would give every registered cluster one shared ambient trust
 relationship and then require revisiting each. The shape:
-- Transport: mTLS between the extension's gRPC client and the gateway.
+- Transport: TLS always; mTLS where the deployment can manage client PKI.
 - Principal: a credential held in `CREATE USER MAPPING`, mapped by the gateway to a
   Kubernetes RBAC identity (e.g. a `ServiceAccount` token or an OIDC-issued token the
   gateway exchanges), so Postgres-side SQL roles get real, auditable, scoped k8s RBAC
   — not a single shared superuser token for all Postgres users.
-- **Authentication by mTLS, authorization by impersonation.** §3 of RULES.md
-  forbids a credential travelling as a payload field, which rules out forwarding
-  a caller's token through the data plane; a client certificate rides the
-  transport instead. For authorization the gateway impersonates rather than
+- **Authorization by impersonation.** The gateway impersonates rather than
   reimplements, so the API server makes every decision, the audit log names the
   real principal, and the gateway's own RBAC narrows to `impersonate` over a
   bounded set instead of broad resource access.
+- **Authentication by a gateway-minted, signed token**, carried in gRPC
+  metadata. §3 of RULES.md forbids a credential in a payload *field*, which a
+  metadata header is not — this is how Kubernetes itself carries bearer
+  credentials. The mechanism is chosen for deployability: `ca_cert` is currently
+  a file path, so a private-CA gateway is already unusable from managed Postgres
+  (RDS, Cloud SQL), and a file-based client certificate would exclude that class
+  permanently. Signing keeps the gateway stateless; an opaque token would force
+  it to persist and replicate a token-to-identity table. mTLS client certificates
+  remain supported for deployments that can manage PKI and want proof of
+  possession, which a bearer token does not give.
 - **Kubernetes denies rather than filters.** A cluster-wide LIST by an identity
   without cluster-wide permission is a 403, not a filtered result, so per-caller
   identity changes query semantics for namespace-scoped roles. See PLAN.md
