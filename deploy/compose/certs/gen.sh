@@ -1,9 +1,25 @@
 #!/bin/sh
 # Generates a throwaway CA + gateway server certificate into /certs for the
-# local compose stack. Test-only material: regenerated on every `up`, never
-# committed. Phase 6 adds a client cert here for mTLS.
+# local compose stack. Test-only material, never committed. Phase 7 adds a
+# client cert here for mTLS.
+#
+# Generation is idempotent on purpose. This runs on every `compose up`, and
+# `up` only recreates containers whose configuration changed -- so regenerating
+# unconditionally rotated the CA out from under an already-running gateway,
+# which kept serving the certificate it loaded at startup. Every call then
+# failed with `invalid peer certificate: BadSignature` until something
+# restarted the gateway. That race made the watch E2E gate flaky and cost real
+# time to diagnose twice; reusing still-valid material removes it entirely.
 set -eu
 cd /certs
+
+if [ -s ca.crt ] && [ -s gateway.crt ] && [ -s gateway.key ] &&
+   openssl x509 -in gateway.crt -noout -checkend 3600 >/dev/null 2>&1 &&
+   openssl verify -CAfile ca.crt gateway.crt >/dev/null 2>&1; then
+  echo "certs: reusing existing CA and gateway certificate"
+  exit 0
+fi
+
 rm -f ./*.crt ./*.key ./*.csr ./*.srl
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 \
   -subj "/CN=axiom-dev-ca" -keyout ca.key -out ca.crt >/dev/null 2>&1

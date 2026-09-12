@@ -15,6 +15,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
@@ -135,7 +136,17 @@ func (c *Dynamic) Get(ctx context.Context, gvk schema.GroupVersionKind, namespac
 
 // List implements Client.
 func (c *Dynamic) List(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) (*unstructured.UnstructuredList, error) {
-	if name != "" {
+	_, namespaced, err := c.Resolve(ctx, gvk)
+	if err != nil {
+		return nil, err
+	}
+
+	// A point Get is the cheapest way to serve a name filter, but it can only
+	// address an object we can name in full. For a namespaced kind with no
+	// namespace that means every namespace, which a Get cannot express: the
+	// request would omit the namespace segment entirely and 404, turning
+	// "find this object wherever it lives" into an empty result.
+	if name != "" && (!namespaced || namespace != "") {
 		obj, err := c.Get(ctx, gvk, namespace, name)
 		if apierrors.IsNotFound(err) {
 			return &unstructured.UnstructuredList{}, nil
@@ -145,11 +156,18 @@ func (c *Dynamic) List(ctx context.Context, gvk schema.GroupVersionKind, namespa
 		}
 		return &unstructured.UnstructuredList{Items: []unstructured.Unstructured{*obj}}, nil
 	}
+
 	ri, err := c.resourceFor(ctx, gvk, namespace)
 	if err != nil {
 		return nil, err
 	}
-	return ri.List(ctx, metav1.ListOptions{})
+	opts := metav1.ListOptions{}
+	if name != "" {
+		// Cross-namespace name lookup: let the API server do the filtering
+		// rather than fetching the collection and discarding most of it.
+		opts.FieldSelector = fields.OneTermEqualSelector("metadata.name", name).String()
+	}
+	return ri.List(ctx, opts)
 }
 
 // Create implements Client.

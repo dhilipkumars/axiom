@@ -1,0 +1,19 @@
+# Overlay for the Phase 5 gate: let the gateway offer every group, so the
+# served set is bounded only by the ServiceAccount's RBAC.
+#
+# This is the configuration Phase 5 makes the default (--serve "*.*"); the
+# overlay exists because the base kind overlay pins a narrow list for the
+# earlier gates, which predate RBAC-bounded discovery.
+services:
+  gateway:
+    command:
+      - -listen
+      - :8443
+      - -tls-cert
+      - /certs/gateway.crt
+      - -tls-key
+      - /certs/gateway.key
+      - -kubeconfig
+      - /kube/config
+      - -serve
+      - "*.*"

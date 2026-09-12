@@ -95,13 +95,18 @@ func run(ctx context.Context, args []string, stderr *os.File) error {
 			return fmt.Errorf("k8s: authorization client: %w", err)
 		}
 		access := k8s.NewSelfAccess(authz.SelfSubjectAccessReviews())
-		mapper := k8s.NewDiscovery(memory.NewMemCacheClient(disco), allow, access)
+		mapper := k8s.NewDiscovery(memory.NewMemCacheClient(disco), allow, access, logger)
 		dyn, err := k8s.NewFromConfig(cfg, mapper)
 		if err != nil {
 			return err
 		}
 		client = dyn
-		logger.Info("kubernetes client configured", "api_server", cfg.Host, "serve", allow.String())
+		// Which of the two bounds is actually narrowing is worth knowing when
+		// a kind is unexpectedly missing.
+		logger.Info("kubernetes client configured",
+			"api_server", cfg.Host,
+			"serve", allow.String(),
+			"bounded_by", map[bool]string{true: "rbac", false: "rbac+serve"}[allow.ServesEverything()])
 	}
 
 	tlsCfg, err := tlsconfig.Load(*certPath, *keyPath)

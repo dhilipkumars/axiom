@@ -46,14 +46,23 @@ connectivity from the cluster.
  └──────────────────────────┘                   └────────────────────────────────┘
 ```
 
-## Current status: Phase 4 (CRDs and schema discovery)
+## Current status: Phase 5 (whole-cluster data model)
 
 Phases 0-3 built the gateway boundary, reads, writes and the watch-driven
-cache for two hardcoded kinds. Phase 4 removes the hardcoding: the gateway
-resolves kinds through Kubernetes discovery, and `IMPORT FOREIGN SCHEMA`
-generates foreign tables for whatever it serves, CRDs included. Still to come
-are the whole-cluster data model (Phase 5), multi-cluster (Phase 6),
-and the real auth model (Phase 7).
+cache. Phase 4 removed the hardcoded kinds. Phase 5 makes a whole cluster the
+unit of work: point Axiom at one, and every kind the gateway's RBAC permits
+becomes a table in a schema named for that cluster. Still to come are
+multi-cluster (Phase 6) and the real auth model (Phase 7).
+
+```sql
+CREATE SCHEMA prod;
+IMPORT FOREIGN SCHEMA k8s FROM SERVER prod INTO prod;   -- prod.pods, prod.widgets, ...
+
+-- api_version, kind and metadata are on every table, so a query can span kinds
+SELECT kind, namespace, name FROM prod.pods   WHERE labels ? 'team'
+UNION ALL
+SELECT kind, namespace, name FROM prod.widgets WHERE labels ? 'team';
+```
 
 | Component | Path | What it does today |
 |---|---|---|
@@ -140,6 +149,7 @@ make e2e-pods        # Phase 1 gate (alias: make e2e-phase1), needs kind + kubec
 make e2e-configmaps  # Phase 2 gate (alias: make e2e-phase2), needs kind + kubectl
 make e2e-watch       # Phase 3 gate (alias: make e2e-phase3), needs kind + kubectl
 make e2e-crd         # Phase 4 gate (alias: make e2e-phase4), needs kind + kubectl
+make e2e-cluster     # Phase 5 gate (alias: make e2e-phase5), needs kind + kubectl
 make e2e             # all gates, oldest first, sharing one build and one cluster
 ```
 
@@ -474,11 +484,19 @@ Columns are matched **by name**, and any subset may be declared:
 
 | Column | Type | Reads |
 |---|---|---|
+| `api_version`, `kind` | `text` | the object's own `apiVersion` and `kind` |
+| `metadata` | `jsonb` | the whole `metadata` object |
 | `name`, `namespace`, `uid`, `resource_version`, `creation_timestamp` | `text` | the matching `metadata` field |
 | `labels`, `annotations` | `jsonb` | the matching `metadata` map |
 | `raw` | `jsonb` | the whole object; required for `UPDATE`/`DELETE` |
 | `phase`, `node` on `pods` | `text` | `status.phase`, `spec.nodeName` |
 | anything else | `jsonb` | the object's top-level field of that name |
+
+`api_version`, `kind` and `metadata` are the only three fields guaranteed to
+exist on every Kubernetes object: `spec` is present on about two thirds of
+built-in kinds and `status` on under half, so neither is a safe basis for a
+query spanning kinds. `metadata` also carries what no individual column
+promotes, such as `ownerReferences` and `finalizers`. All three are read-only.
 
 The last row is what makes CRDs work without a per-kind mapping: a column named
 `spec` reads `spec`, and a `camelCase` field is reached by its `snake_case`
@@ -510,12 +528,30 @@ A kind whose name cannot be a safe SQL identifier is skipped with a `WARNING`
 naming it, rather than failing the whole import; the same applies to individual
 columns, which stay reachable through `raw`.
 
-**The gateway's `--serve` flag** bounds which resources it offers, as a comma
-list of `plural[.group]` entries (`*.group` covers a whole group). It defaults
-to `pods,configmaps`. This is a deployment decision that must be kept in step
-with the ServiceAccount's RBAC: `--serve` bounds what is *offered*, RBAC bounds
-what is *reachable*. A kind outside the allowlist is reported exactly as a kind
-the cluster does not have, so the allowlist cannot be enumerated by probing.
+**What a gateway serves is bounded by its own RBAC.** Discovery asks the API
+server which kinds the gateway's ServiceAccount may list, via
+`SelfSubjectAccessReview`, and offers only those. Scope the ServiceAccount and
+the served set follows; there is no second list to keep in step.
+
+Two consequences worth knowing. Kubernetes grants some kinds to every
+ServiceAccount through its own default bindings, so a few things appear that
+your ClusterRole never mentions — `clustertrustbundles` is bound to the
+`system:serviceaccounts` group, for instance. And access answers are cached for
+the gateway's lifetime, because an import asks about every kind at once and
+RBAC does not change mid-import, so restart the gateway to pick up a changed
+ClusterRole.
+
+The `--serve` flag remains as optional narrowing, a comma list of
+`plural[.group]` entries where `*.group` covers a group and `*.*` covers
+everything. It defaults to `*.*`, meaning "narrow nothing". Use it to hide
+kinds the identity could otherwise read. A kind outside it is reported exactly
+as a kind the cluster does not have, so it cannot be enumerated by probing.
+
+**Table names** are the plural, disambiguated by group only where two kinds
+collide. `events` exists in both the core group and `events.k8s.io`, so a
+whole-cluster import yields `events_core` and `events_events_k8s_io` and no
+bare `events`. Handing the bare name to one of them would make `events` mean
+whichever the rule happened to favour.
 
 **The background worker** only starts when the library is preloaded. `CREATE
 EXTENSION` alone installs the SQL objects and emits a WARNING telling you the

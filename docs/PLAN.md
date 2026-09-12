@@ -261,13 +261,13 @@ naming and the cluster identity it implies are the same decision, and doing
 multi-cluster first would mean choosing them twice.
 
 Tasks:
-- [ ] **Schema per cluster, table per kind** as the documented default.
+- [x] **Schema per cluster, table per kind** as the documented default.
   Already expressible today (`IMPORT FOREIGN SCHEMA k8s FROM SERVER prod INTO
   prod`), but the docs and the E2E model it as `INTO k8s`, which reads as if
   the remote-schema argument were the target schema rather than an API-group
   filter. Make the cluster-named form the example everywhere, and accept the
   server's own name as a synonym for "every group this gateway serves".
-- [ ] **RBAC-bounded discovery**: filter the served set by
+- [x] **RBAC-bounded discovery**: filter the served set by
   `SelfSubjectAccessReview` against the gateway's own identity, so what is
   offered follows what the ServiceAccount can actually read. `system:basic-user`
   grants `create` on `selfsubjectaccessreviews` to `system:authenticated` by
@@ -277,24 +277,50 @@ Tasks:
   this, RBAC is the single source of truth and `--serve` defaults to everything,
   surviving only as optional narrowing for operators who want to hide kinds they
   could otherwise read.
-- [ ] **Cache the OpenAPI document per group-version.** `Paths()` and
+- [x] **Cache the OpenAPI document per group-version.** `Paths()` and
   `Schema()` are both uncached in `client-go`, and `Discovery.topLevelFields`
   calls them per kind. A bare `kind` cluster has 65 listable kinds across 13
   group-versions, and the core/v1 document alone is 1.6 MB, so serving a whole
   cluster currently re-fetches and re-parses it once per core kind. This is the
   actual blocker for the goal above, not a nice-to-have.
-- [ ] **Collision-safe table naming.** `events` exists in both the core group
+- [x] **Collision-safe table naming.** `events` exists in both the core group
   and `events.k8s.io`. Under one schema per cluster both want the same table
   name, the second `CREATE` fails, and the whole `IMPORT` fails with it. Use the
   bare plural when it is unique and suffix the group only when ambiguous, so one
   collision does not uglify the other 64 names.
-- [ ] **`api_version`, `kind` and `metadata` as columns.** These are the only
+- [x] **`api_version`, `kind` and `metadata` as columns.** These are the only
   three fields guaranteed on every Kubernetes object — `spec` is present on 67%
   of built-in kinds and `status` on 47%, so neither is a safe basis for anything
   cross-kind. `apiVersion` and `kind` are currently dropped as "fixed by the
   table options" and `metadata` as "already exploded into scalars", but a query
   spanning kinds has nothing else to key on, and `metadata` carries fields not
   promoted individually (`ownerReferences`, `finalizers`, `deletionTimestamp`).
+
+Notes from implementation: `--serve` now defaults to `*.*` ("narrow nothing"),
+because RBAC became the boundary and two lists that must be hand-synced is the
+arrangement this phase removed. It survives as optional narrowing.
+
+**Discovery follows RBAC honestly, which surfaces more than the ClusterRole you
+wrote**: Kubernetes binds `system:cluster-trust-bundle-discovery` to the
+`system:serviceaccounts` group, so every ServiceAccount can list
+`clustertrustbundles` and the gateway therefore offers it. The E2E asserts this
+rather than working around it; it is also the clearest argument for keeping
+`--serve` available. Access answers are cached for the gateway's lifetime (an
+import asks about every kind at once, and RBAC does not change mid-import), so
+a changed ClusterRole needs a restart — the gate asserts that path too.
+
+Disambiguation is a property of the imported *set*, not a permanent rename: once
+one half of the `events` collision is revoked, the survivor reclaims the bare
+`events` name. The gate asserts that as well.
+
+**A pre-existing read bug surfaced here**: `List` served any name filter with a
+point `Get`, which for a namespaced kind with no namespace omits the namespace
+segment entirely and 404s, so `WHERE name = 'x'` silently returned nothing
+unless a namespace was also given. It now falls back to a `metadata.name` field
+selector across all namespaces, keeping the point `Get` only where the object
+can be named in full. `client-go`'s fake dynamic client ignores field selectors,
+so the unit test asserts the selector is *sent* and the E2E covers the real
+behaviour.
 
 **E2E test (`e2e-phase5`)**: against a `kind` cluster with the Phase 4 test CRD
 still applied, grant the gateway a deliberately partial RBAC set, then

@@ -12,9 +12,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/scheme"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 var podGVK = schema.GroupVersionKind{Version: "v1", Kind: "Pod"}
@@ -226,5 +228,80 @@ func TestConfigErrors(t *testing.T) {
 	t.Setenv("KUBERNETES_SERVICE_HOST", "")
 	if _, err := Config(""); err == nil {
 		t.Fatal("expected in-cluster config error outside a cluster")
+	}
+}
+
+// TestListByNameAcrossAllNamespaces covers a lookup that has no namespace.
+//
+// Serving a whole cluster makes "find this object wherever it lives" an
+// ordinary query. A point Get cannot express it for a namespaced kind: the
+// request would omit the namespace segment and 404, which the List path used
+// to swallow into an empty result, so `WHERE name = 'x'` silently returned
+// nothing unless a namespace was also given.
+//
+// The assertion is on the request rather than the result because client-go's
+// fake dynamic client does not honour field selectors -- its tracker returns
+// the whole collection regardless. Filtering in the gateway instead would
+// contradict the contract in axiom.proto that List narrows server-side and
+// never fetches everything to discard most of it, so what is verifiable here
+// is that the selector is sent. e2e/cluster_test.sh covers the real behaviour
+// against an API server that honours it.
+func TestListByNameAcrossAllNamespaces(t *testing.T) {
+	t.Parallel()
+	dyn := dynamicfake.NewSimpleDynamicClient(scheme.Scheme,
+		pod("default", "a"), pod("other", "c"))
+	var gotSelector string
+	var listed int
+	dyn.PrependReactor("list", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		listed++
+		gotSelector = action.(k8stesting.ListAction).GetListRestrictions().Fields.String()
+		return false, nil, nil
+	})
+	c := NewDynamic(dyn, NewStaticMapper(BuiltinKinds()...))
+
+	if _, err := c.List(context.Background(), podGVK, "", "c"); err != nil {
+		t.Fatalf("List(name=c, no namespace) = %v", err)
+	}
+	if listed != 1 {
+		t.Fatalf("issued %d LISTs, want 1: a name-only lookup must not fall back to a point Get", listed)
+	}
+	if gotSelector != "metadata.name=c" {
+		t.Errorf("field selector = %q, want metadata.name=c; without it the gateway would "+
+			"fetch every namespace's pods and discard most of them", gotSelector)
+	}
+}
+
+// TestListByNameWithNamespaceStillUsesAPointGet pins the Phase 1 optimisation:
+// when the object can be named in full, a Get is cheaper for the API server
+// than a field-selector LIST over the collection.
+func TestListByNameWithNamespaceStillUsesAPointGet(t *testing.T) {
+	t.Parallel()
+	dyn := dynamicfake.NewSimpleDynamicClient(scheme.Scheme, pod("default", "a"))
+	var lists, gets int
+	dyn.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		lists++
+		return false, nil, nil
+	})
+	dyn.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		gets++
+		return false, nil, nil
+	})
+	c := NewDynamic(dyn, NewStaticMapper(BuiltinKinds()...))
+
+	got, err := c.List(context.Background(), podGVK, "default", "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Items) != 1 || got.Items[0].GetName() != "a" {
+		t.Fatalf("List(ns=default, name=a) = %v, want the one pod", got.Items)
+	}
+	if gets != 1 || lists != 0 {
+		t.Errorf("gets=%d lists=%d, want a single point Get", gets, lists)
+	}
+
+	// A miss is an empty result, not an error.
+	got, err = c.List(context.Background(), podGVK, "default", "nonexistent")
+	if err != nil || len(got.Items) != 0 {
+		t.Errorf("missing object: got %v, %v; want an empty result and no error", got, err)
 	}
 }

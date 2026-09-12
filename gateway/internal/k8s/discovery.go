@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -65,6 +67,10 @@ type Discovery struct {
 	// unavailable, and only Describe/Kinds need it.
 	openapi openapi.Client
 	allow   Allowlist
+	// log records each OpenAPI document fetch, so the E2E can assert that a
+	// cluster-wide import pays for one per group-version rather than one per
+	// kind. nil discards.
+	log *slog.Logger
 	// access decides whether the gateway's identity may actually list a kind.
 	// RBAC, not the allowlist, is the real boundary; the allowlist narrows
 	// further for deployments that want to hide kinds they could read.
@@ -90,11 +96,15 @@ type Discovery struct {
 
 // NewDiscovery builds a Mapper over a cached discovery client, serving only
 // what allow permits.
-func NewDiscovery(disco discovery.CachedDiscoveryInterface, allow Allowlist, access AccessChecker) *Discovery {
+func NewDiscovery(disco discovery.CachedDiscoveryInterface, allow Allowlist, access AccessChecker, logger *slog.Logger) *Discovery {
 	if access == nil {
 		access = AllowAll{}
 	}
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
 	return &Discovery{
+		log:         logger,
 		disco:       disco,
 		access:      access,
 		openapi:     disco.OpenAPIV3(),
@@ -412,6 +422,10 @@ func (d *Discovery) schemaFor(gv schema.GroupVersion) (map[schema.GroupVersionKi
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return nil, fmt.Errorf("openapi: parse schema for %s: %w", gv.String(), err)
 	}
+	d.log.Info("openapi_fetch",
+		slog.String("group_version", gv.String()),
+		slog.Int("bytes", len(raw)),
+		slog.Int("schemas", len(doc.Components.Schemas)))
 	out := make(map[schema.GroupVersionKind][]string, len(doc.Components.Schemas))
 	for _, sch := range doc.Components.Schemas {
 		fields := make([]string, 0, len(sch.Properties))

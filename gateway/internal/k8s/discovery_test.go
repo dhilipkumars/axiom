@@ -191,7 +191,7 @@ func newTestDiscoveryWithAccess(t *testing.T, serve string, access AccessChecker
 			clusterGVK: {"apiVersion", "kind", "metadata", "spec"},
 		})},
 	}}
-	return NewDiscovery(fd, allow, access), fd
+	return NewDiscovery(fd, allow, access, nil), fd
 }
 
 // --- tests -------------------------------------------------------------------

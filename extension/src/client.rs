@@ -117,6 +117,22 @@ fn with_runtime<T>(f: impl FnOnce(&tokio::runtime::Runtime) -> T) -> Result<T, C
     })
 }
 
+/// Drops any cached channel for `server`, so the next call rebuilds one.
+///
+/// A channel carries the TLS trust configuration read when it was built, which
+/// means a cached channel outlives the certificate it trusts. When the gateway's
+/// certificate is rotated -- routine renewal in a real deployment, and every
+/// `compose up` in the local stack -- every call on the stale channel fails with
+/// `invalid peer certificate: BadSignature` and keeps failing, because nothing
+/// ever rebuilds it. Evicting on a connection-class failure makes the next
+/// attempt re-read the CA and recover on its own.
+fn forget_channel(server: &ServerOptions) {
+    let key = (server.target.clone(), server.rpc_timeout);
+    CHANNELS.with(|cell| {
+        cell.borrow_mut().remove(&key);
+    });
+}
+
 /// Returns a channel for `server`, reusing one already open in this backend.
 fn channel_for(
     rt: &tokio::runtime::Runtime,
@@ -158,7 +174,7 @@ where
     with_runtime(|rt| {
         let ch = channel_for(rt, server)?;
         let client = GatewayServiceClient::new(ch);
-        rt.block_on(async {
+        let out: Result<T, ClientError> = rt.block_on(async {
             match tokio::time::timeout(timeout, f(client)).await {
                 Ok(Ok(resp)) => Ok(resp.into_inner()),
                 Ok(Err(status)) => Err(ClientError::Rpc(Box::new(status))),
@@ -169,7 +185,16 @@ where
                     )),
                 ))),
             }
-        })
+        });
+        // A connection-class failure may mean the channel itself is no longer
+        // usable -- most often a rotated certificate, which no amount of
+        // retrying on the same channel will recover from.
+        if let Err(e) = &out {
+            if e.class() == ErrorClass::Connection {
+                forget_channel(server);
+            }
+        }
+        out
     })?
 }
 
