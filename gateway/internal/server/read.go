@@ -47,6 +47,45 @@ func validName(field, v string) error {
 // toGRPC maps k8s/client errors onto gRPC status codes. The message never
 // includes request headers or credentials: apimachinery StatusError messages
 // describe the resource, and client-go transport errors describe the endpoint.
+// Paging bounds, in objects and in bytes.
+//
+// defaultPageSize is what a caller asking for nothing gets. It is a
+// compromise: too small multiplies WAN round trips across a scan, too large
+// re-creates the unbounded response this exists to prevent. 500 is the same
+// order client-go's own reflectors use.
+//
+// maxPageSize is the ceiling a caller can ask for, so a client cannot demand a
+// response the gateway would fail to send.
+//
+// maxPageBytes bounds the JSON in one response and is deliberately well under
+// MaxMessageBytes: the message carries protobuf framing and per-object
+// metadata on top of the JSON, and the margin means a page that fits the
+// budget always fits the message.
+const (
+	defaultPageSize = 500
+	maxPageSize     = 5000
+	maxPageBytes    = 4 << 20
+	// MaxMessageBytes is the gRPC message limit both ends must agree on. The
+	// 4 MiB default is reachable on an ordinary cluster: a few hundred Pods
+	// carrying managedFields will do it. Exported so the server sets the same
+	// number it documents, and so the extension's matching constant has one
+	// place to be compared against.
+	MaxMessageBytes = 16 << 20
+)
+
+// clampLimit turns a caller's requested page size into one the gateway will
+// serve. Zero (or negative, which the wire type permits) means "choose for me".
+func clampLimit(requested int32) int32 {
+	switch {
+	case requested <= 0:
+		return defaultPageSize
+	case requested > maxPageSize:
+		return maxPageSize
+	default:
+		return requested
+	}
+}
+
 func toGRPC(err error) error {
 	switch {
 	case err == nil:
@@ -60,6 +99,14 @@ func toGRPC(err error) error {
 	case apierrors.IsConflict(err):
 		// Stale resourceVersion on Update: distinct so callers can re-read and retry.
 		return status.Error(codes.Aborted, err.Error())
+	case apierrors.IsResourceExpired(err), apierrors.IsGone(err):
+		// A continue token whose snapshot the API server has compacted away.
+		// ABORTED, the same code as a write conflict, because the caller's
+		// recourse is identical: start again. It must not be retried
+		// transparently here -- earlier pages have already gone to the SQL
+		// executor, so resuming from scratch would duplicate rows, and
+		// docs/RULES.md §1 forbids papering over it.
+		return status.Error(codes.Aborted, fmt.Sprintf("list continuation expired: %v", err))
 	case apierrors.IsAlreadyExists(err):
 		return status.Error(codes.AlreadyExists, err.Error())
 	case apierrors.IsForbidden(err), apierrors.IsUnauthorized(err):
@@ -149,20 +196,58 @@ func (s *Server) List(ctx context.Context, req *axiomv1.ListRequest) (*axiomv1.L
 	if err := validName("name", req.GetName()); err != nil {
 		return nil, err
 	}
-	list, err := s.k8s.List(ctx, gvk, req.GetNamespace(), req.GetName())
-	if err != nil {
-		return nil, toGRPC(err)
+	// Fetch a page, shrinking it until it fits the byte budget.
+	//
+	// The limit bounds objects, not bytes, and objects vary by three orders of
+	// magnitude: a count that is comfortable for Pods can be hundreds of
+	// megabytes of ConfigMaps holding a megabyte each. A Kubernetes continue
+	// token is opaque and points at a page boundary, so a page cannot be split
+	// after the fact -- but the token that produced this page is still valid,
+	// so asking again for half as many is safe and returns the same objects
+	// from the same snapshot. Nothing has been sent to the caller yet.
+	limit := clampLimit(req.GetLimit())
+	var (
+		list *unstructured.UnstructuredList
+		objs []*axiomv1.Object
+		size int
+	)
+	for {
+		var err error
+		list, err = s.k8s.List(ctx, gvk, req.GetNamespace(), req.GetName(), int64(limit), req.GetContinueToken())
+		if err != nil {
+			return nil, toGRPC(err)
+		}
+		objs = make([]*axiomv1.Object, 0, len(list.Items))
+		size = 0
+		for i := range list.Items {
+			po, err := objectToProto(&list.Items[i])
+			if err != nil {
+				return nil, err
+			}
+			size += len(po.GetJson())
+			objs = append(objs, po)
+		}
+		if size <= maxPageBytes || limit <= 1 {
+			break
+		}
+		limit /= 2
+		s.log.LogAttrs(ctx, slog.LevelInfo, "list_page_shrunk",
+			slog.String("gvk", gvk.String()),
+			slog.Int("bytes", size),
+			slog.Int("new_limit", int(limit)))
+	}
+	// A single object over the budget cannot be paged around. Say so, rather
+	// than letting the transport reject the message with a size error that
+	// names nothing (docs/RULES.md §1).
+	if size > maxPageBytes && len(objs) == 1 {
+		return nil, status.Errorf(codes.ResourceExhausted,
+			"a single %s object is %d bytes, over the %d byte limit for one response; "+
+				"paging cannot split one object", gvk.Kind, size, maxPageBytes)
 	}
 	resp := &axiomv1.ListResponse{
-		Objects:         make([]*axiomv1.Object, 0, len(list.Items)),
+		Objects:         objs,
 		ResourceVersion: list.GetResourceVersion(),
-	}
-	for i := range list.Items {
-		po, err := objectToProto(&list.Items[i])
-		if err != nil {
-			return nil, err
-		}
-		resp.Objects = append(resp.Objects, po)
+		ContinueToken:   list.GetContinue(),
 	}
 	s.log.LogAttrs(ctx, slog.LevelInfo, "list",
 		slog.String("gvk", gvk.String()),

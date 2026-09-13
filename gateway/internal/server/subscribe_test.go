@@ -143,7 +143,7 @@ type goneClient struct {
 	viaWatchError bool
 }
 
-func (g goneClient) List(context.Context, schema.GroupVersionKind, string, string) (*unstructured.UnstructuredList, error) {
+func (g goneClient) List(context.Context, schema.GroupVersionKind, string, string, int64, string) (*unstructured.UnstructuredList, error) {
 	l := &unstructured.UnstructuredList{}
 	l.SetResourceVersion("100")
 	return l, nil
@@ -183,7 +183,7 @@ type countingClient struct {
 	lists int
 }
 
-func (c *countingClient) List(context.Context, schema.GroupVersionKind, string, string) (*unstructured.UnstructuredList, error) {
+func (c *countingClient) List(context.Context, schema.GroupVersionKind, string, string, int64, string) (*unstructured.UnstructuredList, error) {
 	c.lists++
 	l := &unstructured.UnstructuredList{}
 	l.SetResourceVersion("100")

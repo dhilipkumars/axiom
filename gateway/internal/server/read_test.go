@@ -151,7 +151,7 @@ func (e errClient) Get(context.Context, schema.GroupVersionKind, string, string)
 	return nil, e.err
 }
 
-func (e errClient) List(context.Context, schema.GroupVersionKind, string, string) (*unstructured.UnstructuredList, error) {
+func (e errClient) List(context.Context, schema.GroupVersionKind, string, string, int64, string) (*unstructured.UnstructuredList, error) {
 	return nil, e.err
 }
 

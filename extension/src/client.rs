@@ -207,21 +207,65 @@ where
     })?
 }
 
-/// Lists objects of `kind` matching `filter` via one `List` RPC and returns
-/// each object's raw JSON. Never called when `filter.impossible` (the caller
-/// short-circuits). A filter that matches nothing is `Ok(vec![])`.
+/// One page of a listing: the objects' raw JSON, and where to resume.
+pub struct Page {
+    /// Each object's raw JSON, in the order the API server returned them.
+    pub objects: Vec<Vec<u8>>,
+    /// Empty when this was the last page; otherwise pass it back to continue.
+    pub continue_token: String,
+}
+
+/// Lists one page of objects of `kind` matching `filter`.
+///
+/// `continue_token` is empty to start a listing, or the previous page's token
+/// to resume. Never called when `filter.impossible` (the caller
+/// short-circuits). A filter that matches nothing is an empty page.
+///
+/// A scan reads a collection over several of these rather than one response,
+/// because a whole collection does not fit a gRPC message on any cluster of
+/// size: a few hundred Pods carrying managedFields exceeds the 4 MiB default.
+pub fn list_page(
+    server: &ServerOptions,
+    resource: &Resource,
+    filter: &Filter,
+    continue_token: &str,
+) -> Result<Page, ClientError> {
+    let req = ListRequest {
+        gvk: Some(gvk_of(resource)),
+        namespace: filter.namespace.clone().unwrap_or_default(),
+        name: filter.name.clone().unwrap_or_default(),
+        // Zero: the gateway picks, and clamps anything a caller asks for. The
+        // extension has no basis for a better number than the side that knows
+        // how big the objects are.
+        limit: 0,
+        continue_token: continue_token.to_owned(),
+    };
+    call(server, |mut c| async move { c.list(req).await }).map(|resp| Page {
+        objects: resp.objects.into_iter().map(|o| o.json).collect(),
+        continue_token: resp.continue_token,
+    })
+}
+
+/// Lists every object of `kind` matching `filter`, following continuations.
+///
+/// For callers that need the whole collection in hand rather than a cursor,
+/// such as the import path. A scan uses [`list_page`] so it can return rows to
+/// the executor without buffering everything first.
 pub fn list(
     server: &ServerOptions,
     resource: &Resource,
     filter: &Filter,
 ) -> Result<Vec<Vec<u8>>, ClientError> {
-    let req = ListRequest {
-        gvk: Some(gvk_of(resource)),
-        namespace: filter.namespace.clone().unwrap_or_default(),
-        name: filter.name.clone().unwrap_or_default(),
-    };
-    call(server, |mut c| async move { c.list(req).await })
-        .map(|resp| resp.objects.into_iter().map(|o| o.json).collect())
+    let mut out = Vec::new();
+    let mut token = String::new();
+    loop {
+        let page = list_page(server, resource, filter, &token)?;
+        out.extend(page.objects);
+        if page.continue_token.is_empty() {
+            return Ok(out);
+        }
+        token = page.continue_token;
+    }
 }
 
 /// Creates one object; returns the stored object's JSON (for RETURNING).

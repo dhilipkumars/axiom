@@ -48,7 +48,10 @@ type Client interface {
 	// for a cluster-scoped kind. Across all namespaces it can yield several,
 	// since a name is unique only within one. A filter matching nothing is an
 	// empty list, not an error.
-	List(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) (*unstructured.UnstructuredList, error)
+	// List returns one page. limit bounds the objects returned (zero lets the
+	// API server choose) and continueToken resumes a previous page. The
+	// returned list's GetContinue() is non-empty when more remain.
+	List(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string, limit int64, continueToken string) (*unstructured.UnstructuredList, error)
 	// Create creates obj. apiVersion/kind must already match gvk.
 	Create(ctx context.Context, gvk schema.GroupVersionKind, namespace string, obj *unstructured.Unstructured) (*unstructured.Unstructured, error)
 	// Update replaces obj (PUT). obj must carry metadata.resourceVersion; the
@@ -176,12 +179,12 @@ func (c *Dynamic) Get(ctx context.Context, gvk schema.GroupVersionKind, namespac
 }
 
 // List implements Client.
-func (c *Dynamic) List(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) (*unstructured.UnstructuredList, error) {
+func (c *Dynamic) List(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string, limit int64, continueToken string) (*unstructured.UnstructuredList, error) {
 	ri, err := c.resourceFor(ctx, gvk, namespace)
 	if err != nil {
 		return nil, err
 	}
-	opts := metav1.ListOptions{}
+	opts := metav1.ListOptions{Limit: limit, Continue: continueToken}
 	if name != "" {
 		// Narrow server-side. A point Get would be marginally cheaper when the
 		// object can be named in full, and Phase 1 used one for exactly that
@@ -248,7 +251,7 @@ func (Unconfigured) Get(context.Context, schema.GroupVersionKind, string, string
 }
 
 // List implements Client.
-func (Unconfigured) List(context.Context, schema.GroupVersionKind, string, string) (*unstructured.UnstructuredList, error) {
+func (Unconfigured) List(context.Context, schema.GroupVersionKind, string, string, int64, string) (*unstructured.UnstructuredList, error) {
 	return nil, ErrNoCluster
 }
 

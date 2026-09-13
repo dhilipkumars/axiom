@@ -264,6 +264,8 @@ KindSchema is everything the extension needs to define and serve a foreign table
 | `gvk` | `GroupVersionKind` | — |
 | `namespace` | `string` | Empty means all namespaces. |
 | `name` | `string` | If non-empty, only the object with exactly this name is returned (server-side metadata.name field selector). |
+| `limit` | `int32` | Maximum objects in one response. Zero asks the gateway to choose. The gateway clamps this to its own maximum, so a caller cannot use it to demand a response too large to send. A page is bounded by bytes as well as by count, because objects vary by three orders of magnitude: a count that is comfortable for Pods can exceed the message limit for ConfigMaps holding a megabyte each. |
+| `continue_token` | `string` | Continues a previous List. Pass back the continue_token from the last response; empty starts a new listing. The token belongs to the API server and encodes a snapshot, so it expires when that snapshot is compacted. Resuming an expired one fails with ABORTED rather than silently restarting, because earlier pages have already been returned to the caller and restarting would duplicate them. |
 
 ### ListResponse
 
@@ -271,6 +273,7 @@ KindSchema is everything the extension needs to define and serve a foreign table
 |---|---|---|
 | `objects` | repeated `Object` | — |
 | `resource_version` | `string` | resourceVersion of the list itself, usable as a watch start point. |
+| `continue_token` | `string` | Non-empty when more objects remain: pass it as the next request's continue_token. Empty means this was the last page. |
 
 ### Object
 
