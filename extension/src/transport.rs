@@ -115,7 +115,66 @@ impl std::error::Error for ChannelError {}
 /// to both connect and each request. No connection is attempted here, but the
 /// caller must be inside a tokio runtime context (`Runtime::enter`) because
 /// tonic spawns its connector task.
+/// How often an idle connection sends an HTTP/2 PING, and how long it waits
+/// for the acknowledgement before treating the connection as dead.
+///
+/// These exist because Postgres is deliberately outside the cluster
+/// (docs/DESIGN.md), so every connection crosses NAT, stateful firewalls and
+/// cloud load balancers. All of those drop an idle flow without sending a FIN
+/// or an RST: the socket stays open on both sides and nothing is ever
+/// delivered. A watch stream is idle whenever the cluster is quiet, which is
+/// most of the time, and is exactly what such a device reaps.
+///
+/// Without a keepalive that failure surfaces only at OS-level TCP timeout,
+/// measured in hours. Throughout, the subscription still reports ACTIVE and
+/// scans keep serving the cache as current: stale data presented as fresh,
+/// which docs/RULES.md §1 forbids. With one, the connection breaks in under a
+/// minute, the stream errors, and the subscription goes DEGRADED, which is the
+/// honest state and already announces itself on every scan.
+///
+/// The interval must stay comfortably above the gateway's minimum enforced
+/// interval (see `keepalive.EnforcementPolicy` in `gateway/cmd/gateway/main.go`)
+/// or the server answers pings with GOAWAY and kills the connection this is
+/// meant to protect.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Whether a channel should keep pinging while it has no active stream.
+///
+/// This is the difference between the two callers, and it matters because they
+/// have opposite shapes.
+///
+/// A **subscription** channel carries one long-lived stream that is idle
+/// whenever the cluster is quiet, which is most of the time. That idle stream
+/// is exactly what a middlebox reaps, and there is no next request to discover
+/// the loss, so it must ping while idle.
+///
+/// A **unary** channel is cached per Postgres backend for the life of that
+/// backend (see `channel_for` in client.rs). Pinging those while idle would
+/// mean every backend that ever ran one FDW query holds a connection open and
+/// sends a PING every 30 seconds for as long as the session lasts, scaling
+/// with backend count rather than with work. It does not need to: a unary call
+/// on a dead connection fails immediately and the channel is evicted on a
+/// connection-class error, so the loss is discovered by the next request,
+/// which is the only thing that cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keepalive {
+    /// Ping only while a request or stream is in flight.
+    WhileActive,
+    /// Ping even with no active stream. For long-lived subscriptions.
+    WhileIdle,
+}
+
 pub fn build_channel(target: &Target, timeout: Duration) -> Result<Channel, ChannelError> {
+    build_channel_with(target, timeout, Keepalive::WhileActive)
+}
+
+/// As [`build_channel`], choosing whether the connection is probed while idle.
+pub fn build_channel_with(
+    target: &Target,
+    timeout: Duration,
+    keepalive: Keepalive,
+) -> Result<Channel, ChannelError> {
     let mut tls = ClientTlsConfig::new().domain_name(target.tls_server_name.clone());
     tls = match &target.ca_cert_path {
         Some(path) => {
@@ -129,7 +188,10 @@ pub fn build_channel(target: &Target, timeout: Duration) -> Result<Channel, Chan
         .tls_config(tls)
         .map_err(ChannelError::Transport)?
         .connect_timeout(timeout)
-        .timeout(timeout);
+        .timeout(timeout)
+        .http2_keep_alive_interval(KEEPALIVE_INTERVAL)
+        .keep_alive_timeout(KEEPALIVE_TIMEOUT)
+        .keep_alive_while_idle(keepalive == Keepalive::WhileIdle);
     Ok(endpoint.connect_lazy())
 }
 

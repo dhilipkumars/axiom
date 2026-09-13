@@ -790,9 +790,19 @@ fn wait_for<T>(secs: u64, what: &str, mut f: impl FnMut() -> Option<T>) -> T {
 }
 
 fn watch_state(pg: &mut postgres::Client, port: u16) -> Option<(String, i64, String)> {
+    watch_state_ns(pg, port, "shop")
+}
+
+/// The subscription row for one (server, pods, namespace), or None if the
+/// worker has not registered it yet.
+///
+/// A subscription is keyed on namespace as well as kind, so a test watching a
+/// namespace other than "shop" has to say which; querying the wrong one simply
+/// returns no row and reads as "never became active".
+fn watch_state_ns(pg: &mut postgres::Client, port: u16, ns: &str) -> Option<(String, i64, String)> {
     pg.query_opt(
-        "SELECT state, objects, reason FROM axiom_watch_status() WHERE server = $1 AND resource = 'pods' AND namespace = 'shop'",
-        &[&format!("https://localhost:{port}")],
+        "SELECT state, objects, reason FROM axiom_watch_status() WHERE server = $1 AND resource = 'pods' AND namespace = $2",
+        &[&format!("https://localhost:{port}"), &ns],
     )
     .expect("status")
     .map(|r| (r.get(0), r.get(1), r.get(2)))
@@ -1150,5 +1160,176 @@ fn import_foreign_schema_rejects_unknown_options() {
     assert!(
         msg.contains("nonsense") && msg.contains("cache_mode, prefix"),
         "the error should name the offending option and the valid ones: {msg}"
+    );
+}
+
+/// Opens a second connection that `LISTEN`s for `axiom_events`.
+///
+/// It has to be a connection to the **`postgres`** database, not the test
+/// database. `axiom.notify_database` defaults to `postgres` and the worker
+/// opens its NOTIFY connection there, and a notification is only delivered to
+/// listeners in the database it was sent from.
+///
+/// Repointing the worker at `pgrx_tests` instead does not work: the worker
+/// would hold a connection to it, and pgrx's harness `dropdb`s the test
+/// database between runs and panics when that fails.
+///
+/// Host, port and user are read from the running server rather than assumed,
+/// so this follows wherever the harness put it.
+fn listen_for_events(pg: &mut postgres::Client) -> postgres::Client {
+    let port: String = pg
+        .query_one("SELECT setting FROM pg_settings WHERE name = 'port'", &[])
+        .expect("port")
+        .get(0);
+    let user: String = pg
+        .query_one("SELECT current_user", &[])
+        .expect("user")
+        .get(0);
+    let mut listener = postgres::Config::new()
+        .host("localhost")
+        .port(port.parse().expect("numeric port"))
+        .user(&user)
+        .dbname("postgres")
+        .connect(postgres::NoTls)
+        .expect("connect to the notify database");
+    listener
+        .batch_execute("LISTEN axiom_events;")
+        .expect("listen");
+    listener
+}
+
+/// Drains any `axiom_events` notifications the connection has already been
+/// sent, waiting up to `secs` for the first one.
+///
+/// `postgres::Notifications::timeout_iter` only yields while the connection is
+/// doing IO, so this issues a trivial query first to pump it.
+fn drain_notifications(pg: &mut postgres::Client, secs: u64) -> Vec<String> {
+    use fallible_iterator::FallibleIterator;
+    pg.simple_query("SELECT 1").expect("pump");
+    let mut out: Vec<String> = Vec::new();
+    // Bound to a local: `notifications()` returns a guard the iterator borrows,
+    // so calling it inline drops it while still in use.
+    let mut notifications = pg.notifications();
+    let mut it = notifications.timeout_iter(std::time::Duration::from_secs(secs));
+    while let Some(n) = it.next().expect("notification iterator") {
+        out.push(n.payload().to_owned());
+    }
+    out
+}
+
+/// A subscription's initial listing must not emit `NOTIFY axiom_events`.
+///
+/// Every notification runs `pg_notify` in its own transaction, and the worker
+/// drives all watch streams on one thread, so one per object of an initial
+/// listing is thousands of sequential transactions during which no other
+/// stream progresses. The initial listing is also not a change: nothing
+/// happened in the cluster, the cache is simply being populated.
+///
+/// The assertions are ordered so this test cannot pass silently. If the
+/// notification path were broken (wrong database, worker not connected), the
+/// post-sync assertion at the end would fail, which is what makes the
+/// "no notifications during listing" assertion above it meaningful.
+#[test]
+fn initial_listing_does_not_notify_but_later_changes_do() {
+    let stub = start_stub();
+    let mut pg = pg_client();
+    let port = stub.addr.port();
+    let ca = stub.ca_path.display();
+
+    // A listing big enough that per-object notifications would be obvious, and
+    // big enough to matter if they were transactions.
+    {
+        let mut pods = stub.cluster.pods.lock().expect("lock");
+        pods.clear();
+        for i in 0..60 {
+            pods.push(pod("burst", &format!("p-{i}"), "Running", "n1"));
+        }
+    }
+
+    let mut listener = listen_for_events(&mut pg);
+    // Anything queued from an earlier test in this process is not ours.
+    drain_notifications(&mut listener, 1);
+
+    pg.batch_execute(&format!(
+        "DROP SERVER IF EXISTS stub_n CASCADE;
+         CREATE SERVER stub_n FOREIGN DATA WRAPPER axiom_fdw OPTIONS (endpoint 'https://localhost:{port}', ca_cert '{ca}', rpc_timeout_secs '5');
+         CREATE FOREIGN TABLE burst_pods (name text, namespace text, phase text, node text, raw jsonb)
+           SERVER stub_n OPTIONS (resource 'pods', cache_mode 'watch');"
+    ))
+    .expect("ddl");
+
+    // The first scan registers the subscription and is served on demand. The
+    // stub answers List from a fixed set rather than from its seeded pods
+    // (only Subscribe lists the seeded ones), so its count is not the subject
+    // here and is deliberately not asserted.
+    pg.query_one(
+        "SELECT count(*) FROM burst_pods WHERE namespace = 'burst'",
+        &[],
+    )
+    .expect("scan");
+
+    wait_for(30, "burst watch ACTIVE", || {
+        watch_state_ns(&mut pg, port, "burst").filter(|(s, _, _)| s == "ACTIVE")
+    });
+
+    // Now served from the cache the initial listing populated: proof the
+    // listing really did carry all 60, so "no notifications" below is about a
+    // listing that happened rather than one that never ran.
+    let cached: i64 = pg
+        .query_one(
+            "SELECT count(*) FROM burst_pods WHERE namespace = 'burst'",
+            &[],
+        )
+        .expect("cached scan")
+        .get(0);
+    assert_eq!(
+        cached, 60,
+        "cache should hold every object from the listing"
+    );
+
+    // The whole collection arrived as ADDED before SYNCED. None of it is a
+    // change, so none of it may be announced.
+    //
+    // Filtered to this test's own subscription. `axiom_events` is one channel
+    // per database and the harness runs tests in parallel against a single
+    // Postgres, so another test's pods arrive on this connection too. An
+    // unfiltered assertion passes alone and fails in the suite, which is
+    // exactly how this was found.
+    let mine = |p: &String| p.contains("\"namespace\":\"burst\"");
+    let during: Vec<String> = drain_notifications(&mut listener, 2)
+        .into_iter()
+        .filter(|p| mine(p))
+        .collect();
+    assert!(
+        during.is_empty(),
+        "initial listing emitted {} notification(s): {:?}",
+        during.len(),
+        during.iter().take(3).collect::<Vec<_>>()
+    );
+
+    // A real change after SYNCED still notifies, exactly once. This is also
+    // what proves the channel works and the assertion above could have failed.
+    stub.cluster
+        .emit_pod(EvType::Added, pod("burst", "after-sync", "Running", "n2"));
+    // Poll rather than drain once: another test's traffic can arrive first and
+    // an unlucky single drain would return before ours was sent.
+    let mut after: Vec<String> = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        after.extend(drain_notifications(&mut listener, 2));
+        if after.iter().any(|p| p.contains("after-sync")) {
+            break;
+        }
+    }
+    let ours: Vec<&String> = after.iter().filter(|p| p.contains("after-sync")).collect();
+    assert_eq!(
+        ours.len(),
+        1,
+        "expected exactly one notification for the post-sync change, got {after:?}"
+    );
+    assert!(
+        ours[0].contains("\"type\":\"ADDED\""),
+        "notification should name the event type: {}",
+        ours[0]
     );
 }
