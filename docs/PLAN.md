@@ -65,7 +65,7 @@ Notes from implementation: `List` with a name filter is served by the gateway as
 point `Get` (cheaper for the API server than a field-selector LIST, and a miss is an
 empty list). The FDW re-derives the pushed-down filter from `plan.qual` at
 `BeginForeignScan` rather than serialising it through `fdw_private`, which keeps one
-code path across pg14–17 node layouts. All quals stay local so Postgres re-checks
+code path across the supported pg16+ node layouts. All quals stay local so Postgres re-checks
 them; pushdown only narrows the fetch. Literals that cannot be Kubernetes names
 (`WHERE name = 'Foo'`) short-circuit to zero rows without an RPC instead of becoming
 a gateway `INVALID_ARGUMENT` error. The gateway runs under a pods-`get`/`list`-only

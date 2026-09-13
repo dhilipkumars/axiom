@@ -10,7 +10,7 @@ permissions:
 
 env:
   PG_MAJOR: "16"
-  CARGO_PGRX_VERSION: "0.12.9"
+  CARGO_PGRX_VERSION: "0.19.2"
 
 jobs:
   proto:
@@ -63,24 +63,24 @@ jobs:
       - run: make gateway-vuln
 
   extension-unit:
-    # One job per supported Postgres major, because the crate has six
-    # version-gated branch sets and a single-version build compiles at most one
-    # arm of each:
-    #   fdw.rs   pg_foreign_server_aclcheck / object_aclcheck   (pg16 split)
-    #   fdw.rs   create_foreignscan_path arity                  (pg17 split)
-    #   fdw.rs   makeVar varno type                             (pg16 split)
-    #   shmem.rs dsa_create / dsa_create_ext                    (pg17 split)
-    # The aclcheck pair shipped in #12 with its pg14/pg15 arm never compiled
-    # anywhere, which is what prompted this. pg15 is omitted deliberately: it
-    # shares every branch arm with pg14 here, so it would add runtime without
-    # covering a line pg14 does not already cover. Revisit if a pg15-only
-    # branch ever appears.
+    # One job per supported Postgres major. The window is 16 through the
+    # latest (issue #19): 14 reaches end of life in November 2026 and 15 is not
+    # where the installed base is, while 16 is supported until November 2028.
+    #
+    # Three version-gated splits remain, and a single-version build compiles
+    # only one arm of each, which is why every major in the window is built:
+    #   shmem.rs  dsa_create (16) vs dsa_create_ext (17+)
+    #   fdw.rs    create_foreignscan_path, three arities: 16, 17, 18+
+    #   fdw.rs    tuple descriptor attrs (16, 17) vs compact_attrs (18+)
+    # Two further pairs were deleted along with 14 and 15. The last two were
+    # found by adding 18 here: both are real upstream changes that no amount of
+    # reading would reliably have caught.
     name: extension pg${{ matrix.pg }} (unit + pg tests + clippy)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        pg: ["14", "16", "17"]
+        pg: ["16", "17", "18"]
     env:
       PG_MAJOR: ${{ matrix.pg }}
     steps:

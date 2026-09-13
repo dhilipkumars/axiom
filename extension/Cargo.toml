@@ -8,20 +8,18 @@ description = "Axiom: a Postgres foreign data wrapper for Kubernetes (Phase 0 pl
 [lib]
 crate-type = ["cdylib", "lib"]
 
-[[bin]]
-name = "pgrx_embed_axiom"
-path = "./src/bin/pgrx_embed.rs"
-
 [features]
+# Supported window: 16 through the latest major (docs/PLAN.md, issue #19).
+# 14 and 15 were dropped here; 14 reaches end of life in November 2026 and
+# neither is where the installed base is. 19 is added when it leaves beta.
 default = ["pg16"]
-pg14 = ["pgrx/pg14", "pgrx-tests/pg14"]
-pg15 = ["pgrx/pg15", "pgrx-tests/pg15"]
 pg16 = ["pgrx/pg16", "pgrx-tests/pg16"]
 pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
+pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]
 pg_test = []
 
 [dependencies]
-pgrx = "=0.12.9"
+pgrx = "=0.19.2"
 tokio = { version = "1", features = ["rt", "time", "net"] }
 tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "transport", "tls", "tls-webpki-roots", "channel"] }
 prost = "0.13"
@@ -34,7 +32,7 @@ tonic-build = { version = "0.12", default-features = false, features = ["prost",
 protoc-bin-vendored = "3"
 
 [dev-dependencies]
-pgrx-tests = "=0.12.9"
+pgrx-tests = "=0.19.2"
 # In-process stub gateway for integration tests (extension + real Postgres, no cluster).
 rcgen = "0.13"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
@@ -59,7 +57,7 @@ codegen-units = 1
 [lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
 # pgrx's pg_module_magic! probes every pg version feature it knows about.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("pg12", "pg13"))', 'cfg(pgrx_embed)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("pg13", "pg14", "pg15", "pg19"))'] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

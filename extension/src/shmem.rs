@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use pgrx::pg_sys;
 use pgrx::prelude::*;
-use pgrx::shmem::{PGRXSharedMemory, PgSharedMemoryInitialization};
+use pgrx::shmem::PGRXSharedMemory;
 use pgrx::{pg_shmem_init, PgLwLock};
 
 use crate::cache::{buckets_for, key_hash, key_matches, tombstone_expired, SubState};
@@ -103,7 +103,10 @@ impl Default for Control {
 // SAFETY: `Control` is `repr(C)` plain data with no pointers into process memory.
 unsafe impl PGRXSharedMemory for Control {}
 
-static CONTROL: PgLwLock<Control> = PgLwLock::new();
+// SAFETY: the name is unique to this extension; nothing else registers an
+// LWLock called "axiom_control". pgrx 0.19 made the name explicit rather than
+// deriving it, so a collision is the caller's responsibility to rule out.
+static CONTROL: PgLwLock<Control> = unsafe { PgLwLock::new(c"axiom_control") };
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
@@ -468,9 +471,13 @@ pub fn worker_init(cache_limit_bytes: usize) -> Result<(), ShmemError> {
         let area = if ctl.dsa_ready {
             pg_sys::dsa_attach(ctl.dsa_handle)
         } else {
-            #[cfg(any(feature = "pg14", feature = "pg15", feature = "pg16"))]
+            // pg16 has dsa_create; pg17 replaced it with dsa_create_ext.
+            // Gated on pg16 rather than on pg17 so every later major takes the
+            // new arm by default: naming pg17 explicitly would have put pg18
+            // on the pg16 path and failed to compile.
+            #[cfg(feature = "pg16")]
             let a = pg_sys::dsa_create(ctl.tranche);
-            #[cfg(feature = "pg17")]
+            #[cfg(not(feature = "pg16"))]
             let a =
                 pg_sys::dsa_create_ext(ctl.tranche, 1 << 20, 1usize << pg_sys::DSA_OFFSET_WIDTH);
             pg_sys::dsa_pin(a);

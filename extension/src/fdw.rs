@@ -227,28 +227,11 @@ pub fn server_options_by_name(name: &str) -> Result<ServerOptions, String> {
 /// `USAGE` privilege check on a foreign server, across supported majors.
 ///
 /// Postgres 16 retired the per-catalog `pg_*_aclcheck` family in favour of one
-/// `object_aclcheck` taking the catalog's OID, so this is version-gated rather
-/// than one call. Both spellings ask the same question.
+/// `object_aclcheck` taking the catalog's OID. With pg16 as the supported
+/// floor there is only one spelling left, so this is no longer version-gated.
 ///
 /// # Safety
 /// `srvid` must be a live foreign server OID from a catalog lookup.
-#[cfg(any(feature = "pg14", feature = "pg15"))]
-unsafe fn foreign_server_usage_aclcheck(srvid: pg_sys::Oid) -> pg_sys::AclResult::Type {
-    // SAFETY: caller guarantees a valid server OID.
-    unsafe {
-        pg_sys::pg_foreign_server_aclcheck(
-            srvid,
-            pg_sys::GetUserId(),
-            pg_sys::AclMode::from(pg_sys::ACL_USAGE),
-        )
-    }
-}
-
-/// See the pg14/pg15 variant above.
-///
-/// # Safety
-/// `srvid` must be a live foreign server OID from a catalog lookup.
-#[cfg(any(feature = "pg16", feature = "pg17"))]
 unsafe fn foreign_server_usage_aclcheck(srvid: pg_sys::Oid) -> pg_sys::AclResult::Type {
     // SAFETY: caller guarantees a valid server OID; ForeignServerRelationId is
     // the catalog that OID belongs to.
@@ -259,6 +242,50 @@ unsafe fn foreign_server_usage_aclcheck(srvid: pg_sys::Oid) -> pg_sys::AclResult
             pg_sys::GetUserId(),
             pg_sys::AclMode::from(pg_sys::ACL_USAGE),
         )
+    }
+}
+
+/// The `i`th attribute of a tuple descriptor.
+///
+/// pg18 reorganised `TupleDescData`. Up to pg17 it ends with an inline
+/// `attrs` array of `FormData_pg_attribute`. pg18 replaced that with
+/// `compact_attrs`, a smaller per-attribute struct used on hot paths, and
+/// moved the full `FormData_pg_attribute` array to immediately after it. So
+/// the full attribute array starts `natts` compact entries in.
+///
+/// pgrx has an equivalent internally but does not export it, and its version
+/// takes a `PgBox` this code does not hold.
+///
+/// # Safety
+/// `tupdesc` must be a live tuple descriptor and `i` less than its `natts`.
+#[cfg(any(feature = "pg16", feature = "pg17"))]
+unsafe fn tupdesc_attr(
+    tupdesc: pg_sys::TupleDesc,
+    i: usize,
+) -> *const pg_sys::FormData_pg_attribute {
+    // SAFETY: caller guarantees a live descriptor and an in-range index.
+    unsafe { (*tupdesc).attrs.as_ptr().add(i) }
+}
+
+/// See the pg16/pg17 variant above.
+///
+/// # Safety
+/// `tupdesc` must be a live tuple descriptor and `i` less than its `natts`.
+#[cfg(not(any(feature = "pg16", feature = "pg17")))]
+unsafe fn tupdesc_attr(
+    tupdesc: pg_sys::TupleDesc,
+    i: usize,
+) -> *const pg_sys::FormData_pg_attribute {
+    // SAFETY: caller guarantees a live descriptor and an in-range index. The
+    // full attribute array begins after `natts` compact entries.
+    unsafe {
+        let natts = usize::try_from((*tupdesc).natts).unwrap_or(0);
+        (*tupdesc)
+            .compact_attrs
+            .as_ptr()
+            .add(natts)
+            .cast::<pg_sys::FormData_pg_attribute>()
+            .add(i)
     }
 }
 
@@ -430,7 +457,7 @@ unsafe fn extract_quals(list: *mut pg_sys::List, varno: i64, rel_oid: pg_sys::Oi
 // --- planner callbacks -------------------------------------------------------------
 
 #[pg_guard]
-unsafe extern "C" fn get_foreign_rel_size(
+unsafe extern "C-unwind" fn get_foreign_rel_size(
     _root: *mut pg_sys::PlannerInfo,
     baserel: *mut pg_sys::RelOptInfo,
     foreigntableid: pg_sys::Oid,
@@ -450,7 +477,7 @@ unsafe extern "C" fn get_foreign_rel_size(
 }
 
 #[pg_guard]
-unsafe extern "C" fn get_foreign_paths(
+unsafe extern "C-unwind" fn get_foreign_paths(
     root: *mut pg_sys::PlannerInfo,
     baserel: *mut pg_sys::RelOptInfo,
     _foreigntableid: pg_sys::Oid,
@@ -461,7 +488,12 @@ unsafe extern "C" fn get_foreign_paths(
         // One RPC round-trip dominates; per-row cost is JSON decoding.
         let startup_cost = 100.0;
         let total_cost = startup_cost + rows * pg_sys::cpu_tuple_cost * 10.0;
-        #[cfg(any(feature = "pg14", feature = "pg15", feature = "pg16"))]
+        // create_foreignscan_path has grown twice: pg17 added fdw_restrictinfo,
+        // and pg18 added disabled_nodes after rows. Three arities, so three
+        // arms. The last is `not(pg16 or pg17)` rather than `pg18` so a later
+        // major takes it by default and fails to compile if the shape changes
+        // again, which is more useful than silently selecting an old arm.
+        #[cfg(feature = "pg16")]
         let path = pg_sys::create_foreignscan_path(
             root,
             baserel,
@@ -488,12 +520,32 @@ unsafe extern "C" fn get_foreign_paths(
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         );
+        // disabled_nodes is 0. pg18 lets the planner count how many nodes in a
+        // path were produced by a disabled node type (one of the enable_*
+        // settings turned off), and prefers the path with fewer of them before
+        // it compares costs. Nothing disables a foreign scan, so this path
+        // contributes none.
+        #[cfg(not(any(feature = "pg16", feature = "pg17")))]
+        let path = pg_sys::create_foreignscan_path(
+            root,
+            baserel,
+            std::ptr::null_mut(),
+            rows,
+            0,
+            startup_cost,
+            total_cost,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
         pg_sys::add_path(baserel, path.cast::<pg_sys::Path>());
     }
 }
 
 #[pg_guard]
-unsafe extern "C" fn get_foreign_plan(
+unsafe extern "C-unwind" fn get_foreign_plan(
     _root: *mut pg_sys::PlannerInfo,
     baserel: *mut pg_sys::RelOptInfo,
     _foreigntableid: pg_sys::Oid,
@@ -549,7 +601,7 @@ unsafe fn resolve_schema(
         let natts = usize::try_from((*tupdesc).natts).unwrap_or(0);
         let mut names: Vec<Option<String>> = Vec::with_capacity(natts);
         for i in 0..natts {
-            let att = (*tupdesc).attrs.as_ptr().add(i);
+            let att = tupdesc_attr(tupdesc, i);
             if (*att).attisdropped {
                 names.push(None);
                 continue;
@@ -565,7 +617,7 @@ unsafe fn resolve_schema(
 
         for (i, col) in schema.columns.iter().enumerate() {
             let Some(col) = col else { continue };
-            let att = (*tupdesc).attrs.as_ptr().add(i);
+            let att = tupdesc_attr(tupdesc, i);
             let (want_oid, want_name) = match col.sql_type {
                 SqlType::Text => (pg_sys::TEXTOID, "text"),
                 SqlType::Jsonb => (pg_sys::JSONBOID, "jsonb"),
@@ -679,7 +731,7 @@ unsafe fn new_row_from_slot(slot: *mut pg_sys::TupleTableSlot, schema: &TableSch
 }
 
 #[pg_guard]
-unsafe extern "C" fn begin_foreign_scan(node: *mut pg_sys::ForeignScanState, eflags: c_int) {
+unsafe extern "C-unwind" fn begin_foreign_scan(node: *mut pg_sys::ForeignScanState, eflags: c_int) {
     // SAFETY: called by the executor/planner with valid node pointers; see module docs.
     unsafe {
         if eflags & pg_sys::EXEC_FLAG_EXPLAIN_ONLY.cast_signed() != 0 {
@@ -788,7 +840,7 @@ fn fetch_rows(state: &ScanState) -> VecDeque<Row> {
 }
 
 #[pg_guard]
-unsafe extern "C" fn iterate_foreign_scan(
+unsafe extern "C-unwind" fn iterate_foreign_scan(
     node: *mut pg_sys::ForeignScanState,
 ) -> *mut pg_sys::TupleTableSlot {
     // SAFETY: called by the executor/planner with valid node pointers; see module docs.
@@ -822,7 +874,7 @@ unsafe extern "C" fn iterate_foreign_scan(
 }
 
 #[pg_guard]
-unsafe extern "C" fn rescan_foreign_scan(node: *mut pg_sys::ForeignScanState) {
+unsafe extern "C-unwind" fn rescan_foreign_scan(node: *mut pg_sys::ForeignScanState) {
     // SAFETY: called by the executor/planner with valid node pointers; see module docs.
     unsafe {
         let state_ptr = (*node).fdw_state.cast::<ScanState>();
@@ -834,7 +886,7 @@ unsafe extern "C" fn rescan_foreign_scan(node: *mut pg_sys::ForeignScanState) {
 }
 
 #[pg_guard]
-unsafe extern "C" fn end_foreign_scan(_node: *mut pg_sys::ForeignScanState) {
+unsafe extern "C-unwind" fn end_foreign_scan(_node: *mut pg_sys::ForeignScanState) {
     // State is owned by the per-query memory context (see begin_foreign_scan).
 }
 
@@ -853,7 +905,7 @@ struct ModifyState {
 
 /// Which DML a kind supports. Pods: none. `ConfigMaps`: all three.
 #[pg_guard]
-unsafe extern "C" fn is_foreign_rel_updatable(rel: pg_sys::Relation) -> c_int {
+unsafe extern "C-unwind" fn is_foreign_rel_updatable(rel: pg_sys::Relation) -> c_int {
     // SAFETY: rel is an open relation supplied by the planner/executor.
     let cfg = unsafe { scan_config((*rel).rd_id) };
     if cfg.writable {
@@ -868,7 +920,7 @@ unsafe extern "C" fn is_foreign_rel_updatable(rel: pg_sys::Relation) -> c_int {
 /// Adds the row's `raw` column as a resjunk target so UPDATE/DELETE carry the
 /// object identity and the `resourceVersion` it was read at.
 #[pg_guard]
-unsafe extern "C" fn add_foreign_update_targets(
+unsafe extern "C-unwind" fn add_foreign_update_targets(
     root: *mut pg_sys::PlannerInfo,
     rtindex: pg_sys::Index,
     _target_rte: *mut pg_sys::RangeTblEntry,
@@ -880,7 +932,7 @@ unsafe extern "C" fn add_foreign_update_targets(
         let natts = usize::try_from((*tupdesc).natts).unwrap_or(0);
         let mut raw_attno: Option<i16> = None;
         for i in 0..natts {
-            let att = (*tupdesc).attrs.as_ptr().add(i);
+            let att = tupdesc_attr(tupdesc, i);
             if (*att).attisdropped {
                 continue;
             }
@@ -895,10 +947,8 @@ unsafe extern "C" fn add_foreign_update_targets(
                 "UPDATE/DELETE on an axiom foreign table requires a \"raw jsonb\" column (it carries the object's identity and resourceVersion)".to_owned(),
             );
         };
-        // Var.varno is `Index` on pg14/15 and `int` on pg16+; makeVar follows suit.
-        #[cfg(any(feature = "pg14", feature = "pg15"))]
-        let varno = rtindex;
-        #[cfg(not(any(feature = "pg14", feature = "pg15")))]
+        // Var.varno is `int` from pg16 on, which is the supported floor, so
+        // the range table index is narrowed rather than passed through.
         let Ok(varno) = i32::try_from(rtindex) else {
             raise(
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
@@ -912,7 +962,7 @@ unsafe extern "C" fn add_foreign_update_targets(
 
 /// No private plan data: everything is re-derived from the catalogs at Begin.
 #[pg_guard]
-unsafe extern "C" fn plan_foreign_modify(
+unsafe extern "C-unwind" fn plan_foreign_modify(
     _root: *mut pg_sys::PlannerInfo,
     _plan: *mut pg_sys::ModifyTable,
     _result_relation: pg_sys::Index,
@@ -922,7 +972,7 @@ unsafe extern "C" fn plan_foreign_modify(
 }
 
 #[pg_guard]
-unsafe extern "C" fn begin_foreign_modify(
+unsafe extern "C-unwind" fn begin_foreign_modify(
     mtstate: *mut pg_sys::ModifyTableState,
     rinfo: *mut pg_sys::ResultRelInfo,
     _fdw_private: *mut pg_sys::List,
@@ -1014,7 +1064,7 @@ unsafe fn per_tuple_memcx(estate: *mut pg_sys::EState) -> pg_sys::MemoryContext 
 }
 
 #[pg_guard]
-unsafe extern "C" fn exec_foreign_insert(
+unsafe extern "C-unwind" fn exec_foreign_insert(
     estate: *mut pg_sys::EState,
     rinfo: *mut pg_sys::ResultRelInfo,
     slot: *mut pg_sys::TupleTableSlot,
@@ -1046,7 +1096,7 @@ unsafe extern "C" fn exec_foreign_insert(
 }
 
 #[pg_guard]
-unsafe extern "C" fn exec_foreign_update(
+unsafe extern "C-unwind" fn exec_foreign_update(
     estate: *mut pg_sys::EState,
     rinfo: *mut pg_sys::ResultRelInfo,
     slot: *mut pg_sys::TupleTableSlot,
@@ -1078,7 +1128,7 @@ unsafe extern "C" fn exec_foreign_update(
 }
 
 #[pg_guard]
-unsafe extern "C" fn exec_foreign_delete(
+unsafe extern "C-unwind" fn exec_foreign_delete(
     estate: *mut pg_sys::EState,
     rinfo: *mut pg_sys::ResultRelInfo,
     slot: *mut pg_sys::TupleTableSlot,
@@ -1104,7 +1154,7 @@ unsafe extern "C" fn exec_foreign_delete(
 }
 
 #[pg_guard]
-unsafe extern "C" fn end_foreign_modify(
+unsafe extern "C-unwind" fn end_foreign_modify(
     _estate: *mut pg_sys::EState,
     _rinfo: *mut pg_sys::ResultRelInfo,
 ) {
@@ -1243,7 +1293,7 @@ unsafe fn table_names(list: *mut pg_sys::List) -> Vec<String> {
 /// because one CRD in the cluster has an unusable name would make IMPORT
 /// unusable on exactly the clusters it is most needed on.
 #[pg_guard]
-unsafe extern "C" fn import_foreign_schema(
+unsafe extern "C-unwind" fn import_foreign_schema(
     stmt: *mut pg_sys::ImportForeignSchemaStmt,
     server_oid: pg_sys::Oid,
 ) -> *mut pg_sys::List {

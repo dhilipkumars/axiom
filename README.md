@@ -138,23 +138,30 @@ go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
 **Rust side**
 
 ```sh
-# Rust stable via rustup (https://rustup.rs)
+# Rust 1.96 or newer via rustup (https://rustup.rs); cargo-pgrx 0.19 requires it
 rustc --version
 
-# PostgreSQL 14–17 with server headers. Examples:
+# PostgreSQL 16, 17 or 18 with server headers. Examples:
 #   macOS:   brew install postgresql@16
 #   Debian:  apt install postgresql-16 postgresql-server-dev-16
 # pgrx also needs clang/libclang for bindgen (brew install llvm / apt install clang libclang-dev)
 
-cargo install cargo-pgrx --version 0.12.9 --locked
+cargo install cargo-pgrx --version 0.19.2 --locked
 cargo install cargo-audit cargo-deny --locked
 
-# Tell pgrx which Postgres to use (pick the major you installed):
-cargo pgrx init --pg16 "$(which pg_config)"
+# Tell pgrx which Postgres to use. The flag must name the same major as the
+# pg_config it is given, so change both together:
+cargo pgrx init --pg16 /opt/homebrew/opt/postgresql@16/bin/pg_config   # macOS
+cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config            # Debian, pg18
 ```
 
 Check what pgrx knows about with `cat ~/.pgrx/config.toml`. The `make` targets
-below take `PG=pg16` (or `pg14`, `pg15`, `pg17`) to match.
+below take `PG=pg16` (or `pg17`, `pg18`) to match.
+
+**Supported Postgres versions are 16 through the latest major.** 14 and 15 were
+dropped: 14 reaches end of life in November 2026, and neither is where the
+installed base sits. 16 is supported upstream until November 2028. 19 is still
+in beta and is not built here yet.
 
 ## 2. Get the code
 
