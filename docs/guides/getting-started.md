@@ -1,8 +1,11 @@
 # Getting started
 
-This walks from nothing to a SQL query that returns real cluster data. It
-assumes you have a Kubernetes cluster you can reach with `kubectl` and a
-Postgres you can install an extension into.
+This walks from nothing to a SQL query that returns real cluster data, using
+kind for the cluster. It assumes Docker, `kubectl`, `kind` and a Postgres you
+can install an extension into.
+
+Every command here has been run end to end. If one does not work, that is a
+bug worth reporting.
 
 If you only want to see it work, skip all of this and run the end-to-end
 suite, which builds everything, creates a throwaway kind cluster and tears it
@@ -12,29 +15,101 @@ down again:
 ./e2e/run_all.sh
 ```
 
-## 1. Run a gateway in the cluster
+## 1. Make the node port reachable
+
+Postgres runs outside the cluster and dials the gateway's `NodePort`, so that
+port has to be reachable from wherever Postgres is. On a managed cluster the
+node address usually is. **On kind it is not**, unless the cluster was created
+with a port mapping, and adding one afterwards means recreating the cluster:
+
+```sh
+cat <<'EOF' | kind create cluster --name axiom --config -
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30443
+        hostPort: 30443
+        protocol: TCP
+EOF
+```
+
+With that mapping the gateway is reachable at `https://localhost:30443`, which
+is the endpoint used throughout this guide.
+
+## 2. Generate a TLS keypair
+
+The gateway has no plaintext mode, so it needs a server certificate before it
+will start. The repository's generator produces one with every name the local
+stack might use:
+
+```sh
+mkdir -p certs
+docker run --rm --entrypoint /bin/sh \
+  -v "$PWD/certs:/certs" \
+  -v "$PWD/deploy/compose/certs/gen.sh:/gen.sh:ro" \
+  alpine/openssl:3.3.3 /gen.sh
+ls certs/          # ca.crt  gateway.crt  gateway.key
+```
+
+The `--entrypoint` override matters: that image runs `openssl` by default, so
+without it the script is passed to `openssl` as an argument.
+
+The certificate it produces already carries `localhost`, `127.0.0.1`, the
+in-cluster Service names and the kind node name, so it works for every way this
+guide reaches the gateway.
+
+Run it in that container rather than on the host. **macOS ships LibreSSL, and
+certificates it generates are rejected** in three different ways that name
+nothing useful:
+
+| What LibreSSL does | How it fails |
+| --- | --- |
+| EC keys with explicit curve parameters | gateway crash-loops, `x509: invalid ECDSA parameters` |
+| signs with SHA-1 by default | `UnsupportedSignatureAlgorithmContext` from the extension |
+| CA key with explicit parameters | `UnsupportedSignatureAlgorithmForPublicKeyContext` |
+
+If you generate the keypair yourself, the requirements are **named-curve EC or
+RSA keys, and SHA-256 signatures**. The subject alternative names must cover
+the name Postgres will dial, which for a `NodePort` is the node address or
+`localhost`, not the in-cluster Service DNS.
+
+## 3. Build the gateway image and load it
+
+The Deployment references `axiom-gateway:latest` and never pulls, so the image
+has to exist on the node already:
+
+```sh
+docker build -f gateway/Dockerfile -t axiom-gateway:latest .
+kind load docker-image axiom-gateway:latest --name axiom
+```
+
+Not on kind? Push the image to a registry your nodes can pull from and change
+`image:` in `deploy/k8s/gateway-deployment.yaml` to match. Axiom does not
+publish images yet.
+
+## 4. Run the gateway in the cluster
 
 The gateway is the only piece that needs cluster credentials. It runs as a
-Deployment with a ServiceAccount, and it needs a TLS server keypair because it
-has no plaintext mode.
+Deployment with a ServiceAccount and the projected token kubelet mounts.
 
 ```sh
 kubectl apply -f deploy/k8s/gateway-rbac.yaml
 
 kubectl -n axiom-system create secret generic axiom-gateway-tls \
-  --from-file=tls.crt=gateway.crt \
-  --from-file=tls.key=gateway.key
+  --from-file=tls.crt=certs/gateway.crt \
+  --from-file=tls.key=certs/gateway.key
 
 kubectl -n axiom-system create configmap axiom-gateway-config \
   --from-literal=serve='pods,configmaps,widgets.example.com'
 
 kubectl apply -f deploy/k8s/gateway-deployment.yaml
+kubectl -n axiom-system rollout status deploy/axiom-gateway
 ```
 
-The certificate's subject alternative names must cover the name Postgres will
-dial. For a `NodePort`, that is the node's name or address, not the in-cluster
-Service DNS. [Deploying the gateway](deploying.md) covers the exposure choices
-and how they interact with the certificate.
+[Deploying the gateway](deploying.md) covers the exposure choices and how they
+interact with the certificate.
 
 Two things bound what the gateway will serve, and both apply:
 
@@ -69,13 +144,18 @@ Grant only the verbs you want available. A kind granted `get`, `list` and
 `watch` is readable and cacheable but not writable, and the generated table
 reflects that.
 
-## 2. Install the extension into Postgres
+## 5. Install the extension into Postgres
 
 Axiom is a pgrx extension, built and installed like any other:
 
 ```sh
 cd extension && cargo pgrx install --release --no-default-features --features pg16
 ```
+
+**The feature must match the Postgres you are building against.** Axiom
+supports 16 through the latest major, so use `pg16`, `pg17` or `pg18` to match
+the `pg_config` that `cargo pgrx init` was pointed at. A mismatch fails with a
+pgrx error that does not make the cause obvious.
 
 Then, in the database you want to query from:
 
@@ -84,18 +164,22 @@ CREATE EXTENSION axiom;
 SELECT axiom_version();
 ```
 
-## 3. Point Postgres at the gateway
+## 6. Point Postgres at the gateway
 
 ```sql
 CREATE SERVER prod
   FOREIGN DATA WRAPPER axiom_fdw
   OPTIONS (
-    endpoint 'https://node.example:30443',
-    ca_cert  '/etc/postgresql/axiom-ca.crt'
+    endpoint 'https://localhost:30443',
+    ca_cert  '/absolute/path/to/certs/ca.crt'
   );
 
-CREATE USER MAPPING FOR CURRENT_USER SERVER prod OPTIONS ();
+CREATE USER MAPPING FOR CURRENT_USER SERVER prod;
 ```
+
+The user mapping carries no options today, so it takes no `OPTIONS` clause.
+Postgres rejects an empty `OPTIONS ()` with a syntax error. Phase 7 is what
+gives the mapping something to hold (see `docs/AUTH.md`).
 
 `ca_cert` is a path on the Postgres **server's** filesystem, read by the
 backend process, so it must be readable by the user Postgres runs as. Leaving
@@ -105,7 +189,7 @@ gateway's certificate is signed by a real CA.
 Every accepted option is listed in the
 [foreign data wrapper options](../generated/fdw-options.md) reference.
 
-## 4. Import a schema
+## 7. Import a schema
 
 `IMPORT FOREIGN SCHEMA` asks the gateway what it serves, reads the cluster's
 OpenAPI documents, and writes one foreign table per kind.
@@ -129,7 +213,7 @@ raise the timeout on the server rather than narrowing the import:
 ALTER SERVER prod OPTIONS (SET rpc_timeout_secs '120');
 ```
 
-## 5. Query
+## 8. Query
 
 ```sql
 SELECT name, namespace, phase, node
