@@ -79,6 +79,18 @@ type Discovery struct {
 
 	openapiFetches atomic.Uint64
 
+	// seenMu guards seenGroupVersions, and is held only for a map insert or a
+	// length read. Deliberately not schemaMu: that one is held across the
+	// OpenAPI fetch itself, so reporting a statistic under it would let a
+	// stats poll block behind a slow network call.
+	seenMu sync.Mutex
+	// seenGroupVersions is every group-version whose document has been fetched
+	// and parsed successfully, ever. A count of the live schemaCache would be
+	// a gauge, not the counter StatsResponse promises: forgetSchema drops an
+	// entry before a refetch, so a failed refresh would make the reported
+	// number go backwards.
+	seenGroupVersions map[schema.GroupVersion]struct{}
+
 	mu    sync.RWMutex
 	cache map[schema.GroupVersion]resourceCacheEntry
 
@@ -436,6 +448,12 @@ func (d *Discovery) schemaFor(gv schema.GroupVersion) (map[schema.GroupVersionKi
 		return nil, fmt.Errorf("openapi: parse schema for %s: %w", gv.String(), err)
 	}
 	d.openapiFetches.Add(1)
+	d.seenMu.Lock()
+	if d.seenGroupVersions == nil {
+		d.seenGroupVersions = make(map[schema.GroupVersion]struct{})
+	}
+	d.seenGroupVersions[gv] = struct{}{}
+	d.seenMu.Unlock()
 	d.log.Info("openapi_fetch",
 		slog.String("group_version", gv.String()),
 		slog.Int("bytes", len(raw)),
@@ -460,11 +478,18 @@ func (d *Discovery) OpenAPIFetches() uint64 {
 	return d.openapiFetches.Load()
 }
 
-// OpenAPIGroupVersions reports the number of distinct group-versions currently cached.
+// OpenAPIGroupVersions reports how many distinct group-versions have had their
+// OpenAPI document fetched and parsed, counted over the process's lifetime.
+//
+// Monotonic, matching the rest of StatsResponse. The live schemaCache would
+// not be: forgetSchema drops an entry before refetching, so a failed refresh
+// would make a caller see the number fall. Comparing it against
+// OpenAPIFetches is the whole point -- one fetch per group-version rather than
+// one per kind -- and that comparison needs both sides counted the same way.
 func (d *Discovery) OpenAPIGroupVersions() uint64 {
-	d.schemaMu.Lock()
-	defer d.schemaMu.Unlock()
-	return uint64(len(d.schemaCache))
+	d.seenMu.Lock()
+	defer d.seenMu.Unlock()
+	return uint64(len(d.seenGroupVersions))
 }
 
 // AccessReviews reports the total number of SelfSubjectAccessReview calls issued,

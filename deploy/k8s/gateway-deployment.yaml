@@ -91,9 +91,6 @@ spec:
             limits:
               cpu: 500m
               memory: 256Mi
-          # Readiness probe using native Kubernetes gRPC health checking (GA in k8s 1.24+).
-          # The gateway registers standard grpc.health.v1 with service name
-          # "axiom.v1.GatewayService".
           # A TCP probe, not a gRPC one. Kubernetes' built-in gRPC probe dials
           # plaintext and supports no TLS, while this server is TLS-only
           # (grpc.Creds in cmd/gateway/main.go), so a gRPC probe can never
@@ -116,6 +113,14 @@ spec:
         - name: tls
           secret:
             secretName: axiom-gateway-tls
+            # Secret volume files default to 0644, which would leave the
+            # server's private key readable by every UID in the Pod -- the
+            # source file is 0600 for exactly that reason, and the default
+            # would quietly undo it. With fsGroup set, kubelet owns these
+            # files root:65532, so 0440 is the narrowest mode the gateway can
+            # still read. It matters as soon as anything else is injected
+            # alongside it, which is the normal fate of a Deployment.
+            defaultMode: 0440
 ---
 # Service exposing the gateway to Postgres running outside the cluster.
 #

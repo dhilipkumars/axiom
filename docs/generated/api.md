@@ -133,6 +133,30 @@ Operationally it answers "what is this gateway actually doing", which is otherwi
 
 Errors: none beyond transport. Deliberately cheap and side-effect free, so it is safe to poll.
 
+## Enums
+
+### SqlType
+
+SqlType is the Postgres type a discovered column must be declared with. Deliberately narrow: docs/DESIGN.md §5.4 promotes scalars as text and keeps everything structured in jsonb rather than guessing at numeric/date types from an OpenAPI schema that may not constrain them.
+
+| Value | Number | Description |
+|---|---|---|
+| `SQL_TYPE_UNSPECIFIED` | 0 | — |
+| `SQL_TYPE_TEXT` | 1 | — |
+| `SQL_TYPE_JSONB` | 2 | — |
+
+### SubscribeResponse.Type
+
+| Value | Number | Description |
+|---|---|---|
+| `TYPE_UNSPECIFIED` | 0 | — |
+| `TYPE_ADDED` | 1 | Object exists (initial listing) or was created. |
+| `TYPE_MODIFIED` | 2 | Object changed. |
+| `TYPE_DELETED` | 3 | Object was deleted; `object` carries its last known state. |
+| `TYPE_SYNCED` | 4 | The initial listing is complete and the cache is current; `resource_version` is the list's. |
+| `TYPE_BOOKMARK` | 5 | No change; `resource_version` advances the resume point. The API server emits bookmarks only for a caught-up watcher, so on a resumed stream the first BOOKMARK also means "current again". |
+| `TYPE_RESYNC_REQUIRED` | 6 | The requested resource_version is too old (410 Gone). The stream ends after this event; resubscribe without a resource_version. |
+
 ## Messages
 
 ### ColumnSchema

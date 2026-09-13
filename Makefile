@@ -17,6 +17,9 @@ proto:
 	cd proto && $(BUF) lint && $(BUF) generate
 
 proto-check: proto
+	# See docs-check for why --intent-to-add: a newly generated file is
+	# untracked, and `git diff` would not report it.
+	git add --intent-to-add gateway/gen
 	git diff --exit-code -- gateway/gen
 
 ## Gateway (Go)
@@ -65,6 +68,11 @@ docs-generate:
 # touching code must touch docs/" -- that false-positives on every refactor and
 # is satisfied by a whitespace change (docs/PLAN.md Phase 6 Part 2).
 docs-check: docs-generate
+	# --intent-to-add first: `git diff` does not report untracked files, so
+	# without it this passes when the generator emits a page nobody committed,
+	# or when a generated page is deleted from the commit and recreated here.
+	# Both are exactly the drift the gate exists to catch.
+	git add --intent-to-add docs/generated
 	git diff --exit-code -- docs/generated
 
 ## Aggregates

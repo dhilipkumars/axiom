@@ -17,7 +17,7 @@ kubectl apply -f deploy/k8s/gateway-rbac.yaml
 kubectl -n axiom-system create secret generic axiom-gateway-tls \
   --from-file=tls.crt=gateway.crt --from-file=tls.key=gateway.key
 kubectl -n axiom-system create configmap axiom-gateway-config \
-  --from-literal=serve='pods,configmaps,deployments.apps'
+  --from-literal=serve='pods,configmaps,widgets.example.com'
 kubectl apply -f deploy/k8s/gateway-deployment.yaml
 ```
 

@@ -26,7 +26,7 @@ kubectl -n axiom-system create secret generic axiom-gateway-tls \
   --from-file=tls.key=gateway.key
 
 kubectl -n axiom-system create configmap axiom-gateway-config \
-  --from-literal=serve='pods,configmaps,deployments.apps'
+  --from-literal=serve='pods,configmaps,widgets.example.com'
 
 kubectl apply -f deploy/k8s/gateway-deployment.yaml
 ```
@@ -43,8 +43,31 @@ Two things bound what the gateway will serve, and both apply:
   actually permit. Discovery asks the API server which kinds this identity may
   list, so narrowing RBAC narrows what appears in SQL.
 
-Keep the two in step. `-serve` that is wider than RBAC is harmless, just
-ineffective; RBAC wider than `-serve` means privileges nothing uses.
+Keep the two in step. `-serve` wider than RBAC is harmless, just ineffective;
+RBAC wider than `-serve` means privileges nothing uses.
+
+The bundled ClusterRole is a **starting point, not a recommendation**. It
+grants what the end-to-end suite needs: Pods, ConfigMaps, and the suite's own
+example CRD. Serving anything else means granting it as well. To add
+Deployments, which later examples on this site use:
+
+```sh
+kubectl patch clusterrole axiom-gateway-read --type=json -p '[{
+  "op": "add", "path": "/rules/-",
+  "value": {"apiGroups": ["apps"], "resources": ["deployments"],
+            "verbs": ["get", "list", "watch"]}
+}]'
+
+kubectl -n axiom-system create configmap axiom-gateway-config \
+  --from-literal=serve='pods,configmaps,deployments.apps' \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl -n axiom-system rollout restart deploy/axiom-gateway
+```
+
+Grant only the verbs you want available. A kind granted `get`, `list` and
+`watch` is readable and cacheable but not writable, and the generated table
+reflects that.
 
 ## 2. Install the extension into Postgres
 

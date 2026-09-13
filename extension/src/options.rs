@@ -525,4 +525,120 @@ mod tests {
         .to_string();
         assert!(m.contains("no options are accepted"), "{m}");
     }
+
+    // --- the descriptor table is load-bearing, not prose ------------------
+    //
+    // `name` is consumed by check_names, so an option that is not listed is
+    // rejected and one that is listed is accepted. `required` and `default`
+    // are not consumed by anything -- the parsers hard-code both -- so without
+    // these tests the generated reference could claim a default the parser
+    // does not apply and `make docs-check` would still pass. That would make
+    // the cannot-drift guarantee false exactly where a reader most relies on
+    // it. These assert the descriptors against the parsers' real behaviour.
+
+    /// Every option the parser rejects as missing must be marked required, and
+    /// every option marked required must actually be rejected when absent.
+    #[test]
+    fn required_flags_match_the_parsers() {
+        // Omitting each option in turn from an otherwise complete list.
+        let full_server = [
+            ("endpoint", "https://gw:8443"),
+            ("ca_cert", "/ca.crt"),
+            ("rpc_timeout_secs", "5"),
+        ];
+        for doc in SERVER_OPTION_DOCS {
+            let without: Vec<(String, String)> = full_server
+                .iter()
+                .filter(|(k, _)| *k != doc.name)
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect();
+            let rejected = matches!(
+                ServerOptions::parse(&without),
+                Err(OptionsError::Missing(_))
+            );
+            assert_eq!(
+                rejected, doc.required,
+                "SERVER option {:?}: descriptor says required={}, parser says {}",
+                doc.name, doc.required, rejected
+            );
+        }
+
+        // `resource` alone is enough for a built-in kind, which is what makes
+        // every other table option optional.
+        let full_table = [("resource", "pods")];
+        for doc in TABLE_OPTION_DOCS {
+            let without: Vec<(String, String)> = full_table
+                .iter()
+                .filter(|(k, _)| *k != doc.name)
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect();
+            let rejected = matches!(TableOptions::parse(&without), Err(OptionsError::Missing(_)));
+            assert_eq!(
+                rejected, doc.required,
+                "TABLE option {:?}: descriptor says required={}, parser says {}",
+                doc.name, doc.required, rejected
+            );
+        }
+    }
+
+    /// The documented defaults must be the ones the parsers actually apply.
+    ///
+    /// Spelled out per option rather than derived, because a default is a
+    /// value and the descriptor holds a human-readable rendering of it. The
+    /// point is that changing DEFAULT_RPC_TIMEOUT without touching the table
+    /// fails here, which is what makes the reference page trustworthy.
+    #[test]
+    fn documented_defaults_match_the_parsers() {
+        let doc_default = |docs: &'static [OptionDoc], name: &str| -> Option<&'static str> {
+            docs.iter().find(|d| d.name == name).and_then(|d| d.default)
+        };
+
+        let srv = ServerOptions::parse(&o(&[("endpoint", "https://gw:8443")])).unwrap();
+        assert_eq!(srv.rpc_timeout, DEFAULT_RPC_TIMEOUT);
+        assert_eq!(
+            doc_default(SERVER_OPTION_DOCS, "rpc_timeout_secs"),
+            Some(DEFAULT_RPC_TIMEOUT.as_secs().to_string().as_str()),
+            "documented rpc_timeout_secs default does not match DEFAULT_RPC_TIMEOUT"
+        );
+
+        let tbl = TableOptions::parse(&o(&[("resource", "configmaps")])).unwrap();
+        assert_eq!(tbl.cache_mode, CacheMode::default());
+        assert_eq!(
+            doc_default(TABLE_OPTION_DOCS, "cache_mode"),
+            Some("on_demand"),
+            "documented cache_mode default does not match CacheMode::default()"
+        );
+        assert!(
+            CacheMode::parse("on_demand") == Some(CacheMode::default()),
+            "the documented cache_mode default is not a value the parser accepts"
+        );
+        assert!(
+            tbl.resource.namespaced,
+            "documented `namespaced` default of true does not match the parser"
+        );
+    }
+
+    /// Every documented name is accepted, and nothing else is.
+    #[test]
+    fn documented_names_are_exactly_the_accepted_names() {
+        for (catalog, docs) in [
+            (Catalog::Server, SERVER_OPTION_DOCS),
+            (Catalog::Table, TABLE_OPTION_DOCS),
+        ] {
+            for doc in docs {
+                assert!(
+                    check_names(catalog, &o(&[(doc.name, "x")])).is_ok(),
+                    "{catalog:?} option {:?} is documented but not accepted",
+                    doc.name
+                );
+            }
+            assert!(
+                matches!(
+                    check_names(catalog, &o(&[("definitely_not_an_option", "x")])),
+                    Err(OptionsError::Unknown { .. })
+                ),
+                "{catalog:?} accepted an undocumented option"
+            );
+        }
+    }
 }

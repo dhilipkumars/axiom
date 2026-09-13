@@ -65,7 +65,12 @@ compose() {
 
 # stack_dump: print gateway logs and the extension's Postgres log lines.
 stack_dump() {
-  log "gateway logs";                 compose logs --no-color "$E2E_SVC_GATEWAY" 2>/dev/null || true
+  # Through stack_logs, not compose directly: in incluster mode the compose
+  # gateway is scaled to zero, so `compose logs` prints nothing and every
+  # failure dump came back empty. That is the one moment the logs are wanted,
+  # and it cost real time diagnosing a CI failure that had printed a blank
+  # "gateway logs" heading.
+  log "gateway logs";                 stack_logs "$E2E_SVC_GATEWAY" 2>/dev/null || true
   log "postgres logs (axiom lines)";  compose logs --no-color "$E2E_SVC_POSTGRES" 2>/dev/null | grep -i axiom || true
 }
 

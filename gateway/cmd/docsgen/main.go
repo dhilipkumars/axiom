@@ -146,6 +146,23 @@ func genAPI(root string) ([]byte, error) {
 		}
 	}
 
+	if len(pf.Enums) > 0 {
+		w.WriteString("## Enums\n\n")
+		enums := append([]enumDef(nil), pf.Enums...)
+		sort.Slice(enums, func(i, j int) bool { return enums[i].Name < enums[j].Name })
+		for _, e := range enums {
+			fmt.Fprintf(w, "### %s\n\n", e.Name)
+			if d := para(e.Doc); d != "" {
+				fmt.Fprintf(w, "%s\n\n", d)
+			}
+			fmt.Fprintf(w, "| Value | Number | Description |\n|---|---|---|\n")
+			for _, v := range e.Values {
+				fmt.Fprintf(w, "| `%s` | %s | %s |\n", v.Name, v.Num, cell(para(v.Doc)))
+			}
+			w.WriteString("\n")
+		}
+	}
+
 	w.WriteString("## Messages\n\n")
 	msgs := append([]messageDef(nil), pf.Messages...)
 	sort.Slice(msgs, func(i, j int) bool { return msgs[i].Name < msgs[j].Name })

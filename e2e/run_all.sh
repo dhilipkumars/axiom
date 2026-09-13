@@ -70,11 +70,22 @@ fi
 t0=$SECONDS
 kind_up
 # Side-load the gateway image here rather than letting the first gate pay for
-# it: every gate deploys the gateway in-cluster, the load costs 20-40s, and
-# attributing it to one arbitrary gate makes the timing summary misleading.
-# Gates still call it themselves (it no-ops when the node has the image), so
-# running one standalone keeps working.
-[[ "${E2E_GATEWAY_MODE:-incluster}" == "compose" ]] || kind_load_gateway_image
+# it: every gate that uses a cluster deploys the gateway in-cluster, the load
+# costs 20-40s, and attributing it to one arbitrary gate makes the timing
+# summary misleading. Gates still call it themselves (it no-ops when the node
+# already has the image), so running one standalone keeps working.
+#
+# Not conditioned on E2E_GATEWAY_MODE: sourcing lib/stack.sh above already
+# defaulted that to "compose" for this process, since each gate sets it for
+# itself before its own source. Testing it here would therefore always skip.
+# Condition on whether any selected gate needs a cluster instead -- ping is the
+# only one that does not.
+for _g in "${GATES[@]}"; do
+  if [[ "$_g" != "ping" ]]; then
+    kind_load_gateway_image
+    break
+  fi
+done
 cluster_secs=$(( SECONDS - t0 ))
 log "cluster ready in $(hms "$cluster_secs")"
 

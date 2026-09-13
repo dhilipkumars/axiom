@@ -111,27 +111,37 @@ kind_gateway_endpoint() {
 # does not change between gates.
 kind_load_gateway_image() {
   local image="${1:-axiom-gateway:latest}" node="${E2E_KIND_CLUSTER}-control-plane"
+  local stamp="/etc/axiom-loaded-image-id"
   docker image inspect "$image" >/dev/null 2>&1 \
     || fail "image $image is not built; run 'docker compose -f $E2E_COMPOSE_FILE build gateway' first"
-  # Skip when the node already has this exact image. A load costs 20-40s, the
-  # suite runs six gates, and the image does not change between them. Compare
-  # by image ID, not tag: a rebuilt image keeps the tag but changes the ID, and
-  # serving a stale binary would be worse than the time saved.
-  # `|| true` on both: under `set -e` a command substitution that exits
-  # non-zero aborts the assignment and takes the whole gate with it, with no
-  # error message. grep exits 1 when the image is simply not there yet, which
-  # is the normal first-run case.
+
+  # Skip when the node already has this exact build. Compare by the *docker*
+  # image ID recorded at load time, not by anything containerd reports:
+  # `kind load` re-digests the image on the way in, so the containerd image ID
+  # is never equal to the docker one and a comparison between them can only
+  # ever say "absent". That is what the previous version of this check did,
+  # which meant every gate reloaded and the skip was decorative.
+  #
+  # A stamp file on the node says exactly what is wanted -- "this node holds
+  # the image built from this docker image ID" -- and a rebuilt image changes
+  # the ID, so a stale binary can never be served.
+  #
+  # `|| true` on the substitutions: under `set -e` a command substitution that
+  # exits non-zero aborts the assignment and takes the whole gate with it, with
+  # no error message, and both of these legitimately fail on a first run.
   local want have
   want="$(docker image inspect "$image" --format '{{.Id}}' 2>/dev/null || true)"
-  have="$(docker exec "$node" crictl inspecti "$image" 2>/dev/null \
-            | grep -o 'sha256:[0-9a-f]\{64\}' | head -1 || true)"
+  have="$(docker exec "$node" cat "$stamp" 2>/dev/null || true)"
   if [[ -n "$want" && "$want" == "$have" ]]; then
-    log "$image already present in $E2E_KIND_CLUSTER, skipping load"
+    log "$image already loaded in $E2E_KIND_CLUSTER, skipping"
     return 0
   fi
+
   log "loading $image into kind cluster $E2E_KIND_CLUSTER"
   kind load docker-image "$image" --name "$E2E_KIND_CLUSTER" >/dev/null \
     || fail "kind load docker-image $image"
+  # Written only after a successful load, so an interrupted one reloads.
+  docker exec "$node" sh -c "printf '%s' '$want' > $stamp" >/dev/null 2>&1 || true
 }
 
 # kind_gateway_tls_secret: publish the compose-generated CA and server cert as a

@@ -218,8 +218,16 @@ func TestStatsHandler(t *testing.T) {
 		go func() {
 			_ = subSrv.Subscribe(&axiomv1.SubscribeRequest{Gvk: podGVK, Namespace: "default", ResourceVersion: "7"}, &recorder{ctx: subCtx2, events: rec2.events})
 		}()
-		// Cancel immediately after starting
-		time.Sleep(10 * time.Millisecond)
+		// Wait for the goroutine to have actually entered Subscribe before
+		// cancelling. A fixed sleep does not establish that: on a loaded
+		// runner the goroutine may not have run at all yet, and the assertions
+		// below would intermittently see 1 instead of 2. Poll the counter the
+		// test is about, with a deadline, so the failure is a timeout that
+		// says what was being waited for rather than a flake.
+		waitFor(t, "SubscribeCalls to reach 2", func() bool {
+			r, err := subSrv.Stats(ctx, &axiomv1.StatsRequest{})
+			return err == nil && r.GetSubscribeCalls() == 2
+		})
 		cancel2()
 
 		resp2, err := subSrv.Stats(ctx, &axiomv1.StatsRequest{})
@@ -233,4 +241,19 @@ func TestStatsHandler(t *testing.T) {
 			t.Errorf("SubscribeListCalls = %d, want 1 (should NOT increment on resumed stream)", resp2.GetSubscribeListCalls())
 		}
 	})
+}
+
+// waitFor polls cond until it holds or the deadline passes, so a test waits on
+// the condition it means rather than on a duration that happens to be long
+// enough on the machine it was written on.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out after 5s waiting for %s", what)
 }
