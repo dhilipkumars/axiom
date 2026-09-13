@@ -2,7 +2,7 @@
 
 Companion to [DESIGN.md](./DESIGN.md) §7, which sketched this as a placeholder.
 This document settles it, because the choice constrains both remaining phases:
-Phase 6 implements it, and Phase 7 (multi-cluster) inherits whatever shape it
+Phase 7 implements it, and Phase 8 (multi-cluster) inherits whatever shape it
 takes.
 
 The question is narrow but consequential: **when a SQL user queries a foreign
@@ -21,13 +21,13 @@ the ServiceAccount's own RBAC. That is the *gateway's* least privilege. It does
 nothing for the *caller's*: two Postgres roles querying the same table get
 identical results and identical write powers, whoever they are.
 
-So the gap is per-caller scoping, and RULES.md §3 names it precisely — Phase 6
+So the gap is per-caller scoping, and RULES.md §3 names it precisely — Phase 7
 is "add the per-caller layer on top of a gateway that was already
 least-privilege from Phase 0."
 
 ## 2. Trust boundaries
 
-| Boundary | Today | Phase 6 |
+| Boundary | Today | Phase 7 |
 |---|---|---|
 | SQL user → Postgres | Postgres roles and `pg_hba` | unchanged |
 | Postgres → gateway | TLS, server-authenticated only | caller identity established |
@@ -196,7 +196,7 @@ failure is invisible:
   tables only**, never `USAGE ON FOREIGN SERVER`;
 - with that split, a role can query normally and cannot touch its own mapping.
 
-Phase 6 should also refuse to start, or warn loudly, when a role holds both
+Phase 7 should also refuse to start, or warn loudly, when a role holds both
 `USAGE` on a server and a mapping carrying an identity — the configuration is
 indistinguishable from an escalation waiting to happen.
 
@@ -310,7 +310,7 @@ C2 applies to it too.
 gateway, but a GUC holds one value and pgrx defines GUCs at `_PG_init`, so
 per-server GUC names are not available. A single superuser-only GUC holding a
 map — `axiom.instance_tokens = 'prod=…,staging=…'` — is workable and dump-safe
-but inelegant. Settle before Phase 7.
+but inelegant. Settle before Phase 8.
 
 **Q2. Cache and caller.** Per C6. The tension is sharper than "pick a tier":
 Kubernetes authorization is per-object and dynamic, so a genuinely shared cache
@@ -354,6 +354,6 @@ should be tested rather than reasoned about.
 
 ## 10. What this means for multi-cluster
 
-Phase 7 adds a second `CREATE SERVER`, a second `CREATE USER MAPPING` per role,
+Phase 8 adds a second `CREATE SERVER`, a second `CREATE USER MAPPING` per role,
 and a second instance token. Only Q1 stands between this design and that being
-mechanical — which is the reason Phase 6 was moved ahead of Phase 7.
+mechanical — which is the reason auth was moved ahead of multi-cluster.

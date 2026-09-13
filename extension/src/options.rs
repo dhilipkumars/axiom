@@ -111,40 +111,136 @@ impl fmt::Display for OptionsError {
 
 impl std::error::Error for OptionsError {}
 
-const SERVER_OPTIONS: &[&str] = &["endpoint", "ca_cert", "rpc_timeout_secs"];
-const TABLE_OPTIONS: &[&str] = &[
-    "resource",
-    "group",
-    "version",
-    "kind",
-    "namespaced",
-    "writable",
-    "cache_mode",
+/// One accepted option: what the validator checks names against, and what
+/// `docs/generated/fdw-options.md` is generated from.
+///
+/// The two uses are deliberately the same table. A reference page maintained
+/// alongside the allowlist drifts the first time an option is added or
+/// removed and nobody notices; one generated from the allowlist the validator
+/// itself consults cannot. `make docs-generate` reads the literals below and
+/// CI fails on an uncommitted diff (docs/PLAN.md Phase 6 Part 2), so the
+/// enforcement is mechanical rather than a review convention.
+///
+/// Keep the fields as plain literals. The generator parses this source rather
+/// than linking the crate, because the crate is a pgrx `cdylib` that cannot be
+/// built or run outside a Postgres build, and it fails loudly rather than
+/// emitting a partial page if the shape here stops matching.
+pub struct OptionDoc {
+    /// Option name as written in `OPTIONS (...)`.
+    pub name: &'static str,
+    /// Whether the statement is rejected when it is absent.
+    pub required: bool,
+    /// Value used when it is absent, or `None` when there is no default.
+    pub default: Option<&'static str>,
+    /// One line, in the voice of the error the validator would raise.
+    pub summary: &'static str,
+}
+
+/// `CREATE SERVER ... OPTIONS` — how to reach a gateway.
+pub const SERVER_OPTION_DOCS: &[OptionDoc] = &[
+    OptionDoc {
+        name: "endpoint",
+        required: true,
+        default: None,
+        summary: "gateway address as an https URL, e.g. https://axiom-gateway:8443; \
+                  plaintext is refused because the connection carries cluster data",
+    },
+    OptionDoc {
+        name: "ca_cert",
+        required: false,
+        default: Some("the host trust store"),
+        summary: "path, readable by the Postgres server process, to the PEM CA bundle \
+                  that signs the gateway certificate",
+    },
+    OptionDoc {
+        name: "rpc_timeout_secs",
+        required: false,
+        default: Some("30"),
+        summary: "per-RPC deadline in whole seconds, greater than zero; a whole-cluster \
+                  IMPORT FOREIGN SCHEMA can need more than the default",
+    },
 ];
+
+/// `CREATE FOREIGN TABLE ... OPTIONS` — which kind a table maps to.
+pub const TABLE_OPTION_DOCS: &[OptionDoc] = &[
+    OptionDoc {
+        name: "resource",
+        required: true,
+        default: None,
+        summary: "plural resource name, e.g. pods; sufficient on its own for the \
+                  built-in kinds",
+    },
+    OptionDoc {
+        name: "group",
+        required: false,
+        default: Some("\"\" (the core API group)"),
+        summary: "API group of the kind, e.g. apps or example.com",
+    },
+    OptionDoc {
+        name: "version",
+        required: false,
+        default: None,
+        summary: "API version, e.g. v1; required together with kind for any kind that \
+                  is not built in",
+    },
+    OptionDoc {
+        name: "kind",
+        required: false,
+        default: None,
+        summary: "singular CamelCase kind, e.g. Widget; required together with version \
+                  for any kind that is not built in",
+    },
+    OptionDoc {
+        name: "namespaced",
+        required: false,
+        default: Some("true"),
+        summary: "whether the kind is namespaced; false makes the namespace column \
+                  meaningless and it is omitted from generated DDL",
+    },
+    OptionDoc {
+        name: "writable",
+        required: false,
+        default: Some("false for built-in read-only kinds, true otherwise"),
+        summary: "whether INSERT, UPDATE and DELETE are offered; cannot be turned on \
+                  for kinds the extension keeps read-only, such as Pods",
+    },
+    OptionDoc {
+        name: "cache_mode",
+        required: false,
+        default: Some("on_demand"),
+        summary: "on_demand serves every scan by RPC; watch serves scans from the \
+                  watch-driven cache and starts a subscription for the kind",
+    },
+];
+
 const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
-fn allowed(catalog: Catalog) -> String {
-    let names: &[&str] = match catalog {
-        Catalog::Server => SERVER_OPTIONS,
-        Catalog::Table => TABLE_OPTIONS,
+/// The options accepted for `catalog`. Wrapper and user mapping accept none:
+/// the wrapper carries no configuration, and a user mapping will only start
+/// carrying one in Phase 7 (docs/AUTH.md).
+fn option_docs(catalog: Catalog) -> &'static [OptionDoc] {
+    match catalog {
+        Catalog::Server => SERVER_OPTION_DOCS,
+        Catalog::Table => TABLE_OPTION_DOCS,
         Catalog::Wrapper | Catalog::UserMapping => &[],
-    };
-    if names.is_empty() {
+    }
+}
+
+fn allowed(catalog: Catalog) -> String {
+    let docs = option_docs(catalog);
+    if docs.is_empty() {
         "no options are accepted".to_owned()
     } else {
+        let names: Vec<&str> = docs.iter().map(|d| d.name).collect();
         format!("valid options are {}", names.join(", "))
     }
 }
 
 /// Checks that every option name is allowed for `catalog` and none repeats.
 fn check_names(catalog: Catalog, opts: &[(String, String)]) -> Result<(), OptionsError> {
-    let names: &[&str] = match catalog {
-        Catalog::Server => SERVER_OPTIONS,
-        Catalog::Table => TABLE_OPTIONS,
-        Catalog::Wrapper | Catalog::UserMapping => &[],
-    };
+    let docs = option_docs(catalog);
     for (i, (k, _)) in opts.iter().enumerate() {
-        if !names.contains(&k.as_str()) {
+        if !docs.iter().any(|d| d.name == k.as_str()) {
             return Err(OptionsError::Unknown {
                 catalog,
                 name: k.clone(),
@@ -258,7 +354,7 @@ impl TableOptions {
 
 /// Validates an option list for `catalog` the way `CREATE ...` DDL needs:
 /// names must be known and unique, and values must parse. Wrapper and user
-/// mapping accept no options in Phase 1 (user mappings arrive in Phase 6).
+/// mapping accept no options in Phase 1 (user mappings arrive in Phase 7).
 pub fn validate(catalog: Catalog, opts: &[(String, String)]) -> Result<(), OptionsError> {
     match catalog {
         Catalog::Server => ServerOptions::parse(opts).map(|_| ()),
@@ -428,5 +524,121 @@ mod tests {
         }
         .to_string();
         assert!(m.contains("no options are accepted"), "{m}");
+    }
+
+    // --- the descriptor table is load-bearing, not prose ------------------
+    //
+    // `name` is consumed by check_names, so an option that is not listed is
+    // rejected and one that is listed is accepted. `required` and `default`
+    // are not consumed by anything -- the parsers hard-code both -- so without
+    // these tests the generated reference could claim a default the parser
+    // does not apply and `make docs-check` would still pass. That would make
+    // the cannot-drift guarantee false exactly where a reader most relies on
+    // it. These assert the descriptors against the parsers' real behaviour.
+
+    /// Every option the parser rejects as missing must be marked required, and
+    /// every option marked required must actually be rejected when absent.
+    #[test]
+    fn required_flags_match_the_parsers() {
+        // Omitting each option in turn from an otherwise complete list.
+        let full_server = [
+            ("endpoint", "https://gw:8443"),
+            ("ca_cert", "/ca.crt"),
+            ("rpc_timeout_secs", "5"),
+        ];
+        for doc in SERVER_OPTION_DOCS {
+            let without: Vec<(String, String)> = full_server
+                .iter()
+                .filter(|(k, _)| *k != doc.name)
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect();
+            let rejected = matches!(
+                ServerOptions::parse(&without),
+                Err(OptionsError::Missing(_))
+            );
+            assert_eq!(
+                rejected, doc.required,
+                "SERVER option {:?}: descriptor says required={}, parser says {}",
+                doc.name, doc.required, rejected
+            );
+        }
+
+        // `resource` alone is enough for a built-in kind, which is what makes
+        // every other table option optional.
+        let full_table = [("resource", "pods")];
+        for doc in TABLE_OPTION_DOCS {
+            let without: Vec<(String, String)> = full_table
+                .iter()
+                .filter(|(k, _)| *k != doc.name)
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect();
+            let rejected = matches!(TableOptions::parse(&without), Err(OptionsError::Missing(_)));
+            assert_eq!(
+                rejected, doc.required,
+                "TABLE option {:?}: descriptor says required={}, parser says {}",
+                doc.name, doc.required, rejected
+            );
+        }
+    }
+
+    /// The documented defaults must be the ones the parsers actually apply.
+    ///
+    /// Spelled out per option rather than derived, because a default is a
+    /// value and the descriptor holds a human-readable rendering of it. The
+    /// point is that changing `DEFAULT_RPC_TIMEOUT` without touching the table
+    /// fails here, which is what makes the reference page trustworthy.
+    #[test]
+    fn documented_defaults_match_the_parsers() {
+        let doc_default = |docs: &'static [OptionDoc], name: &str| -> Option<&'static str> {
+            docs.iter().find(|d| d.name == name).and_then(|d| d.default)
+        };
+
+        let srv = ServerOptions::parse(&o(&[("endpoint", "https://gw:8443")])).unwrap();
+        assert_eq!(srv.rpc_timeout, DEFAULT_RPC_TIMEOUT);
+        assert_eq!(
+            doc_default(SERVER_OPTION_DOCS, "rpc_timeout_secs"),
+            Some(DEFAULT_RPC_TIMEOUT.as_secs().to_string().as_str()),
+            "documented rpc_timeout_secs default does not match DEFAULT_RPC_TIMEOUT"
+        );
+
+        let tbl = TableOptions::parse(&o(&[("resource", "configmaps")])).unwrap();
+        assert_eq!(tbl.cache_mode, CacheMode::default());
+        assert_eq!(
+            doc_default(TABLE_OPTION_DOCS, "cache_mode"),
+            Some("on_demand"),
+            "documented cache_mode default does not match CacheMode::default()"
+        );
+        assert!(
+            CacheMode::parse("on_demand") == Some(CacheMode::default()),
+            "the documented cache_mode default is not a value the parser accepts"
+        );
+        assert!(
+            tbl.resource.namespaced,
+            "documented `namespaced` default of true does not match the parser"
+        );
+    }
+
+    /// Every documented name is accepted, and nothing else is.
+    #[test]
+    fn documented_names_are_exactly_the_accepted_names() {
+        for (catalog, docs) in [
+            (Catalog::Server, SERVER_OPTION_DOCS),
+            (Catalog::Table, TABLE_OPTION_DOCS),
+        ] {
+            for doc in docs {
+                assert!(
+                    check_names(catalog, &o(&[(doc.name, "x")])).is_ok(),
+                    "{catalog:?} option {:?} is documented but not accepted",
+                    doc.name
+                );
+            }
+            assert!(
+                matches!(
+                    check_names(catalog, &o(&[("definitely_not_an_option", "x")])),
+                    Err(OptionsError::Unknown { .. })
+                ),
+                "{catalog:?} accepted an undocumented option"
+            );
+        }
     }
 }

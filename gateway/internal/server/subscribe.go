@@ -29,9 +29,10 @@ import (
 // event. A resume sends no SYNCED; the API server's first BOOKMARK tells the
 // caller it is current again.
 //
-// TODO(phase7): de-duplicate upstream watches across subscribers to the same
+// TODO(phase8): de-duplicate upstream watches across subscribers to the same
 // (gvk, namespace) with a shared informer factory (docs/DESIGN.md §8).
 func (s *Server) Subscribe(req *axiomv1.SubscribeRequest, stream axiomv1.GatewayService_SubscribeServer) error {
+	s.subscribeCalls.Add(1)
 	if req == nil {
 		return status.Error(codes.InvalidArgument, "subscribe: request must not be nil")
 	}
@@ -61,6 +62,7 @@ func (s *Server) Subscribe(req *axiomv1.SubscribeRequest, stream axiomv1.Gateway
 	}
 
 	if rv == "" {
+		s.subscribeListCalls.Add(1)
 		list, err := s.k8s.List(ctx, gvk, ns, "")
 		if err != nil {
 			return toGRPC(err)

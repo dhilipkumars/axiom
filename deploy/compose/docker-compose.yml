@@ -6,6 +6,11 @@ services:
   certs:
     image: alpine/openssl:3.3.3
     entrypoint: ["/bin/sh", "/gen.sh"]
+    # The kind node name is part of the certificate's SANs: Postgres reaches an
+    # in-cluster gateway through the node's NodePort, so the name it dials must
+    # be on the certificate.
+    environment:
+      E2E_KIND_CLUSTER: ${E2E_KIND_CLUSTER:-axiom-e2e}
     volumes:
       - certs:/certs
       - ./certs/gen.sh:/gen.sh:ro

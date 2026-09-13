@@ -1,6 +1,6 @@
 #!/bin/sh
 # Generates a throwaway CA + gateway server certificate into /certs for the
-# local compose stack. Test-only material, never committed. Phase 6 adds a
+# local compose stack. Test-only material, never committed. Phase 7 adds a
 # client cert here for mTLS.
 #
 # Generation is idempotent on purpose. This runs on every `compose up`, and
@@ -39,7 +39,17 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 
   -subj "/CN=axiom-dev-ca" -keyout ca.key -out ca.crt >/dev/null 2>&1
 openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
   -subj "/CN=gateway" -keyout gateway.key -out gateway.csr >/dev/null 2>&1
-printf 'subjectAltName=DNS:gateway,DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n' > san.cnf
+# The gateway is reached under several names depending on how it is deployed,
+# and rustls verifies the SAN against whatever the client dialled:
+#   gateway                      compose service name (the compose stack)
+#   axiom-gateway.axiom-system…  in-cluster Service DNS (Phase 6)
+#   ${E2E_KIND_CLUSTER}-control-plane  the kind node, which is how Postgres
+#                                reaches a NodePort from the compose network
+#   localhost / 127.0.0.1        a gateway run directly on the host in dev
+# Missing any of these is a handshake failure, not a warning, so they are all
+# listed rather than discovered.
+node_name="${E2E_KIND_CLUSTER:-axiom-e2e}-control-plane"
+printf 'subjectAltName=DNS:gateway,DNS:axiom-gateway,DNS:axiom-gateway.axiom-system,DNS:axiom-gateway.axiom-system.svc,DNS:axiom-gateway.axiom-system.svc.cluster.local,DNS:%s,DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n' "$node_name" > san.cnf
 openssl x509 -req -in gateway.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 365 \
   -extfile san.cnf -out gateway.crt >/dev/null 2>&1
 rm -f gateway.csr san.cnf ca.srl ca.key

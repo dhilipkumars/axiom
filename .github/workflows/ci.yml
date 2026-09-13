@@ -24,6 +24,30 @@ jobs:
         with: { setup_only: true }
       - run: make proto-check BUF=buf
 
+  docs:
+    name: generated docs drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: gateway/go.mod }
+      # Regenerate and fail on a difference, the same shape as proto-check.
+      # This catches a .proto comment, an FDW option or a column rule changed
+      # without the reference page being regenerated. It deliberately does not
+      # police the hand-written guides: a rule that every code change must
+      # touch docs/ false-positives on refactors and is satisfied by a
+      # whitespace edit (docs/PLAN.md Phase 6 Part 2).
+      - run: make docs-check
+      # Build the site too. Without this, a broken internal link or an invalid
+      # mkdocs.yml merges cleanly and is only discovered when the Pages deploy
+      # on main fails -- after the fact, and on someone else's push. The
+      # version is pinned to the one the pages workflow uses.
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install mkdocs-material==9.5.49
+      # --strict comes from mkdocs.yml, so a warning is a failure.
+      - run: mkdocs build --site-dir /tmp/site
+
   gateway-unit:
     name: gateway unit tests + lint + vuln scan
     runs-on: ubuntu-latest

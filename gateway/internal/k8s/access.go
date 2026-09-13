@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	authv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -42,8 +43,16 @@ type AccessChecker interface {
 type SelfAccess struct {
 	client authv1client.SelfSubjectAccessReviewInterface
 
+	reviews atomic.Uint64
+
 	mu     sync.Mutex
 	cached map[schema.GroupVersionResource]bool
+}
+
+// AccessReviews reports the number of SelfSubjectAccessReview calls issued to the
+// API server so far.
+func (s *SelfAccess) AccessReviews() uint64 {
+	return s.reviews.Load()
 }
 
 // NewSelfAccess builds an AccessChecker over the authorization API.
@@ -75,6 +84,7 @@ func (s *SelfAccess) CanList(ctx context.Context, gvr schema.GroupVersionResourc
 			},
 		},
 	}
+	s.reviews.Add(1)
 	got, err := s.client.Create(ctx, review, metav1.CreateOptions{})
 	if err != nil {
 		return false, fmt.Errorf("access review for %s: %w", gvr.String(), err)

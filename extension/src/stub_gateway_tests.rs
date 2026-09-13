@@ -24,7 +24,7 @@ use crate::proto::v1::gateway_service_server::{GatewayService, GatewayServiceSer
 use crate::proto::v1::subscribe_response::Type as EvType;
 use crate::proto::v1::{
     ColumnSchema, DiscoverSchemaRequest, DiscoverSchemaResponse, GroupVersionKind, KindSchema,
-    ListKindsRequest, ListKindsResponse, SqlType,
+    ListKindsRequest, ListKindsResponse, SqlType, StatsRequest, StatsResponse,
 };
 use crate::proto::v1::{
     CreateRequest, CreateResponse, DeleteRequest, DeleteResponse, GetRequest, GetResponse,
@@ -371,6 +371,19 @@ impl GatewayService for Stub {
             .ok_or_else(|| Status::invalid_argument(format!("unsupported kind: {}", gvk.kind)))?;
         Ok(Response::new(DiscoverSchemaResponse {
             schema: Some(schema),
+        }))
+    }
+
+    /// Counters for the stub. It reports the two it actually tracks; the rest
+    /// stay zero, which is honest for a stub that never does that work.
+    /// `started_at_unix_seconds` is 0 because the stub has no meaningful
+    /// process start to report.
+    async fn stats(&self, _req: Request<StatsRequest>) -> Result<Response<StatsResponse>, Status> {
+        Ok(Response::new(StatsResponse {
+            started_at_unix_seconds: 0,
+            list_calls: self.0.list_calls.load(Ordering::SeqCst) as u64,
+            subscribe_calls: self.0.subscribe_calls.load(Ordering::SeqCst) as u64,
+            ..Default::default()
         }))
     }
 

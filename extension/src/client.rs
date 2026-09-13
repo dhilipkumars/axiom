@@ -17,7 +17,7 @@ use crate::options::ServerOptions;
 use crate::proto::v1::gateway_service_client::GatewayServiceClient;
 use crate::proto::v1::{
     CreateRequest, DeleteRequest, GroupVersionKind, KindSchema, ListKindsRequest, ListRequest,
-    UpdateRequest,
+    StatsRequest, StatsResponse, UpdateRequest,
 };
 use crate::quals::Filter;
 use crate::resource::Resource;
@@ -280,6 +280,19 @@ pub fn list_kinds(
         plurals: plurals.to_vec(),
     };
     call(server, |mut c| async move { c.list_kinds(req).await }).map(|resp| resp.kinds)
+}
+
+/// Fetches one gateway's counters.
+///
+/// Cheap and side-effect free on the gateway, so it is safe to poll. Counters
+/// are per gateway *process* and reset when it restarts, which is what makes
+/// "since you came back, how much work have you done" expressible — see the
+/// `Stats` contract in axiom.proto.
+pub fn stats(server: &ServerOptions) -> Result<StatsResponse, ClientError> {
+    call(
+        server,
+        |mut c| async move { c.stats(StatsRequest {}).await },
+    )
 }
 
 /// Deletes one object by identity.

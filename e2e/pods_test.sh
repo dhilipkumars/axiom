@@ -7,16 +7,20 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Must precede the source: stack.sh resolves the gateway endpoint from it.
+E2E_GATEWAY_MODE=incluster
+
 source "$here/lib/stack.sh"
 source "$here/lib/kind.sh"
 
 # Append the kind overlay to whatever the caller layered (e.g. docker-compose.dev.yml).
-E2E_COMPOSE_OVERLAYS="${E2E_COMPOSE_OVERLAYS:-} $E2E_ROOT/deploy/compose/docker-compose.kind.yml"
+E2E_COMPOSE_OVERLAYS="${E2E_COMPOSE_OVERLAYS:-} $E2E_ROOT/deploy/compose/docker-compose.kind.yml $E2E_ROOT/deploy/compose/docker-compose.incluster.yml"
 NS="axiom-e2e"
 
 kind_up
 e2e_on_teardown kind_down
 stack_up
+kind_deploy_gateway "pods,configmaps"
 
 log "applying fixture pods and waiting for Ready"
 kind_apply "$here/fixtures/pods.yaml"
@@ -69,12 +73,47 @@ can_i() { kubectl_e2e --as="system:serviceaccount:$E2E_GATEWAY_SA_NS:$E2E_GATEWA
 [[ "$(can_i list pods)" == "yes" ]]   || fail "gateway SA cannot list pods"
 [[ "$(can_i get pods)" == "yes" ]]    || fail "gateway SA cannot get pods"
 
+log "the gateway runs on ambient in-cluster credentials, not a kubeconfig"
+# Phase 6 Part 1: rest.InClusterConfig() had never executed before this phase.
+# The scans above already prove the gateway can reach the API server; what is
+# left to prove is *which* credential it used, and that is a property of the
+# Pod rather than of any response. Read with jsonpath, not jq, to avoid adding
+# a dependency the rest of the suite does not have.
+gw_pod="$(kubectl_e2e -n "$E2E_GATEWAY_SA_NS" get pod -l app.kubernetes.io/name=axiom-gateway \
+            -o jsonpath='{.items[0].metadata.name}')"
+[[ -n "$gw_pod" ]] || fail "no gateway pod found"
+gwjp() { kubectl_e2e -n "$E2E_GATEWAY_SA_NS" get pod "$gw_pod" -o jsonpath="$1" 2>/dev/null || true; }
+
+# No -kubeconfig flag: k8s.Config only falls back to rest.InClusterConfig() when
+# that flag is empty, so its absence is precisely what selects the in-cluster
+# path. Asserting it keeps a well-meant "just pass a kubeconfig" fix from
+# silently retiring the code path this phase exists to exercise.
+[[ "$(gwjp '{.spec.containers[0].args}')" != *kubeconfig* ]] \
+  || fail "gateway was started with -kubeconfig; the in-cluster path is not exercised"
+# ...and no kubeconfig reached it by another route either.
+[[ "$(gwjp '{.spec.volumes[*].name}')" != *kubeconfig* ]] \
+  || fail "a kubeconfig volume is mounted into the gateway pod"
+
+# It runs as the least-privilege ServiceAccount, not default.
+[[ "$(gwjp '{.spec.serviceAccountName}')" == "$E2E_GATEWAY_SA" ]] \
+  || fail "gateway pod does not run as $E2E_GATEWAY_SA"
+
+# The credential is a projected, time-bound token rather than a legacy Secret.
+# A legacy ServiceAccount token never expires and is never rotated; a projected
+# one carries an audience and an expiry, and kubelet rewrites it in place under
+# the running process. Only the latter makes token rotation a real concern, and
+# only the latter is what DESIGN.md assumes.
+exp="$(gwjp '{.spec.volumes[*].projected.sources[*].serviceAccountToken.expirationSeconds}')"
+[[ -n "$exp" ]] \
+  || fail "gateway has no projected ServiceAccount token with an expiry (legacy Secret token?)"
+echo "in-cluster credential: sa=$E2E_GATEWAY_SA, projected token, expirationSeconds=$exp"
+
 log "gateway down: SELECT raises fdw_unable_to_establish_connection, then recovers"
-compose stop "$E2E_SVC_GATEWAY" >/dev/null 2>&1
+kind_stop_gateway
 got="$(psql_axiom "DO \$\$ BEGIN PERFORM count(*) FROM k8s_pods WHERE namespace = '$NS'; RAISE EXCEPTION 'unexpected success';
   EXCEPTION WHEN fdw_unable_to_establish_connection THEN RAISE NOTICE 'caught %', SQLSTATE; END \$\$;" 2>&1 || true)"
 grep -q "caught HV00N" <<<"$got" || fail "expected SQLSTATE HV00N with gateway down, got: $got"
-compose start "$E2E_SVC_GATEWAY" >/dev/null 2>&1
+kind_start_gateway
 deadline=$((SECONDS + 30))
 until got="$(psql_axiom "SELECT count(*) FROM k8s_pods WHERE namespace = '$NS';" 2>/dev/null)" && [[ "$got" == "3" ]]; do
   (( SECONDS < deadline )) || fail "scan did not recover after gateway restart (last: '$got')"

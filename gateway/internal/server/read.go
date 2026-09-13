@@ -100,6 +100,7 @@ func objectToProto(u *unstructured.Unstructured) (*axiomv1.Object, error) {
 // Contract: see axiom.proto. Validates gvk/namespace/name before any cluster
 // call; name is required. Errors are mapped by toGRPC. No side effects.
 func (s *Server) Get(ctx context.Context, req *axiomv1.GetRequest) (*axiomv1.GetResponse, error) {
+	s.getCalls.Add(1)
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "get: request must not be nil")
 	}
@@ -134,6 +135,7 @@ func (s *Server) Get(ctx context.Context, req *axiomv1.GetRequest) (*axiomv1.Get
 // one line per call with the filters applied so pushdown is observable
 // (the Phase 1 E2E asserts on it). No side effects.
 func (s *Server) List(ctx context.Context, req *axiomv1.ListRequest) (*axiomv1.ListResponse, error) {
+	s.listCalls.Add(1)
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "list: request must not be nil")
 	}

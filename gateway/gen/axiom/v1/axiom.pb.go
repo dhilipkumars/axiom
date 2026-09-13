@@ -1432,6 +1432,179 @@ func (x *ListKindsResponse) GetKinds() []*KindSchema {
 	return nil
 }
 
+type StatsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StatsRequest) Reset() {
+	*x = StatsRequest{}
+	mi := &file_axiom_v1_axiom_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StatsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StatsRequest) ProtoMessage() {}
+
+func (x *StatsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_axiom_v1_axiom_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StatsRequest.ProtoReflect.Descriptor instead.
+func (*StatsRequest) Descriptor() ([]byte, []int) {
+	return file_axiom_v1_axiom_proto_rawDescGZIP(), []int{22}
+}
+
+// StatsResponse carries counters for one gateway *process*. Every counter is
+// monotonic within a process lifetime and resets when it restarts;
+// started_at_unix_seconds is how a caller tells a restart from a quiet period.
+type StatsResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Wall-clock time the process started, for detecting a restart.
+	StartedAtUnixSeconds int64 `protobuf:"varint,1,opt,name=started_at_unix_seconds,json=startedAtUnixSeconds,proto3" json:"started_at_unix_seconds,omitempty"`
+	// Unary RPCs served, by kind of call.
+	GetCalls    uint64 `protobuf:"varint,2,opt,name=get_calls,json=getCalls,proto3" json:"get_calls,omitempty"`
+	ListCalls   uint64 `protobuf:"varint,3,opt,name=list_calls,json=listCalls,proto3" json:"list_calls,omitempty"`
+	CreateCalls uint64 `protobuf:"varint,4,opt,name=create_calls,json=createCalls,proto3" json:"create_calls,omitempty"`
+	UpdateCalls uint64 `protobuf:"varint,5,opt,name=update_calls,json=updateCalls,proto3" json:"update_calls,omitempty"`
+	DeleteCalls uint64 `protobuf:"varint,6,opt,name=delete_calls,json=deleteCalls,proto3" json:"delete_calls,omitempty"`
+	// Subscribe streams opened, and how many of those performed a full initial
+	// listing rather than resuming from a bookmark. A resume that relists shows
+	// up here as an increment the caller did not expect.
+	SubscribeCalls     uint64 `protobuf:"varint,7,opt,name=subscribe_calls,json=subscribeCalls,proto3" json:"subscribe_calls,omitempty"`
+	SubscribeListCalls uint64 `protobuf:"varint,8,opt,name=subscribe_list_calls,json=subscribeListCalls,proto3" json:"subscribe_list_calls,omitempty"`
+	// Discovery: OpenAPI documents fetched and parsed, and how many distinct
+	// group-versions those covered. Serving a whole cluster should fetch one
+	// document per group-version, not one per kind.
+	OpenapiFetches       uint64 `protobuf:"varint,9,opt,name=openapi_fetches,json=openapiFetches,proto3" json:"openapi_fetches,omitempty"`
+	OpenapiGroupVersions uint64 `protobuf:"varint,10,opt,name=openapi_group_versions,json=openapiGroupVersions,proto3" json:"openapi_group_versions,omitempty"`
+	// Access reviews issued against the authorization API while deciding which
+	// kinds this gateway may serve.
+	AccessReviews uint64 `protobuf:"varint,11,opt,name=access_reviews,json=accessReviews,proto3" json:"access_reviews,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StatsResponse) Reset() {
+	*x = StatsResponse{}
+	mi := &file_axiom_v1_axiom_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StatsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StatsResponse) ProtoMessage() {}
+
+func (x *StatsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_axiom_v1_axiom_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StatsResponse.ProtoReflect.Descriptor instead.
+func (*StatsResponse) Descriptor() ([]byte, []int) {
+	return file_axiom_v1_axiom_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *StatsResponse) GetStartedAtUnixSeconds() int64 {
+	if x != nil {
+		return x.StartedAtUnixSeconds
+	}
+	return 0
+}
+
+func (x *StatsResponse) GetGetCalls() uint64 {
+	if x != nil {
+		return x.GetCalls
+	}
+	return 0
+}
+
+func (x *StatsResponse) GetListCalls() uint64 {
+	if x != nil {
+		return x.ListCalls
+	}
+	return 0
+}
+
+func (x *StatsResponse) GetCreateCalls() uint64 {
+	if x != nil {
+		return x.CreateCalls
+	}
+	return 0
+}
+
+func (x *StatsResponse) GetUpdateCalls() uint64 {
+	if x != nil {
+		return x.UpdateCalls
+	}
+	return 0
+}
+
+func (x *StatsResponse) GetDeleteCalls() uint64 {
+	if x != nil {
+		return x.DeleteCalls
+	}
+	return 0
+}
+
+func (x *StatsResponse) GetSubscribeCalls() uint64 {
+	if x != nil {
+		return x.SubscribeCalls
+	}
+	return 0
+}
+
+func (x *StatsResponse) GetSubscribeListCalls() uint64 {
+	if x != nil {
+		return x.SubscribeListCalls
+	}
+	return 0
+}
+
+func (x *StatsResponse) GetOpenapiFetches() uint64 {
+	if x != nil {
+		return x.OpenapiFetches
+	}
+	return 0
+}
+
+func (x *StatsResponse) GetOpenapiGroupVersions() uint64 {
+	if x != nil {
+		return x.OpenapiGroupVersions
+	}
+	return 0
+}
+
+func (x *StatsResponse) GetAccessReviews() uint64 {
+	if x != nil {
+		return x.AccessReviews
+	}
+	return 0
+}
+
 var File_axiom_v1_axiom_proto protoreflect.FileDescriptor
 
 const file_axiom_v1_axiom_proto_rawDesc = "" +
@@ -1527,11 +1700,26 @@ const file_axiom_v1_axiom_proto_rawDesc = "" +
 	"\aplurals\x18\x02 \x03(\tR\apluralsB\b\n" +
 	"\x06_group\"?\n" +
 	"\x11ListKindsResponse\x12*\n" +
-	"\x05kinds\x18\x01 \x03(\v2\x14.axiom.v1.KindSchemaR\x05kinds*J\n" +
+	"\x05kinds\x18\x01 \x03(\v2\x14.axiom.v1.KindSchemaR\x05kinds\"\x0e\n" +
+	"\fStatsRequest\"\xcc\x03\n" +
+	"\rStatsResponse\x125\n" +
+	"\x17started_at_unix_seconds\x18\x01 \x01(\x03R\x14startedAtUnixSeconds\x12\x1b\n" +
+	"\tget_calls\x18\x02 \x01(\x04R\bgetCalls\x12\x1d\n" +
+	"\n" +
+	"list_calls\x18\x03 \x01(\x04R\tlistCalls\x12!\n" +
+	"\fcreate_calls\x18\x04 \x01(\x04R\vcreateCalls\x12!\n" +
+	"\fupdate_calls\x18\x05 \x01(\x04R\vupdateCalls\x12!\n" +
+	"\fdelete_calls\x18\x06 \x01(\x04R\vdeleteCalls\x12'\n" +
+	"\x0fsubscribe_calls\x18\a \x01(\x04R\x0esubscribeCalls\x120\n" +
+	"\x14subscribe_list_calls\x18\b \x01(\x04R\x12subscribeListCalls\x12'\n" +
+	"\x0fopenapi_fetches\x18\t \x01(\x04R\x0eopenapiFetches\x124\n" +
+	"\x16openapi_group_versions\x18\n" +
+	" \x01(\x04R\x14openapiGroupVersions\x12%\n" +
+	"\x0eaccess_reviews\x18\v \x01(\x04R\raccessReviews*J\n" +
 	"\aSqlType\x12\x18\n" +
 	"\x14SQL_TYPE_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rSQL_TYPE_TEXT\x10\x01\x12\x12\n" +
-	"\x0eSQL_TYPE_JSONB\x10\x022\xcc\x04\n" +
+	"\x0eSQL_TYPE_JSONB\x10\x022\x86\x05\n" +
 	"\x0eGatewayService\x125\n" +
 	"\x04Ping\x12\x15.axiom.v1.PingRequest\x1a\x16.axiom.v1.PingResponse\x122\n" +
 	"\x03Get\x12\x14.axiom.v1.GetRequest\x1a\x15.axiom.v1.GetResponse\x125\n" +
@@ -1541,7 +1729,8 @@ const file_axiom_v1_axiom_proto_rawDesc = "" +
 	"\x06Delete\x12\x17.axiom.v1.DeleteRequest\x1a\x18.axiom.v1.DeleteResponse\x12F\n" +
 	"\tSubscribe\x12\x1a.axiom.v1.SubscribeRequest\x1a\x1b.axiom.v1.SubscribeResponse0\x01\x12S\n" +
 	"\x0eDiscoverSchema\x12\x1f.axiom.v1.DiscoverSchemaRequest\x1a .axiom.v1.DiscoverSchemaResponse\x12D\n" +
-	"\tListKinds\x12\x1a.axiom.v1.ListKindsRequest\x1a\x1b.axiom.v1.ListKindsResponseB<Z:github.com/dhilipkumars/axiom/gateway/gen/axiom/v1;axiomv1b\x06proto3"
+	"\tListKinds\x12\x1a.axiom.v1.ListKindsRequest\x1a\x1b.axiom.v1.ListKindsResponse\x128\n" +
+	"\x05Stats\x12\x16.axiom.v1.StatsRequest\x1a\x17.axiom.v1.StatsResponseB<Z:github.com/dhilipkumars/axiom/gateway/gen/axiom/v1;axiomv1b\x06proto3"
 
 var (
 	file_axiom_v1_axiom_proto_rawDescOnce sync.Once
@@ -1556,7 +1745,7 @@ func file_axiom_v1_axiom_proto_rawDescGZIP() []byte {
 }
 
 var file_axiom_v1_axiom_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_axiom_v1_axiom_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_axiom_v1_axiom_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
 var file_axiom_v1_axiom_proto_goTypes = []any{
 	(SqlType)(0),                   // 0: axiom.v1.SqlType
 	(SubscribeResponse_Type)(0),    // 1: axiom.v1.SubscribeResponse.Type
@@ -1582,10 +1771,12 @@ var file_axiom_v1_axiom_proto_goTypes = []any{
 	(*DiscoverSchemaResponse)(nil), // 21: axiom.v1.DiscoverSchemaResponse
 	(*ListKindsRequest)(nil),       // 22: axiom.v1.ListKindsRequest
 	(*ListKindsResponse)(nil),      // 23: axiom.v1.ListKindsResponse
-	(*timestamppb.Timestamp)(nil),  // 24: google.protobuf.Timestamp
+	(*StatsRequest)(nil),           // 24: axiom.v1.StatsRequest
+	(*StatsResponse)(nil),          // 25: axiom.v1.StatsResponse
+	(*timestamppb.Timestamp)(nil),  // 26: google.protobuf.Timestamp
 }
 var file_axiom_v1_axiom_proto_depIdxs = []int32{
-	24, // 0: axiom.v1.PingResponse.server_time:type_name -> google.protobuf.Timestamp
+	26, // 0: axiom.v1.PingResponse.server_time:type_name -> google.protobuf.Timestamp
 	4,  // 1: axiom.v1.GetRequest.gvk:type_name -> axiom.v1.GroupVersionKind
 	5,  // 2: axiom.v1.GetResponse.object:type_name -> axiom.v1.Object
 	4,  // 3: axiom.v1.ListRequest.gvk:type_name -> axiom.v1.GroupVersionKind
@@ -1613,17 +1804,19 @@ var file_axiom_v1_axiom_proto_depIdxs = []int32{
 	16, // 25: axiom.v1.GatewayService.Subscribe:input_type -> axiom.v1.SubscribeRequest
 	20, // 26: axiom.v1.GatewayService.DiscoverSchema:input_type -> axiom.v1.DiscoverSchemaRequest
 	22, // 27: axiom.v1.GatewayService.ListKinds:input_type -> axiom.v1.ListKindsRequest
-	3,  // 28: axiom.v1.GatewayService.Ping:output_type -> axiom.v1.PingResponse
-	7,  // 29: axiom.v1.GatewayService.Get:output_type -> axiom.v1.GetResponse
-	9,  // 30: axiom.v1.GatewayService.List:output_type -> axiom.v1.ListResponse
-	11, // 31: axiom.v1.GatewayService.Create:output_type -> axiom.v1.CreateResponse
-	13, // 32: axiom.v1.GatewayService.Update:output_type -> axiom.v1.UpdateResponse
-	15, // 33: axiom.v1.GatewayService.Delete:output_type -> axiom.v1.DeleteResponse
-	17, // 34: axiom.v1.GatewayService.Subscribe:output_type -> axiom.v1.SubscribeResponse
-	21, // 35: axiom.v1.GatewayService.DiscoverSchema:output_type -> axiom.v1.DiscoverSchemaResponse
-	23, // 36: axiom.v1.GatewayService.ListKinds:output_type -> axiom.v1.ListKindsResponse
-	28, // [28:37] is the sub-list for method output_type
-	19, // [19:28] is the sub-list for method input_type
+	24, // 28: axiom.v1.GatewayService.Stats:input_type -> axiom.v1.StatsRequest
+	3,  // 29: axiom.v1.GatewayService.Ping:output_type -> axiom.v1.PingResponse
+	7,  // 30: axiom.v1.GatewayService.Get:output_type -> axiom.v1.GetResponse
+	9,  // 31: axiom.v1.GatewayService.List:output_type -> axiom.v1.ListResponse
+	11, // 32: axiom.v1.GatewayService.Create:output_type -> axiom.v1.CreateResponse
+	13, // 33: axiom.v1.GatewayService.Update:output_type -> axiom.v1.UpdateResponse
+	15, // 34: axiom.v1.GatewayService.Delete:output_type -> axiom.v1.DeleteResponse
+	17, // 35: axiom.v1.GatewayService.Subscribe:output_type -> axiom.v1.SubscribeResponse
+	21, // 36: axiom.v1.GatewayService.DiscoverSchema:output_type -> axiom.v1.DiscoverSchemaResponse
+	23, // 37: axiom.v1.GatewayService.ListKinds:output_type -> axiom.v1.ListKindsResponse
+	25, // 38: axiom.v1.GatewayService.Stats:output_type -> axiom.v1.StatsResponse
+	29, // [29:39] is the sub-list for method output_type
+	19, // [19:29] is the sub-list for method input_type
 	19, // [19:19] is the sub-list for extension type_name
 	19, // [19:19] is the sub-list for extension extendee
 	0,  // [0:19] is the sub-list for field type_name
@@ -1641,7 +1834,7 @@ func file_axiom_v1_axiom_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_axiom_v1_axiom_proto_rawDesc), len(file_axiom_v1_axiom_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   22,
+			NumMessages:   24,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

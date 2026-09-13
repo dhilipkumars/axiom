@@ -7,10 +7,13 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Must precede the source: stack.sh resolves the gateway endpoint from it.
+E2E_GATEWAY_MODE=incluster
+
 source "$here/lib/stack.sh"
 source "$here/lib/kind.sh"
 
-E2E_COMPOSE_OVERLAYS="${E2E_COMPOSE_OVERLAYS:-} $E2E_ROOT/deploy/compose/docker-compose.kind.yml"
+E2E_COMPOSE_OVERLAYS="${E2E_COMPOSE_OVERLAYS:-} $E2E_ROOT/deploy/compose/docker-compose.kind.yml $E2E_ROOT/deploy/compose/docker-compose.incluster.yml"
 NS="axiom-e2e"
 
 kind_up
@@ -35,8 +38,15 @@ wait_sql_names() { # wait_sql_names EXPECTED TIMEOUT
     sleep 1
   done
 }
-list_count() { stack_logs "$E2E_SVC_GATEWAY" | grep -c '"msg":"list".*"gvk":"/v1, Kind=Pod"' || true; }
+# Counters rather than log lines: this gate takes the gateway away and brings it
+# back, and a fresh Pod starts with an empty log. axiom_gateway_stats() asks the
+# process directly, and its counters resetting across a restart is exactly the
+# signal the resume assertions want.
+list_count() { psql_axiom "SELECT list_calls FROM axiom_gateway_stats('kind');"; }
+subscribe_list_count() { psql_axiom "SELECT subscribe_list_calls FROM axiom_gateway_stats('kind');"; }
 run_pod() { kubectl_e2e -n "$NS" run "$1" --image=registry.k8s.io/pause:3.10 --restart=Never >/dev/null; }
+
+kind_deploy_gateway "pods,configmaps"
 
 log "namespace and DDL"
 kubectl_e2e create namespace "$NS" --dry-run=client -o yaml | kubectl_e2e apply -f - >/dev/null
@@ -53,7 +63,7 @@ got="$(sql_names)"; [[ "$got" == "seed-0,seed-1" ]] || fail "warm scan returned 
 wait_state ACTIVE 60
 L0="$(list_count)"
 [[ "$L0" -ge 1 ]] || fail "expected at least one on-demand LIST before the watch was active, got $L0"
-[[ "$(stack_logs "$E2E_SVC_GATEWAY" | grep -c '"msg":"subscribe_list"')" == "1" ]] || fail "expected exactly one subscribe_list"
+[[ "$(subscribe_list_count)" == "1" ]] || fail "expected exactly one subscribe_list, got $(subscribe_list_count)"
 echo "on-demand LISTs so far: $L0"
 
 log "cached scans issue no LIST RPCs"
@@ -69,7 +79,7 @@ wait_sql_names "seed-0,seed-1" 60
 [[ "$(sql_names)" == "$(k8s_names)" ]] || fail "SQL '$(sql_names)' != kubectl '$(k8s_names)'"
 
 log "gateway down: subscription DEGRADED, stale cache still served with a WARNING"
-compose stop "$E2E_SVC_GATEWAY" >/dev/null 2>&1
+kind_stop_gateway
 wait_state DEGRADED 60
 out="$(compose exec -T "$E2E_SVC_POSTGRES" psql -U "$E2E_PG_USER" -d "$E2E_PG_DB" -At -c "SELECT count(*) FROM k8s_pods_live WHERE namespace = '$NS';" 2>&1)"
 grep -q "WARNING:  axiom: serving STALE data" <<<"$out" || fail "no STALE warning on degraded read: $out"
@@ -77,14 +87,20 @@ grep -qx "2" <<<"$out" || fail "stale read did not return the cached rows: $out"
 
 log "a change during the outage is picked up on resume from the bookmark, without a relist"
 run_pod watch-2
-compose start "$E2E_SVC_GATEWAY" >/dev/null 2>&1
+kind_start_gateway
 # The resumed stream is DEGRADED (served stale) until the API server's first
 # BOOKMARK for a caught-up watcher, which kind's apiserver sends within ~1 minute.
 wait_state ACTIVE 180
 wait_sql_names "seed-0,seed-1,watch-2" 60
-[[ "$(list_count)" == "$L0" ]] || fail "resume issued LISTs: $(list_count) != $L0"
-# `compose stop/start` keeps the container log, so the initial listing is still there: exactly one, no relist.
-[[ "$(stack_logs "$E2E_SVC_GATEWAY" | grep -c '"msg":"subscribe_list"')" == "1" ]] || fail "resume caused a relist (subscribe_list count != 1)"
+# Counters restarted with the Pod, so the baseline to compare against is zero,
+# not the pre-outage L0: the question is what this gateway has done since it
+# came back, and the answer must be "no listings of any kind".
+[[ "$(list_count)" == "0" ]] || fail "resume issued on-demand LISTs: list_calls=$(list_count) since restart, want 0"
+# The gateway restarted, so its counters started again from zero. "Has it done
+# a full listing since coming back" is therefore just 0 -- a more direct
+# statement of the property than the old "still exactly 1", and one that only
+# the counters can express now the log is gone with the old Pod.
+[[ "$(subscribe_list_count)" == "0" ]] || fail "resume caused a relist: subscribe_list_calls=$(subscribe_list_count) since restart, want 0"
 stack_logs "$E2E_SVC_GATEWAY" | grep '"msg":"subscribe"' | tail -1 | grep -q '"resource_version":"[0-9]' || fail "reconnect did not carry a resume bookmark"
 [[ "$(sql_names)" == "$(k8s_names)" ]] || fail "after resync SQL '$(sql_names)' != kubectl '$(k8s_names)'"
 

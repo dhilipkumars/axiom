@@ -85,3 +85,201 @@ kind_wait_pods() {
   kubectl_e2e -n "$ns" wait --for=condition=Ready pod --all --timeout="$timeout" >/dev/null \
     || fail "pods in $ns did not become Ready within $timeout"
 }
+
+# --- in-cluster gateway (Phase 6) -------------------------------------------
+#
+# The gateway used to run as a compose container holding a kubeconfig, so
+# rest.InClusterConfig() never executed and no Deployment manifest was ever
+# exercised. These helpers run it the way docs/DESIGN.md §5.1 describes: a
+# Deployment in the cluster it manages, reached from outside over a NodePort.
+#
+# Postgres deliberately stays outside. Axiom exists so a database that cannot
+# join the cluster network can still query it; moving Postgres in would hide the
+# routing and TLS-boundary failures the design is meant to survive.
+
+# NodePort the gateway Service publishes, and the host:port Postgres dials. The
+# compose stack joins kind's Docker network, so it reaches the node by name.
+E2E_GATEWAY_NODEPORT="${E2E_GATEWAY_NODEPORT:-30443}"
+
+# kind_gateway_endpoint: the https URL an out-of-cluster client uses.
+kind_gateway_endpoint() {
+  echo "https://${E2E_KIND_CLUSTER}-control-plane:${E2E_GATEWAY_NODEPORT}"
+}
+
+# kind_load_gateway_image: side-load the locally built image into the cluster.
+# Done once per suite rather than per gate: each load costs 20-40s and the image
+# does not change between gates.
+kind_load_gateway_image() {
+  local image="${1:-axiom-gateway:latest}" node="${E2E_KIND_CLUSTER}-control-plane"
+  local stamp="/etc/axiom-loaded-image-id"
+  docker image inspect "$image" >/dev/null 2>&1 \
+    || fail "image $image is not built; run 'docker compose -f $E2E_COMPOSE_FILE build gateway' first"
+
+  # Skip when the node already has this exact build. Compare by the *docker*
+  # image ID recorded at load time, not by anything containerd reports:
+  # `kind load` re-digests the image on the way in, so the containerd image ID
+  # is never equal to the docker one and a comparison between them can only
+  # ever say "absent". That is what the previous version of this check did,
+  # which meant every gate reloaded and the skip was decorative.
+  #
+  # A stamp file on the node says exactly what is wanted -- "this node holds
+  # the image built from this docker image ID" -- and a rebuilt image changes
+  # the ID, so a stale binary can never be served.
+  #
+  # `|| true` on the substitutions: under `set -e` a command substitution that
+  # exits non-zero aborts the assignment and takes the whole gate with it, with
+  # no error message, and both of these legitimately fail on a first run.
+  local want have
+  want="$(docker image inspect "$image" --format '{{.Id}}' 2>/dev/null || true)"
+  have="$(docker exec "$node" cat "$stamp" 2>/dev/null || true)"
+  if [[ -n "$want" && "$want" == "$have" ]]; then
+    log "$image already loaded in $E2E_KIND_CLUSTER, skipping"
+    return 0
+  fi
+
+  log "loading $image into kind cluster $E2E_KIND_CLUSTER"
+  kind load docker-image "$image" --name "$E2E_KIND_CLUSTER" >/dev/null \
+    || fail "kind load docker-image $image"
+  # Written only after a successful load, so an interrupted one reloads.
+  docker exec "$node" sh -c "printf '%s' '$want' > $stamp" >/dev/null 2>&1 || true
+}
+
+# kind_gateway_tls_secret: publish the compose-generated CA and server cert as a
+# Secret. The same material is used on both sides, so Postgres keeps trusting
+# the gateway across the move; the certificate's SANs already cover the
+# in-cluster Service names and the kind node (deploy/compose/certs/gen.sh).
+kind_gateway_tls_secret() {
+  local vol="axiom_certs" tmp
+  tmp="$(mktemp -d)"
+  # The certs live in a Docker volume, not on the host; copy them out through a
+  # throwaway container rather than duplicating the generation logic.
+  #
+  # The copy is chowned to the invoking user because gen.sh leaves the key as
+  # mode 0600 owned by uid 65532 (the distroless `nonroot` the gateway runs as)
+  # and busybox `cp` carries those bits onto the copy. On Linux that makes the
+  # copy unreadable to whoever runs the gate -- kubectl fails with "permission
+  # denied" and the secret is never created. Docker Desktop's file sharing
+  # remaps ownership on the way out, which is why this only ever failed in CI.
+  #
+  # Chowning rather than chmodding: the key stays 0600, just owned by the user
+  # who needs it, so a private key is never briefly world-readable on disk.
+  docker run --rm -v "$vol":/certs:ro -v "$tmp":/out alpine:3.20 \
+    sh -c "cp /certs/gateway.crt /certs/gateway.key /certs/ca.crt /out/ &&
+           chown $(id -u):$(id -g) /out/gateway.crt /out/gateway.key /out/ca.crt &&
+           chmod 0600 /out/gateway.key" >/dev/null 2>&1 \
+    || fail "could not read certificates from volume $vol (is the stack up?)"
+  # Fail here rather than letting kubectl report it: a secret built from an
+  # unreadable file is the failure this guard exists for.
+  [[ -r "$tmp/gateway.key" && -r "$tmp/gateway.crt" ]] \
+    || fail "copied certificates are not readable as $(id -un) (uid $(id -u)); \
+check ownership in $tmp"
+  kubectl_e2e -n "$E2E_GATEWAY_SA_NS" create secret generic axiom-gateway-tls \
+    --from-file=tls.crt="$tmp/gateway.crt" \
+    --from-file=tls.key="$tmp/gateway.key" \
+    --dry-run=client -o yaml | kubectl_e2e apply -f - >/dev/null \
+    || fail "create secret axiom-gateway-tls"
+  rm -rf "$tmp"
+}
+
+# kind_deploy_gateway [SERVE]: apply the Deployment and wait for it to be ready.
+# SERVE is the --serve allowlist; gates need different values, so it is a
+# ConfigMap rather than being baked into the manifest.
+kind_deploy_gateway() {
+  local serve="${1:-pods,configmaps,widgets.example.com}"
+  # A standalone gate has no suite to have loaded the image for it, and the
+  # load is skipped when the node already has it, so this is safe either way.
+  kind_load_gateway_image
+  kubectl_e2e apply -f "$E2E_ROOT/deploy/k8s/gateway-rbac.yaml" >/dev/null || fail "apply RBAC"
+  kind_gateway_tls_secret
+  kubectl_e2e -n "$E2E_GATEWAY_SA_NS" create configmap axiom-gateway-config \
+    --from-literal=serve="$serve" \
+    --dry-run=client -o yaml | kubectl_e2e apply -f - >/dev/null \
+    || fail "create configmap axiom-gateway-config"
+  log "deploying the gateway in-cluster (serve=$serve)"
+  kubectl_e2e apply -f "$E2E_ROOT/deploy/k8s/gateway-deployment.yaml" >/dev/null \
+    || fail "apply gateway deployment"
+  # A changed ConfigMap does not restart a running Pod, so force a fresh one.
+  # Gates also need a clean process: the gateway caches discovery and access
+  # answers for its lifetime, and those must not leak between gates.
+  kubectl_e2e -n "$E2E_GATEWAY_SA_NS" rollout restart deploy/axiom-gateway >/dev/null 2>&1 || true
+  kubectl_e2e -n "$E2E_GATEWAY_SA_NS" rollout status deploy/axiom-gateway --timeout=120s >/dev/null \
+    || { kubectl_e2e -n "$E2E_GATEWAY_SA_NS" describe pod -l app.kubernetes.io/name=axiom-gateway | tail -30
+         fail "gateway deployment did not become ready"; }
+  kind_wait_gateway_endpoint
+}
+
+# kind_wait_gateway_endpoint: block until the Service has exactly one ready
+# endpoint. `rollout status` returning is not enough on its own: the readiness
+# probe is a TCP check, so it passes the moment the listener is up, and during a
+# replacement the Service can still carry the outgoing Pod. A caller that
+# proceeds then sees its first RPC hang until its deadline.
+kind_wait_gateway_endpoint() {
+  local deadline=$((SECONDS + 90)) n
+  while :; do
+    n="$(kubectl_e2e -n "$E2E_GATEWAY_SA_NS" get endpointslice \
+           -l kubernetes.io/service-name=axiom-gateway \
+           -o jsonpath='{range .items[*]}{range .endpoints[?(@.conditions.ready==true)]}{.addresses[0]}{"\n"}{end}{end}' 2>/dev/null \
+         | grep -c . || true)"
+    [[ "$n" == "1" ]] && break
+    (( SECONDS < deadline )) || fail "gateway Service has $n ready endpoints, want exactly 1"
+    sleep 1
+  done
+  kind_wait_gateway_nodeport
+}
+
+# kind_wait_gateway_nodeport: block until the NodePort actually accepts a
+# connection from the Docker network Postgres is on.
+#
+# A ready endpoint is not the same as a reachable NodePort. kube-proxy programs
+# the node's forwarding rules asynchronously after the EndpointSlice changes,
+# and until it has, a connection to the node port is refused. Under `Recreate`
+# there is no old Pod to carry the traffic in the meantime, so the window is a
+# real outage rather than a brief inconsistency.
+#
+# That window is short enough to miss on a fast machine and long enough to lose
+# on a loaded CI runner, which is exactly how it showed up: every gate passing
+# locally, and the cluster gate failing in CI with `Unavailable: tcp connect
+# error` on the first query after a restart.
+#
+# The probe runs from a throwaway container on kind's network because that is
+# the path Postgres takes. Probing from the host would test a different route,
+# and probing from inside the cluster would not test the NodePort at all.
+kind_wait_gateway_nodeport() {
+  local node="${E2E_KIND_CLUSTER}-control-plane" port="$E2E_GATEWAY_NODEPORT"
+  # One container with an internal retry loop, rather than one per attempt:
+  # `docker run` costs more than the wait usually does.
+  docker run --rm --network kind alpine:3.20 sh -c \
+    "for i in \$(seq 1 60); do nc -z -w 2 $node $port && exit 0; sleep 1; done; exit 1" \
+    >/dev/null 2>&1 \
+    || fail "gateway NodePort $node:$port did not accept connections within 60s"
+}
+
+# kind_gateway_logs: the in-cluster gateway's logs, for assertions that inspect
+# a specific call rather than counting. Counting assertions use
+# axiom_gateway_stats() instead, because a Pod restart starts a fresh log.
+kind_gateway_logs() {
+  kubectl_e2e -n "$E2E_GATEWAY_SA_NS" logs deploy/axiom-gateway --tail=-1 2>/dev/null || true
+}
+
+# kind_restart_gateway: replace the gateway Pod and wait. The in-cluster
+# equivalent of `compose restart gateway`.
+kind_restart_gateway() {
+  kubectl_e2e -n "$E2E_GATEWAY_SA_NS" rollout restart deploy/axiom-gateway >/dev/null \
+    || fail "rollout restart"
+  kubectl_e2e -n "$E2E_GATEWAY_SA_NS" rollout status deploy/axiom-gateway --timeout=120s >/dev/null \
+    || fail "gateway did not come back after restart"
+  kind_wait_gateway_endpoint
+}
+
+# kind_stop_gateway / kind_start_gateway: take the gateway away and bring it
+# back, for the degraded-watch assertions.
+kind_stop_gateway() {
+  kubectl_e2e -n "$E2E_GATEWAY_SA_NS" scale deploy/axiom-gateway --replicas=0 >/dev/null || fail "scale to 0"
+  kubectl_e2e -n "$E2E_GATEWAY_SA_NS" wait --for=delete pod -l app.kubernetes.io/name=axiom-gateway --timeout=60s >/dev/null 2>&1 || true
+}
+kind_start_gateway() {
+  kubectl_e2e -n "$E2E_GATEWAY_SA_NS" scale deploy/axiom-gateway --replicas=1 >/dev/null || fail "scale to 1"
+  kubectl_e2e -n "$E2E_GATEWAY_SA_NS" rollout status deploy/axiom-gateway --timeout=120s >/dev/null \
+    || fail "gateway did not come back"
+  kind_wait_gateway_endpoint
+}

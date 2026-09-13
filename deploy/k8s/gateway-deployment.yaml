@@ -1,0 +1,146 @@
+# Deployment and Service for running the Axiom gateway as an in-cluster
+# workload (docs/PLAN.md Phase 6, docs/RULES.md §3).
+#
+# The gateway acts as the bridge between Postgres (which runs outside the
+# cluster) and the Kubernetes API server. It runs with least privilege:
+# ambient in-cluster credentials via the axiom-gateway ServiceAccount defined
+# in deploy/k8s/gateway-rbac.yaml, non-root execution matching the distroless
+# base image, dropped Linux capabilities, and a read-only root filesystem.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: axiom-gateway
+  namespace: axiom-system
+  labels:
+    app.kubernetes.io/name: axiom-gateway
+    app.kubernetes.io/part-of: axiom
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate. One replica means a rolling update briefly runs
+  # two gateways, and the Service can route to the terminating one -- observed
+  # as a ListKinds that hung until its deadline. Two gateways would also mean
+  # two independent discovery and access caches answering alternate requests,
+  # which is not a state worth supporting for a single-replica workload.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: axiom-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: axiom-gateway
+        app.kubernetes.io/part-of: axiom
+    spec:
+      serviceAccountName: axiom-gateway
+      # Pod-level security context enforcing non-root user execution.
+      # UID 65532 matches the distroless nonroot user configured in gateway/Dockerfile.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: axiom-gateway:latest
+          # The image is built locally and side-loaded into the kind cluster (or
+          # node image cache), never pulled from a remote registry.
+          imagePullPolicy: IfNotPresent
+          # Arguments match gateway/cmd/gateway/main.go.
+          # -kubeconfig is omitted so k8s.Config falls back to rest.InClusterConfig(),
+          # picking up the projected ServiceAccount token mounted by kubelet.
+          # -serve matches docker-compose.kind.yml and bounds offered kinds to match
+          # the ClusterRole in deploy/k8s/gateway-rbac.yaml.
+          args:
+            - -listen
+            - :8443
+            - -tls-cert
+            - /certs/tls.crt
+            - -tls-key
+            - /certs/tls.key
+            - -serve
+            - $(AXIOM_SERVE)
+          env:
+            # Which kinds this gateway offers. Sourced from a ConfigMap because
+            # the E2E gates need different values: most want the narrow Phase
+            # 1-4 set, while the whole-cluster gate wants "*.*" so that RBAC is
+            # the only bound. Baking it into the manifest would mean a second
+            # manifest per gate.
+            - name: AXIOM_SERVE
+              valueFrom:
+                configMapKeyRef:
+                  name: axiom-gateway-config
+                  key: serve
+          ports:
+            - name: grpc
+              containerPort: 8443
+              protocol: TCP
+          # Container-level security context tightening least-privilege constraints (RULES.md §3).
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          # A TCP probe, not a gRPC one. Kubernetes' built-in gRPC probe dials
+          # plaintext and supports no TLS, while this server is TLS-only
+          # (grpc.Creds in cmd/gateway/main.go), so a gRPC probe can never
+          # succeed and the Pod would never become ready. TCP is a weaker
+          # signal but an honest one: main.go constructs the Kubernetes client
+          # and loads TLS material *before* it listens, so an open port does
+          # mean the process got that far. Upgrading to grpc-health-probe, which
+          # understands TLS, needs that binary added to the distroless image.
+          readinessProbe:
+            tcpSocket:
+              port: 8443
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          volumeMounts:
+            # Mount TLS keypair read-only.
+            - name: tls
+              mountPath: /certs
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: axiom-gateway-tls
+            # Secret volume files default to 0644, which would leave the
+            # server's private key readable by every UID in the Pod -- the
+            # source file is 0600 for exactly that reason, and the default
+            # would quietly undo it. With fsGroup set, kubelet owns these
+            # files root:65532, so 0440 is the narrowest mode the gateway can
+            # still read. It matters as soon as anything else is injected
+            # alongside it, which is the normal fate of a Deployment.
+            defaultMode: 0440
+---
+# Service exposing the gateway to Postgres running outside the cluster.
+#
+# Postgres runs outside the Kubernetes cluster and communicates with the gateway
+# over TLS via this NodePort service on static port 30443.
+apiVersion: v1
+kind: Service
+metadata:
+  name: axiom-gateway
+  namespace: axiom-system
+  labels:
+    app.kubernetes.io/name: axiom-gateway
+    app.kubernetes.io/part-of: axiom
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: axiom-gateway
+  ports:
+    - name: grpc
+      port: 8443
+      targetPort: 8443
+      nodePort: 30443
+      protocol: TCP

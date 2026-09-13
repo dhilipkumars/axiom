@@ -1,0 +1,74 @@
+# Documentation site for https://dhilipkumars.github.io/axiom/
+#
+# The docs directory is the repository's own docs/, not a copy, so the site and
+# the tree never disagree. Two halves live there:
+#
+#   guides/ and index.md  written by people, reviewed by people
+#   generated/            produced by `make docs-generate` from the code
+#
+# The design notes at the end of the nav are the project's own engineering
+# documents. They are published rather than hidden because the reasoning in
+# them is the most useful thing about this repository, but they are written for
+# contributors, not users, and the nav says so.
+site_name: Axiom
+site_description: Query and change Kubernetes with SQL, through a Postgres foreign data wrapper.
+site_url: https://dhilipkumars.github.io/axiom/
+repo_url: https://github.com/dhilipkumars/axiom
+repo_name: dhilipkumars/axiom
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+
+# Agent role definitions live under docs/ for proximity to the rules they
+# reference, but they are tooling configuration, not documentation, and have no
+# reader on the site.
+exclude_docs: |
+  agents/
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+
+nav:
+  - Home: index.md
+  - Guides:
+      - Getting started: guides/getting-started.md
+      - Deploying the gateway: guides/deploying.md
+      - Querying: guides/querying.md
+  - Reference:
+      - gRPC API: generated/api.md
+      - Gateway flags: generated/gateway-flags.md
+      - FDW options: generated/fdw-options.md
+      - Foreign table columns: generated/columns.md
+  - Design notes (for contributors):
+      - Architecture: DESIGN.md
+      - Auth design: AUTH.md
+      - Engineering rules: RULES.md
+      - Phase plan: PLAN.md
+
+strict: true

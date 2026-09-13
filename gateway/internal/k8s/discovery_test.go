@@ -670,3 +670,41 @@ func TestDescribeFindsACRDAddedToAnAlreadyCachedGroupVersion(t *testing.T) {
 		t.Error("a second Describe refetched; the refreshed document was not cached")
 	}
 }
+
+func TestDiscoveryStats(t *testing.T) {
+	t.Parallel()
+	d, _ := newTestDiscoveryWithAccess(t, "pods,widgets.example.com", AllowAll{})
+	ctx := context.Background()
+
+	if got := d.OpenAPIFetches(); got != 0 {
+		t.Errorf("initial OpenAPIFetches = %d, want 0", got)
+	}
+	if got := d.OpenAPIGroupVersions(); got != 0 {
+		t.Errorf("initial OpenAPIGroupVersions = %d, want 0", got)
+	}
+	if got := d.AccessReviews(); got != 0 {
+		t.Errorf("initial AccessReviews = %d, want 0", got)
+	}
+
+	// Describe fetches OpenAPI schema for the group version.
+	if _, err := d.Describe(ctx, podGVK); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.OpenAPIFetches(); got != 1 {
+		t.Errorf("OpenAPIFetches after Describe = %d, want 1", got)
+	}
+	if got := d.OpenAPIGroupVersions(); got != 1 {
+		t.Errorf("OpenAPIGroupVersions after Describe = %d, want 1", got)
+	}
+
+	// Repeated Describe uses cache, does not increment fetches or group versions.
+	if _, err := d.Describe(ctx, podGVK); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.OpenAPIFetches(); got != 1 {
+		t.Errorf("OpenAPIFetches after cached Describe = %d, want 1", got)
+	}
+	if got := d.OpenAPIGroupVersions(); got != 1 {
+		t.Errorf("OpenAPIGroupVersions after cached Describe = %d, want 1", got)
+	}
+}

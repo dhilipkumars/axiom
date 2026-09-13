@@ -94,6 +94,29 @@ impl Default for ImportOptions {
     }
 }
 
+/// `IMPORT FOREIGN SCHEMA ... OPTIONS` — how a whole schema is generated.
+///
+/// Same table-as-documentation arrangement as the server and foreign-table
+/// options in [`crate::options`]: `make docs-generate` reads these literals to
+/// build `docs/generated/fdw-options.md`, so an option added or removed here
+/// changes the reference page and CI fails on the uncommitted diff.
+pub const IMPORT_OPTION_DOCS: &[crate::options::OptionDoc] = &[
+    crate::options::OptionDoc {
+        name: "cache_mode",
+        required: false,
+        default: Some("on_demand"),
+        summary: "applied to every generated table, and silently downgraded to \
+                  on_demand for a kind the API server will not let the gateway watch",
+    },
+    crate::options::OptionDoc {
+        name: "prefix",
+        required: false,
+        default: Some("\"\" (no prefix)"),
+        summary: "prepended to every generated table name, so two clusters can be \
+                  imported into one schema without colliding",
+    },
+];
+
 /// Maximum length of a Postgres identifier (NAMEDATALEN - 1). A longer name is
 /// truncated by the server, which could silently collide two tables, so a name
 /// that does not fit is refused instead.

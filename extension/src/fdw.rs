@@ -185,6 +185,83 @@ fn raise_client(op: &str, server: &ServerOptions, e: &ClientError) -> ! {
 
 // --- catalog access -------------------------------------------------------------
 
+/// Looks up a foreign server by name and returns its validated options.
+///
+/// For SQL-callable helpers that take a server name rather than running inside
+/// a scan. Errors carry the server name so the message is actionable:
+/// "no such server" and "the server exists but its options are wrong" are
+/// different problems for whoever is reading them.
+pub fn server_options_by_name(name: &str) -> Result<ServerOptions, String> {
+    let cname = std::ffi::CString::new(name)
+        .map_err(|_| format!("server name {name:?} contains an interior NUL byte"))?;
+    // SAFETY: a NUL-terminated name; missing_ok=true returns null rather than
+    // raising, so the not-found case is ours to report.
+    let server = unsafe { pg_sys::GetForeignServerByName(cname.as_ptr(), true) };
+    if server.is_null() {
+        return Err(format!("server {name:?} does not exist"));
+    }
+    // A `#[pg_extern]` function is executable by PUBLIC unless the extension
+    // revokes it, so without this check any role could name any server, make
+    // this backend dial that server's endpoint, and read back its operational
+    // counters. Requiring USAGE is the same bar Postgres puts on every other
+    // use of a foreign server.
+    //
+    // Note what this deliberately excludes. docs/AUTH.md §6.1 has query roles
+    // holding table grants and never USAGE ON FOREIGN SERVER, precisely so
+    // they cannot rewrite their own user mapping; the same line makes this a
+    // DBA-facing function rather than one every querying role can call. That
+    // is the right side to err on for a diagnostic that opens a connection.
+    //
+    // SAFETY: non-null FormData_pg_foreign_server from the catalog lookup.
+    let acl = unsafe { foreign_server_usage_aclcheck((*server).serverid) };
+    if acl != pg_sys::AclResult::ACLCHECK_OK {
+        return Err(format!(
+            "permission denied for foreign server {name:?}: USAGE is required"
+        ));
+    }
+    // SAFETY: non-null FormData_pg_foreign_server from the catalog lookup.
+    let opts = unsafe { options_from_list((*server).options) };
+    ServerOptions::parse(&opts).map_err(|e| format!("server {name:?}: {e}"))
+}
+
+/// `USAGE` privilege check on a foreign server, across supported majors.
+///
+/// Postgres 16 retired the per-catalog `pg_*_aclcheck` family in favour of one
+/// `object_aclcheck` taking the catalog's OID, so this is version-gated rather
+/// than one call. Both spellings ask the same question.
+///
+/// # Safety
+/// `srvid` must be a live foreign server OID from a catalog lookup.
+#[cfg(any(feature = "pg14", feature = "pg15"))]
+unsafe fn foreign_server_usage_aclcheck(srvid: pg_sys::Oid) -> pg_sys::AclResult::Type {
+    // SAFETY: caller guarantees a valid server OID.
+    unsafe {
+        pg_sys::pg_foreign_server_aclcheck(
+            srvid,
+            pg_sys::GetUserId(),
+            pg_sys::AclMode::from(pg_sys::ACL_USAGE),
+        )
+    }
+}
+
+/// See the pg14/pg15 variant above.
+///
+/// # Safety
+/// `srvid` must be a live foreign server OID from a catalog lookup.
+#[cfg(any(feature = "pg16", feature = "pg17"))]
+unsafe fn foreign_server_usage_aclcheck(srvid: pg_sys::Oid) -> pg_sys::AclResult::Type {
+    // SAFETY: caller guarantees a valid server OID; ForeignServerRelationId is
+    // the catalog that OID belongs to.
+    unsafe {
+        pg_sys::object_aclcheck(
+            pg_sys::ForeignServerRelationId,
+            srvid,
+            pg_sys::GetUserId(),
+            pg_sys::AclMode::from(pg_sys::ACL_USAGE),
+        )
+    }
+}
+
 /// Reads a `List` of `DefElem` options into `(name, value)` pairs.
 unsafe fn options_from_list(list: *mut pg_sys::List) -> Vec<(String, String)> {
     // SAFETY: called by the executor/planner with valid node pointers; see module docs.
@@ -1042,12 +1119,24 @@ unsafe extern "C" fn end_foreign_modify(
 
 /// Reads `IMPORT FOREIGN SCHEMA ... OPTIONS (...)`.
 ///
-/// Accepts `cache_mode` (applied to every generated table that the API server
-/// will actually watch) and `prefix` (prepended to each table name, so two
-/// clusters can be imported into one schema).
+/// The accepted names come from [`import::IMPORT_OPTION_DOCS`], which is also
+/// what `make docs-generate` renders into the reference page. Interpreting a
+/// value still needs a match arm per option, but *which* names are accepted
+/// has one definition, so an option cannot be added here and go undocumented,
+/// or documented and not accepted.
 fn import_options(opts: &[(String, String)]) -> ImportOptions {
     let mut out = ImportOptions::default();
     for (k, v) in opts {
+        if !import::IMPORT_OPTION_DOCS.iter().any(|d| d.name == k) {
+            let names: Vec<&str> = import::IMPORT_OPTION_DOCS.iter().map(|d| d.name).collect();
+            raise(
+                PgSqlErrorCode::ERRCODE_FDW_INVALID_OPTION_NAME,
+                format!(
+                    "invalid option {k:?} for IMPORT FOREIGN SCHEMA: valid options are {}",
+                    names.join(", ")
+                ),
+            );
+        }
         match k.as_str() {
             "cache_mode" => match CacheMode::parse(v) {
                 Some(m) => out.cache_mode = m,
@@ -1068,11 +1157,14 @@ fn import_options(opts: &[(String, String)]) -> ImportOptions {
                 }
                 out.prefix.clone_from(v);
             }
+            // Unreachable: the allowlist check above rejects any other name.
+            // Kept so adding an entry to IMPORT_OPTION_DOCS without a match
+            // arm here fails loudly at DDL time rather than being ignored.
             other => raise(
                 PgSqlErrorCode::ERRCODE_FDW_INVALID_OPTION_NAME,
                 format!(
-                    "invalid option {other:?} for IMPORT FOREIGN SCHEMA: \
-                     valid options are cache_mode, prefix"
+                    "option {other:?} is documented for IMPORT FOREIGN SCHEMA \
+                     but not implemented"
                 ),
             ),
         }
