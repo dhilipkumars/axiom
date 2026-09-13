@@ -107,9 +107,23 @@ loaded the library at startup:
 shared_preload_libraries = 'axiom'
 ```
 
-Without it a `cache_mode 'watch'` table still answers, by falling back to an
-RPC per scan, and `axiom_watch_status()` returns no rows. Nothing warns you;
-the caching simply never happens. Two settings are worth knowing alongside it,
+**Append to the existing list rather than replacing it.** The setting is one
+comma-separated list, so `shared_preload_libraries = 'pg_stat_statements,axiom'`
+if something is already there. Copying the line above over a non-empty setting
+silently disables whatever it replaced, at the next restart.
+
+Without the preload a `cache_mode 'watch'` table still answers, by falling back
+to an RPC per scan, and `axiom_watch_status()` returns no rows. It does say so:
+every such scan raises
+
+```
+WARNING:  axiom: cache_mode 'watch' unavailable (axiom is not in
+shared_preload_libraries; the watch cache is unavailable); serving this scan on
+demand
+```
+
+which is easy to miss in a client that hides warnings, and is the thing to look
+for when caching appears to do nothing. Two settings are worth knowing alongside it,
 both also fixed at startup:
 
 | Setting | Default | What it does |

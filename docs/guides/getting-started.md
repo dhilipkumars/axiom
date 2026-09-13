@@ -47,18 +47,28 @@ stack might use:
 ```sh
 mkdir -p certs
 docker run --rm --entrypoint /bin/sh \
+  -e E2E_KIND_CLUSTER=axiom \
   -v "$PWD/certs:/certs" \
   -v "$PWD/deploy/compose/certs/gen.sh:/gen.sh:ro" \
-  alpine/openssl:3.3.3 /gen.sh
+  alpine/openssl:3.3.3 -c "/gen.sh && chown $(id -u):$(id -g) /certs/*"
 ls certs/          # ca.crt  gateway.crt  gateway.key
 ```
 
-The `--entrypoint` override matters: that image runs `openssl` by default, so
-without it the script is passed to `openssl` as an argument.
+Three details in that command, each of which breaks the next step if dropped:
 
-The certificate it produces already carries `localhost`, `127.0.0.1`, the
-in-cluster Service names and the kind node name, so it works for every way this
-guide reaches the gateway.
+- **`--entrypoint`**, because the image runs `openssl` by default and would
+  otherwise pass the script to it as an argument.
+- **`E2E_KIND_CLUSTER`**, because the node name goes into the certificate and
+  defaults to the end-to-end suite's cluster. It must match the cluster created
+  above, or the certificate names a node that does not exist.
+- **`chown`**, because the script gives the private key to uid 65532, the user
+  the gateway runs as, with mode 0600. On Linux that leaves it unreadable by
+  the account running `kubectl` in the next step, which fails with `permission
+  denied`. Docker Desktop remaps ownership and hides this, so it bites on Linux
+  only.
+
+The certificate carries `localhost`, `127.0.0.1`, the in-cluster Service names
+and the kind node name, so it covers every way this guide reaches the gateway.
 
 Run it in that container rather than on the host. **macOS ships LibreSSL, and
 certificates it generates are rejected** in three different ways that name
@@ -77,8 +87,9 @@ the name Postgres will dial, which for a `NodePort` is the node address or
 
 ## 3. Build the gateway image and load it
 
-The Deployment references `axiom-gateway:latest` and never pulls, so the image
-has to exist on the node already:
+The Deployment references `axiom-gateway:latest`. Nothing publishes that image,
+so unless it is already on the node the Deployment tries to pull it from Docker
+Hub and fails with `ImagePullBackOff`. Build it and load it first:
 
 ```sh
 docker build -f gateway/Dockerfile -t axiom-gateway:latest .
