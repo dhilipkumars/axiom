@@ -2,7 +2,6 @@ package server
 
 import (
 	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"testing"
@@ -24,7 +23,10 @@ import (
 // falling back to an assumption.
 func rustClientPingInterval(t *testing.T) time.Duration {
 	t.Helper()
-	path := filepath.Join("..", "..", "..", "extension", "src", "transport.rs")
+	// A const, not a filepath.Join: gosec's G304 flags a read from a computed
+	// path, and it is satisfied by a constant one. Go accepts forward slashes
+	// on every platform, so nothing is lost by not joining.
+	const path = "../../../extension/src/transport.rs"
 	src, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("cannot read %s, which holds the client's ping interval: %v", path, err)
