@@ -42,6 +42,10 @@ postgres = "0.19"
 eyre = "0.6"
 tempfile = "3"
 tokio-stream = { version = "0.1", features = ["net"] }
+# The `postgres` notification iterators are FallibleIterator, and the trait has
+# to be in scope to call them. Already in the lock file as a dependency of
+# `postgres` itself; this only makes it nameable from the tests.
+fallible-iterator = "0.2"
 
 [profile.dev]
 panic = "unwind"

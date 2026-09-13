@@ -116,7 +116,16 @@ func run(ctx context.Context, args []string, stderr *os.File) error {
 		return fmt.Errorf("listen %q: %w", *listen, err)
 	}
 
-	gs := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsCfg)))
+	// Keepalives, so a connection silently reaped by NAT or a load balancer
+	// breaks in under a minute instead of hanging until OS-level TCP timeout
+	// while the subscription still reports ACTIVE. The settings and the reasons
+	// they are what they are live in internal/server, where a test also checks
+	// they stay compatible with the extension's ping interval.
+	gs := grpc.NewServer(
+		grpc.Creds(credentials.NewTLS(tlsCfg)),
+		grpc.KeepaliveParams(server.KeepaliveParams()),
+		grpc.KeepaliveEnforcementPolicy(server.KeepaliveEnforcement()),
+	)
 	axiomv1.RegisterGatewayServiceServer(gs, server.New(version, nil, client, logger))
 	hs := health.NewServer()
 	hs.SetServingStatus(axiomv1.GatewayService_ServiceDesc.ServiceName, healthpb.HealthCheckResponse_SERVING)

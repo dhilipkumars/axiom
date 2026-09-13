@@ -250,6 +250,14 @@ impl Pinger {
 // --- subscription streams -----------------------------------------------------------------
 
 /// Sends one `NOTIFY axiom_events` with a JSON payload describing a change.
+///
+/// Callers must only invoke this for an actual change, never for an object
+/// arriving in a subscription's initial listing. Each call opens its own
+/// transaction (`BackgroundWorker::transaction`) and this worker runs a
+/// current-thread runtime, so the SPI call blocks the single thread driving
+/// every watch stream for its duration. One per object of an initial listing
+/// is therefore thousands of sequential transactions during which no other
+/// stream makes progress. See the guard in `apply_event`.
 fn notify(spec: &SubSpec, ty: &str, namespace: &str, name: &str) {
     let payload = serde_json::json!({
         "server": spec.target.endpoint,
@@ -326,12 +334,28 @@ fn apply_event(
             if *synced && !ev.resource_version.is_empty() {
                 record_bookmark(&ev.resource_version, false, resume)?;
             }
-            notify(
-                spec,
-                ty.as_str_name().trim_start_matches("TYPE_"),
-                &obj.namespace,
-                &obj.name,
-            );
+            // Only notify for a change, never for the initial listing.
+            //
+            // A fresh subscription replays the whole collection as ADDED
+            // before SYNCED, and those are not changes: they are the cache
+            // being populated. Announcing them is both wrong for the consumer
+            // (nothing happened in the cluster) and the worker's worst
+            // bottleneck, because every notification is its own transaction on
+            // the one thread that drives every stream.
+            //
+            // `synced` starts true on a resumed stream (`run_stream` sets it
+            // from a non-empty resume token), so changes that happened during
+            // an outage and arrive on resume still notify. That is the
+            // behaviour worth keeping: they are real changes the consumer
+            // missed.
+            if *synced {
+                notify(
+                    spec,
+                    ty.as_str_name().trim_start_matches("TYPE_"),
+                    &obj.namespace,
+                    &obj.name,
+                );
+            }
             Ok(EventAction::Continue)
         }
         EvType::Synced => {

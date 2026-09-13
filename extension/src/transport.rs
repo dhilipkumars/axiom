@@ -115,6 +115,30 @@ impl std::error::Error for ChannelError {}
 /// to both connect and each request. No connection is attempted here, but the
 /// caller must be inside a tokio runtime context (`Runtime::enter`) because
 /// tonic spawns its connector task.
+/// How often an idle connection sends an HTTP/2 PING, and how long it waits
+/// for the acknowledgement before treating the connection as dead.
+///
+/// These exist because Postgres is deliberately outside the cluster
+/// (docs/DESIGN.md), so every connection crosses NAT, stateful firewalls and
+/// cloud load balancers. All of those drop an idle flow without sending a FIN
+/// or an RST: the socket stays open on both sides and nothing is ever
+/// delivered. A watch stream is idle whenever the cluster is quiet, which is
+/// most of the time, and is exactly what such a device reaps.
+///
+/// Without a keepalive that failure surfaces only at OS-level TCP timeout,
+/// measured in hours. Throughout, the subscription still reports ACTIVE and
+/// scans keep serving the cache as current: stale data presented as fresh,
+/// which docs/RULES.md §1 forbids. With one, the connection breaks in under a
+/// minute, the stream errors, and the subscription goes DEGRADED, which is the
+/// honest state and already announces itself on every scan.
+///
+/// The interval must stay comfortably above the gateway's minimum enforced
+/// interval (see `keepalive.EnforcementPolicy` in `gateway/cmd/gateway/main.go`)
+/// or the server answers pings with GOAWAY and kills the connection this is
+/// meant to protect.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub fn build_channel(target: &Target, timeout: Duration) -> Result<Channel, ChannelError> {
     let mut tls = ClientTlsConfig::new().domain_name(target.tls_server_name.clone());
     tls = match &target.ca_cert_path {
@@ -129,7 +153,13 @@ pub fn build_channel(target: &Target, timeout: Duration) -> Result<Channel, Chan
         .tls_config(tls)
         .map_err(ChannelError::Transport)?
         .connect_timeout(timeout)
-        .timeout(timeout);
+        .timeout(timeout)
+        .http2_keep_alive_interval(KEEPALIVE_INTERVAL)
+        .keep_alive_timeout(KEEPALIVE_TIMEOUT)
+        // While idle too, which is the whole point: a watch stream with no
+        // events is idle at the HTTP/2 level, and that is precisely when a
+        // middlebox reaps it.
+        .keep_alive_while_idle(true);
     Ok(endpoint.connect_lazy())
 }
 

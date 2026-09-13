@@ -93,6 +93,7 @@ name = "axiom"
 version = "0.1.0"
 dependencies = [
  "eyre",
+ "fallible-iterator",
  "pgrx",
  "pgrx-tests",
  "postgres",

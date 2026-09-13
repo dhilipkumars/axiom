@@ -63,8 +63,26 @@ jobs:
       - run: make gateway-vuln
 
   extension-unit:
-    name: extension unit + pg tests + clippy + audit
+    # One job per supported Postgres major, because the crate has six
+    # version-gated branch sets and a single-version build compiles at most one
+    # arm of each:
+    #   fdw.rs   pg_foreign_server_aclcheck / object_aclcheck   (pg16 split)
+    #   fdw.rs   create_foreignscan_path arity                  (pg17 split)
+    #   fdw.rs   makeVar varno type                             (pg16 split)
+    #   shmem.rs dsa_create / dsa_create_ext                    (pg17 split)
+    # The aclcheck pair shipped in #12 with its pg14/pg15 arm never compiled
+    # anywhere, which is what prompted this. pg15 is omitted deliberately: it
+    # shares every branch arm with pg14 here, so it would add runtime without
+    # covering a line pg14 does not already cover. Revisit if a pg15-only
+    # branch ever appears.
+    name: extension pg${{ matrix.pg }} (unit + pg tests + clippy)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ["14", "16", "17"]
+    env:
+      PG_MAJOR: ${{ matrix.pg }}
     steps:
       - uses: actions/checkout@v4
       - name: Install PostgreSQL ${{ env.PG_MAJOR }} (PGDG)
@@ -79,15 +97,26 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with: { components: "clippy, rustfmt" }
       - uses: Swatinem/rust-cache@v2
-        with: { workspaces: extension }
+        # Keyed per major: the builds differ by feature flag and by the
+        # generated pg_sys bindings, so one shared cache would thrash.
+        with:
+          workspaces: extension
+          key: pg${{ matrix.pg }}
       - name: Install cargo tooling
         run: |
           cargo install cargo-pgrx --version "${CARGO_PGRX_VERSION}" --locked
-          cargo install cargo-audit cargo-deny --locked
           cargo pgrx init --pg${PG_MAJOR} /usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
+      - name: Install audit tooling
+        # Only where make ext-audit actually runs; building these three times
+        # would cost more than the scan itself.
+        if: matrix.pg == '16'
+        run: cargo install cargo-audit cargo-deny --locked
       - run: make ext-lint PG=pg${PG_MAJOR}
       - run: make ext-test PG=pg${PG_MAJOR}
-      - run: make ext-audit
+      # Advisory and licence scanning reads Cargo.lock, which does not vary by
+      # Postgres major, so run it once rather than three times.
+      - if: matrix.pg == '16'
+        run: make ext-audit
 
   secret-scan:
     name: gitleaks

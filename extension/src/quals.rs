@@ -70,8 +70,25 @@ impl Filter {
         f
     }
 
-    /// Planner row estimate for this filter. Coarse on purpose: there is no
-    /// statistics source yet. TODO(phase3): size from the live cache.
+    /// Planner row estimate for this filter.
+    ///
+    /// Coarse on purpose, and deliberately not sized from the live cache. That
+    /// was once noted here as future work and is the wrong thing to build:
+    ///
+    /// - it would read shared memory under a lock inside `GetForeignRelSize`,
+    ///   on every plan of every query, to refine a number the planner only
+    ///   needs to an order of magnitude;
+    /// - a cold, empty or resyncing cache reports zero, and a zero estimate
+    ///   pushes the planner into nested loops that are catastrophic when the
+    ///   real count is large. The constants below are wrong by a constant
+    ///   factor; zero is wrong by an unbounded one;
+    /// - the cached count is what the *gateway* sees, which from Phase 7 on is
+    ///   not the calling identity's permitted slice (docs/AUTH.md).
+    ///
+    /// A better estimate has to come from a real statistics source, per kind
+    /// and per caller. Until one exists, these bounds encode the only thing
+    /// actually known: a name match is one row, a namespace narrows a lot, and
+    /// an unfiltered scan is the whole collection.
     pub fn estimated_rows(&self) -> f64 {
         match (
             self.impossible,
