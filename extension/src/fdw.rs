@@ -520,8 +520,11 @@ unsafe extern "C-unwind" fn get_foreign_paths(
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         );
-        // disabled_nodes is 0: this path is never produced by a disabled node,
-        // and the planner uses the count only to compare plans that were.
+        // disabled_nodes is 0. pg18 lets the planner count how many nodes in a
+        // path were produced by a disabled node type (one of the enable_*
+        // settings turned off), and prefers the path with fewer of them before
+        // it compares costs. Nothing disables a foreign scan, so this path
+        // contributes none.
         #[cfg(not(any(feature = "pg16", feature = "pg17")))]
         let path = pg_sys::create_foreignscan_path(
             root,

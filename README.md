@@ -149,8 +149,10 @@ rustc --version
 cargo install cargo-pgrx --version 0.19.2 --locked
 cargo install cargo-audit cargo-deny --locked
 
-# Tell pgrx which Postgres to use (pick the major you installed):
-cargo pgrx init --pg16 "$(which pg_config)"
+# Tell pgrx which Postgres to use. The flag must name the same major as the
+# pg_config it is given, so change both together:
+cargo pgrx init --pg16 /opt/homebrew/opt/postgresql@16/bin/pg_config   # macOS
+cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config            # Debian, pg18
 ```
 
 Check what pgrx knows about with `cat ~/.pgrx/config.toml`. The `make` targets

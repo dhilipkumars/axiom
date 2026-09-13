@@ -8,10 +8,13 @@ version = 2
 yanked = "deny"
 # Triaged/accepted advisories go here with a justification comment (docs/RULES.md §3).
 ignore = [
-    # Unmaintained-crate notices, not vulnerabilities. All are transitive with
+    # Unmaintained-crate notices, not vulnerabilities. Both are transitive with
     # no upstream upgrade available; revisit when pgrx/tonic bump them.
-    { id = "RUSTSEC-2021-0127", reason = "serde_cbor via pgrx 0.12.9 (schema generation only, never sees gateway input)" },
-    { id = "RUSTSEC-2024-0436", reason = "paste via pgrx-tests 0.12.9 (dev/test dependency, proc-macro only)" },
+    #
+    # The paste suppression (RUSTSEC-2024-0436) was dropped with the move to
+    # pgrx 0.19: that crate is no longer in the graph, and cargo-deny warns
+    # about an ignore that matches nothing.
+    { id = "RUSTSEC-2021-0127", reason = "serde_cbor via pgrx (schema generation only, never sees gateway input)" },
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile via tonic 0.12 TLS config; PEM parsing of operator-provided CA only" },
 ]
 
