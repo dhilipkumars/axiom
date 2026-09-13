@@ -1289,7 +1289,17 @@ fn initial_listing_does_not_notify_but_later_changes_do() {
 
     // The whole collection arrived as ADDED before SYNCED. None of it is a
     // change, so none of it may be announced.
-    let during = drain_notifications(&mut listener, 2);
+    //
+    // Filtered to this test's own subscription. `axiom_events` is one channel
+    // per database and the harness runs tests in parallel against a single
+    // Postgres, so another test's pods arrive on this connection too. An
+    // unfiltered assertion passes alone and fails in the suite, which is
+    // exactly how this was found.
+    let mine = |p: &String| p.contains("\"namespace\":\"burst\"");
+    let during: Vec<String> = drain_notifications(&mut listener, 2)
+        .into_iter()
+        .filter(|p| mine(p))
+        .collect();
     assert!(
         during.is_empty(),
         "initial listing emitted {} notification(s): {:?}",
@@ -1301,7 +1311,16 @@ fn initial_listing_does_not_notify_but_later_changes_do() {
     // what proves the channel works and the assertion above could have failed.
     stub.cluster
         .emit_pod(EvType::Added, pod("burst", "after-sync", "Running", "n2"));
-    let after = drain_notifications(&mut listener, 15);
+    // Poll rather than drain once: another test's traffic can arrive first and
+    // an unlucky single drain would return before ours was sent.
+    let mut after: Vec<String> = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        after.extend(drain_notifications(&mut listener, 2));
+        if after.iter().any(|p| p.contains("after-sync")) {
+            break;
+        }
+    }
     let ours: Vec<&String> = after.iter().filter(|p| p.contains("after-sync")).collect();
     assert_eq!(
         ours.len(),
