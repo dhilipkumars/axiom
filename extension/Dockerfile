@@ -2,7 +2,8 @@
 # Produces a stock postgres:16 image with the axiom extension installed.
 ARG PG_MAJOR=16
 
-FROM rust:1.93-bookworm AS build
+# Rust 1.96 or newer: cargo-pgrx 0.19 requires it.
+FROM rust:1.97-bookworm AS build
 ARG PG_MAJOR
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg clang libclang-dev pkg-config \
@@ -14,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         postgresql-${PG_MAJOR} postgresql-server-dev-${PG_MAJOR} \
     && rm -rf /var/lib/apt/lists/*
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    cargo install cargo-pgrx --version 0.12.9 --locked \
+    cargo install cargo-pgrx --version 0.19.2 --locked \
     && cargo pgrx init --pg${PG_MAJOR} /usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
 WORKDIR /src
 COPY proto/ proto/

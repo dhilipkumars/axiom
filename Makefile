@@ -4,7 +4,8 @@ GOBIN ?= $(shell go env GOPATH)/bin
 BUF ?= $(GOBIN)/buf
 GOLANGCI_LINT ?= $(GOBIN)/golangci-lint
 # Postgres major to build/test the extension against locally (a `cargo pgrx init`-ed one).
-PG ?= pg14
+# The supported window is 16 through the latest major; see issue #19.
+PG ?= pg16
 COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 
 .PHONY: all proto proto-check gateway-build gateway-test gateway-lint gateway-vuln \

@@ -48,7 +48,7 @@ fn axiom_version() -> &'static str {
 /// a WARNING is emitted explaining why the worker was not started).
 #[allow(non_snake_case)]
 #[pg_guard]
-pub extern "C" fn _PG_init() {
+pub extern "C-unwind" fn _PG_init() {
     bgworker::define_gucs();
     // SAFETY: reading a plain `bool` global that Postgres sets before calling
     // `_PG_init` and never mutates concurrently with it.

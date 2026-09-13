@@ -69,12 +69,12 @@ mod tests {
 
     #[test]
     fn never_overflows() {
-        let mut b = Backoff::new(Duration::from_secs(3600), Duration::MAX);
+        let mut b = Backoff::new(Duration::from_hours(1), Duration::MAX);
         for _ in 0..100 {
             let _ = b.on_failure();
         }
         assert_eq!(b.consecutive_failures(), 100);
-        assert!(b.on_failure() > Duration::from_secs(3600));
+        assert!(b.on_failure() > Duration::from_hours(1));
     }
 
     #[test]

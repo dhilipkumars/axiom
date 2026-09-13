@@ -14,7 +14,7 @@
 //! subscription's state (`DEGRADED` + reason) and retried with backoff.
 
 use std::collections::HashMap;
-use std::ffi::CStr;
+use std::ffi::CString;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -41,18 +41,16 @@ pub const WORKER_NAME: &str = "axiom gateway pinger";
 /// `LISTEN` channel on which cache changes are announced.
 pub const NOTIFY_CHANNEL: &str = "axiom_events";
 
-static GATEWAY_ENDPOINT: GucSetting<Option<&'static CStr>> =
-    GucSetting::<Option<&'static CStr>>::new(None);
-static GATEWAY_CA_CERT: GucSetting<Option<&'static CStr>> =
-    GucSetting::<Option<&'static CStr>>::new(None);
+static GATEWAY_ENDPOINT: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
+static GATEWAY_CA_CERT: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
 static PING_INTERVAL_SECS: GucSetting<i32> = GucSetting::<i32>::new(10);
 static RPC_TIMEOUT_SECS: GucSetting<i32> = GucSetting::<i32>::new(5);
-static NOTIFY_DATABASE: GucSetting<Option<&'static CStr>> =
-    GucSetting::<Option<&'static CStr>>::new(Some(c"postgres"));
+static NOTIFY_DATABASE: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(Some(c"postgres"));
 static CACHE_SIZE_MB: GucSetting<i32> = GucSetting::<i32>::new(256);
 
 const BACKOFF_BASE: Duration = Duration::from_secs(1);
-const BACKOFF_MAX: Duration = Duration::from_secs(60);
+const BACKOFF_MAX: Duration = Duration::from_mins(1);
 const TICK: Duration = Duration::from_millis(250);
 const SWEEP_EVERY: Duration = Duration::from_secs(1);
 
@@ -62,25 +60,25 @@ const SWEEP_EVERY: Duration = Duration::from_secs(1);
 /// `notify_database` and `cache_size_mb` take effect when the worker starts.
 pub fn define_gucs() {
     GucRegistry::define_string_guc(
-        "axiom.gateway_endpoint",
-        "URL of the Axiom gateway to ping, e.g. https://gateway:8443",
-        "Must use https. Credentials are never embedded here.",
+        c"axiom.gateway_endpoint",
+        c"URL of the Axiom gateway to ping, e.g. https://gateway:8443",
+        c"Must use https. Credentials are never embedded here.",
         &GATEWAY_ENDPOINT,
         GucContext::Sighup,
         GucFlags::SUPERUSER_ONLY,
     );
     GucRegistry::define_string_guc(
-        "axiom.gateway_ca_cert",
-        "Path to a PEM CA bundle used to verify the pinged gateway's TLS certificate",
-        "Leave unset to use the Mozilla webpki root store.",
+        c"axiom.gateway_ca_cert",
+        c"Path to a PEM CA bundle used to verify the pinged gateway's TLS certificate",
+        c"Leave unset to use the Mozilla webpki root store.",
         &GATEWAY_CA_CERT,
         GucContext::Sighup,
         GucFlags::SUPERUSER_ONLY,
     );
     GucRegistry::define_int_guc(
-        "axiom.ping_interval_secs",
-        "Seconds between gateway Ping round-trips",
-        "Must be greater than axiom.rpc_timeout_secs.",
+        c"axiom.ping_interval_secs",
+        c"Seconds between gateway Ping round-trips",
+        c"Must be greater than axiom.rpc_timeout_secs.",
         &PING_INTERVAL_SECS,
         1,
         3600,
@@ -88,9 +86,9 @@ pub fn define_gucs() {
         GucFlags::default(),
     );
     GucRegistry::define_int_guc(
-        "axiom.rpc_timeout_secs",
-        "Per-RPC deadline in seconds for the ping",
-        "Must be smaller than axiom.ping_interval_secs.",
+        c"axiom.rpc_timeout_secs",
+        c"Per-RPC deadline in seconds for the ping",
+        c"Must be smaller than axiom.ping_interval_secs.",
         &RPC_TIMEOUT_SECS,
         1,
         3600,
@@ -98,17 +96,17 @@ pub fn define_gucs() {
         GucFlags::default(),
     );
     GucRegistry::define_string_guc(
-        "axiom.notify_database",
-        "Database the background worker connects to for NOTIFY axiom_events",
-        "LISTEN axiom_events in this database to receive cache change notifications.",
+        c"axiom.notify_database",
+        c"Database the background worker connects to for NOTIFY axiom_events",
+        c"LISTEN axiom_events in this database to receive cache change notifications.",
         &NOTIFY_DATABASE,
         GucContext::Postmaster,
         GucFlags::SUPERUSER_ONLY,
     );
     GucRegistry::define_int_guc(
-        "axiom.cache_size_mb",
-        "Upper bound of the shared-memory watch cache, in MiB",
-        "When reached, affected subscriptions become DEGRADED rather than evicting.",
+        c"axiom.cache_size_mb",
+        c"Upper bound of the shared-memory watch cache, in MiB",
+        c"When reached, affected subscriptions become DEGRADED rather than evicting.",
         &CACHE_SIZE_MB,
         16,
         1_048_576,
@@ -271,10 +269,7 @@ fn notify(spec: &SubSpec, ty: &str, namespace: &str, name: &str) {
         BackgroundWorker::transaction(|| {
             Spi::run_with_args(
                 "SELECT pg_notify($1, $2)",
-                Some(vec![
-                    (PgBuiltInOids::TEXTOID.oid(), NOTIFY_CHANNEL.into_datum()),
-                    (PgBuiltInOids::TEXTOID.oid(), payload.into_datum()),
-                ]),
+                &[NOTIFY_CHANNEL.into(), payload.as_str().into()],
             )
         })
     }));
@@ -550,7 +545,7 @@ fn manage_subscriptions(tasks: &mut HashMap<(usize, u32), tokio::task::JoinHandl
 /// same thread; nothing here spawns OS threads inside the Postgres process.
 #[pg_guard]
 #[no_mangle]
-pub extern "C" fn axiom_bgworker_main(_arg: pg_sys::Datum) {
+pub extern "C-unwind" fn axiom_bgworker_main(_arg: pg_sys::Datum) {
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
     let notify_db = NOTIFY_DATABASE.get().map_or_else(
         || "postgres".to_owned(),
