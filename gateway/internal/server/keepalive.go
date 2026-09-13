@@ -6,13 +6,6 @@ import (
 	"google.golang.org/grpc/keepalive"
 )
 
-// ClientPingInterval mirrors KEEPALIVE_INTERVAL in extension/src/transport.rs.
-//
-// Duplicated across two languages with no shared artifact, which is why the
-// invariant below is asserted by a test rather than left to reviewers. Change
-// one side and the test names the other.
-const ClientPingInterval = 30 * time.Second
-
 // KeepaliveParams returns the gateway's HTTP/2 keepalive settings.
 //
 // Postgres is deliberately outside the cluster (docs/DESIGN.md), so every
@@ -40,8 +33,10 @@ func KeepaliveParams() keepalive.ServerParameters {
 // defaults, the keepalive would tear down the connections it exists to
 // protect.
 //
-// MinTime sits below ClientPingInterval to leave room for jitter and scheduling
-// delay; see TestKeepaliveEnforcementPermitsTheExtensionsPings.
+// MinTime sits below the extension's ping interval to leave room for jitter
+// and scheduling delay. That interval lives in extension/src/transport.rs and
+// is read from there by TestKeepaliveEnforcementPermitsTheExtensionsPings,
+// rather than copied here where it could drift silently.
 func KeepaliveEnforcement() keepalive.EnforcementPolicy {
 	return keepalive.EnforcementPolicy{
 		MinTime:             10 * time.Second,
