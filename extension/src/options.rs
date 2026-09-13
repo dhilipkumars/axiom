@@ -585,7 +585,7 @@ mod tests {
     ///
     /// Spelled out per option rather than derived, because a default is a
     /// value and the descriptor holds a human-readable rendering of it. The
-    /// point is that changing DEFAULT_RPC_TIMEOUT without touching the table
+    /// point is that changing `DEFAULT_RPC_TIMEOUT` without touching the table
     /// fails here, which is what makes the reference page trustworthy.
     #[test]
     fn documented_defaults_match_the_parsers() {

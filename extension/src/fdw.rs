@@ -239,7 +239,7 @@ unsafe fn foreign_server_usage_aclcheck(srvid: pg_sys::Oid) -> pg_sys::AclResult
         pg_sys::pg_foreign_server_aclcheck(
             srvid,
             pg_sys::GetUserId(),
-            pg_sys::ACL_USAGE as pg_sys::AclMode,
+            pg_sys::AclMode::from(pg_sys::ACL_USAGE),
         )
     }
 }
@@ -257,7 +257,7 @@ unsafe fn foreign_server_usage_aclcheck(srvid: pg_sys::Oid) -> pg_sys::AclResult
             pg_sys::ForeignServerRelationId,
             srvid,
             pg_sys::GetUserId(),
-            pg_sys::ACL_USAGE as pg_sys::AclMode,
+            pg_sys::AclMode::from(pg_sys::ACL_USAGE),
         )
     }
 }
