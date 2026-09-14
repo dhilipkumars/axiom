@@ -98,6 +98,39 @@ and refuses `writable 'true'` on such a table.
 
 ## Caching
 
+**Caching requires the extension to be preloaded.** The cache lives in shared
+memory and is filled by a background worker, and neither exists unless Postgres
+loaded the library at startup:
+
+```
+# postgresql.conf, then restart -- this cannot change at runtime
+shared_preload_libraries = 'axiom'
+```
+
+**Append to the existing list rather than replacing it.** The setting is one
+comma-separated list, so `shared_preload_libraries = 'pg_stat_statements,axiom'`
+if something is already there. Copying the line above over a non-empty setting
+silently disables whatever it replaced, at the next restart.
+
+Without the preload a `cache_mode 'watch'` table still answers, by falling back
+to an RPC per scan, and `axiom_watch_status()` returns no rows. It does say so:
+every such scan raises
+
+```
+WARNING:  axiom: cache_mode 'watch' unavailable (axiom is not in
+shared_preload_libraries; the watch cache is unavailable); serving this scan on
+demand
+```
+
+which is easy to miss in a client that hides warnings, and is the thing to look
+for when caching appears to do nothing. Two settings are worth knowing alongside it,
+both also fixed at startup:
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `axiom.cache_size_mb` | `256` | Upper bound of the shared-memory cache. On reaching it, affected subscriptions go `DEGRADED` rather than evicting. |
+| `axiom.notify_database` | `postgres` | Database the worker opens for `NOTIFY axiom_events`. `LISTEN` there, which is not necessarily the database you query from. |
+
 By default (`cache_mode 'on_demand'`) every scan is an RPC. A table declared
 with `cache_mode 'watch'` is served instead from a shared-memory cache kept current by a watch stream:
 
