@@ -877,6 +877,23 @@ fn fetch_rows(state: &mut ScanState) -> VecDeque<Row> {
             state.next_page = Some(page.continue_token);
             decode_rows(&state.schema, &page.objects)
         }
+        Err(e) if e.class() == ErrorClass::Conflict => {
+            // The gateway reports an expired continuation as a conflict, the
+            // same class as a write losing a race, and the generic wording for
+            // that is "re-read the row and retry" -- wrong advice here. This
+            // scan has already returned rows to the executor from an earlier
+            // page, so there is nothing to re-read: the whole scan has to
+            // start again. Same SQLSTATE, because the recourse is still a
+            // retry and callers catch it by name.
+            raise(
+                client_sqlstate(&e),
+                format!(
+                    "axiom: the listing expired part way through this scan and cannot be \
+                     resumed; the snapshot it was reading was compacted by the API \
+                     server. Run the query again (or retry the transaction): {e}"
+                ),
+            )
+        }
         Err(e) => raise_client("list", &state.config.server, &e),
     }
 }

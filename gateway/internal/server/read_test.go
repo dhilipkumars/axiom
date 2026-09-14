@@ -364,7 +364,32 @@ func TestListShrinksAPageThatExceedsTheByteBudget(t *testing.T) {
 	}
 	// A short page must still be resumable, or the rest is silently lost.
 	if resp.GetContinueToken() == "" {
-		t.Error("a shrunk page must carry a continue token")
+		t.Fatal("a shrunk page must carry a continue token")
+	}
+
+	// Resume, which is where the interesting failure lives. A continuation
+	// cannot shrink -- ListOptions.Continue requires identical query
+	// parameters apart from continue itself -- so if the cursor recorded the
+	// requested limit rather than the one that actually fit, the next page
+	// asks for the size already proven too large and fails.
+	next, err := s.List(context.Background(), &axiomv1.ListRequest{
+		Gvk:           &axiomv1.GroupVersionKind{Version: "v1", Kind: "ConfigMap"},
+		Limit:         8,
+		ContinueToken: resp.GetContinueToken(),
+	})
+	if err != nil {
+		t.Fatalf("resuming after a shrunk page: %v", err)
+	}
+	total = 0
+	for _, o := range next.GetObjects() {
+		total += len(o.GetJson())
+	}
+	if total > maxPageBytes {
+		t.Errorf("resumed page returned %d bytes, over the %d budget", total, maxPageBytes)
+	}
+	// The shrunk size carried over rather than resetting to what was asked.
+	if last := pc.limits[len(pc.limits)-1]; last >= 8 {
+		t.Errorf("resumed with limit %d, want the shrunk size: the cursor did not carry it", last)
 	}
 }
 

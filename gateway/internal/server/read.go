@@ -115,24 +115,24 @@ func (s *Server) fetchBoundedPage(
 	limit int32,
 	continueToken string,
 	mayShrink bool,
-) ([]*axiomv1.Object, *unstructured.UnstructuredList, int, error) {
+) ([]*axiomv1.Object, *unstructured.UnstructuredList, int, int32, error) {
 	for {
 		list, err := s.k8s.List(ctx, gvk, namespace, name, int64(limit), continueToken)
 		if err != nil {
-			return nil, nil, 0, toGRPC(err)
+			return nil, nil, 0, 0, toGRPC(err)
 		}
 		objs := make([]*axiomv1.Object, 0, len(list.Items))
 		size := 0
 		for i := range list.Items {
 			po, err := objectToProto(&list.Items[i])
 			if err != nil {
-				return nil, nil, 0, err
+				return nil, nil, 0, 0, err
 			}
 			size += len(po.GetJson())
 			objs = append(objs, po)
 		}
 		if size <= maxPageBytes || limit <= 1 || !mayShrink {
-			return objs, list, size, nil
+			return objs, list, size, limit, nil
 		}
 		// Round up, so 3 becomes 2 rather than 1. Halving downwards
 		// overshoots on small limits and buys an extra round trip for a page
@@ -333,7 +333,7 @@ func (s *Server) List(ctx context.Context, req *axiomv1.ListRequest) (*axiomv1.L
 		limit, mayShrink = clampLimit(req.GetLimit()), true
 	}
 
-	objs, list, size, err := s.fetchBoundedPage(ctx, gvk, req.GetNamespace(), req.GetName(),
+	objs, list, size, effective, err := s.fetchBoundedPage(ctx, gvk, req.GetNamespace(), req.GetName(),
 		limit, cur.Continue, mayShrink)
 	if err != nil {
 		return nil, err
@@ -353,7 +353,11 @@ func (s *Server) List(ctx context.Context, req *axiomv1.ListRequest) (*axiomv1.L
 	resp := &axiomv1.ListResponse{
 		Objects:         objs,
 		ResourceVersion: list.GetResourceVersion(),
-		ContinueToken:   encodeCursor(list.GetContinue(), limit),
+		// The *effective* limit, not the requested one. A first page that had
+		// to shrink proved the requested size too large, and a continuation
+		// cannot shrink, so recording the original would guarantee the next
+		// page fails.
+		ContinueToken: encodeCursor(list.GetContinue(), effective),
 	}
 	s.log.LogAttrs(ctx, slog.LevelInfo, "list",
 		slog.String("gvk", gvk.String()),

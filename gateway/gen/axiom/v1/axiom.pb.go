@@ -525,10 +525,14 @@ type ListRequest struct {
 	// Continues a previous List. Pass back the continue_token from the last
 	// response; empty starts a new listing.
 	//
-	// The token belongs to the API server and encodes a snapshot, so it expires
-	// when that snapshot is compacted. Resuming an expired one fails with
-	// ABORTED rather than silently restarting, because earlier pages have
-	// already been returned to the caller and restarting would duplicate them.
+	// The token is the gateway's, not the API server's: it wraps the Kubernetes
+	// continuation together with the page size settled for this walk, and is not
+	// usable against Kubernetes directly. Treat it as opaque.
+	//
+	// It carries a snapshot, so it expires when that snapshot is compacted.
+	// Resuming an expired one fails with ABORTED rather than silently
+	// restarting, because earlier pages have already been returned to the caller
+	// and restarting would duplicate them.
 	ContinueToken string `protobuf:"bytes,5,opt,name=continue_token,json=continueToken,proto3" json:"continue_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -605,7 +609,8 @@ type ListResponse struct {
 	// resourceVersion of the list itself, usable as a watch start point.
 	ResourceVersion string `protobuf:"bytes,2,opt,name=resource_version,json=resourceVersion,proto3" json:"resource_version,omitempty"`
 	// Non-empty when more objects remain: pass it as the next request's
-	// continue_token. Empty means this was the last page.
+	// continue_token, unchanged. Empty means this was the last page. Opaque, and
+	// issued by the gateway rather than by Kubernetes.
 	ContinueToken string `protobuf:"bytes,3,opt,name=continue_token,json=continueToken,proto3" json:"continue_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

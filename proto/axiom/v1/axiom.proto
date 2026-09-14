@@ -216,10 +216,14 @@ message ListRequest {
   // Continues a previous List. Pass back the continue_token from the last
   // response; empty starts a new listing.
   //
-  // The token belongs to the API server and encodes a snapshot, so it expires
-  // when that snapshot is compacted. Resuming an expired one fails with
-  // ABORTED rather than silently restarting, because earlier pages have
-  // already been returned to the caller and restarting would duplicate them.
+  // The token is the gateway's, not the API server's: it wraps the Kubernetes
+  // continuation together with the page size settled for this walk, and is not
+  // usable against Kubernetes directly. Treat it as opaque.
+  //
+  // It carries a snapshot, so it expires when that snapshot is compacted.
+  // Resuming an expired one fails with ABORTED rather than silently
+  // restarting, because earlier pages have already been returned to the caller
+  // and restarting would duplicate them.
   string continue_token = 5;
 }
 
@@ -228,7 +232,8 @@ message ListResponse {
   // resourceVersion of the list itself, usable as a watch start point.
   string resource_version = 2;
   // Non-empty when more objects remain: pass it as the next request's
-  // continue_token. Empty means this was the last page.
+  // continue_token, unchanged. Empty means this was the last page. Opaque, and
+  // issued by the gateway rather than by Kubernetes.
   string continue_token = 3;
 }
 
