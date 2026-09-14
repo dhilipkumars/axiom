@@ -149,6 +149,9 @@ kind_load_gateway_image() {
     || fail "kind load docker-image $image"
   # Written only after a successful load, so an interrupted one reloads.
   docker exec "$node" sh -c "printf '%s' '$want' > $stamp" >/dev/null 2>&1 || true
+  # The deploy-image tag is just a staging name for `kind load`; keep a run from
+  # rewriting the developer's local image namespace permanently.
+  [[ "$source" == "$image" ]] || docker image rm "$image" >/dev/null 2>&1 || true
 }
 
 # kind_gateway_tls_secret: publish the compose-generated CA and server cert as a
