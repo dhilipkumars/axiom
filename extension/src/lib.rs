@@ -324,70 +324,42 @@ mod tests {
         status_for(ns).1
     }
 
-    /// Filling the cache reports `OutOfMemory`, and a replacement that fails
-    /// leaves the previous object intact.
+    /// A replacement that fails to allocate leaves the previous object intact.
     ///
-    /// This is the highest-risk path in the module and had no coverage at all.
+    /// The highest-risk path in the module, and it had no coverage at all.
     /// `upsert` allocates the new entry before unlinking the old one, so a
     /// failure partway through must leave the old entry linked rather than a
-    /// hole -- losing an object because the cache was full would be far worse
-    /// than refusing the write, since the refusal is visible and the loss is
-    /// not.
+    /// hole. Losing an object because the cache was full would be far worse
+    /// than refusing the write: the refusal is visible and the loss is not.
     ///
-    /// The cache is bounded to the GUC's minimum by the harness config, and
-    /// this fills it with objects large enough to get there in a few dozen
-    /// writes. It frees everything again immediately: the area is shared by
-    /// every subscription in the instance, so leaving it full would starve
-    /// anything running alongside.
+    /// The failure is injected rather than produced by filling the cache for
+    /// real. The DSA area is shared by every subscription in the postmaster,
+    /// so a test that exhausts it makes unrelated cache operations fail while
+    /// it runs, can have its own outcome changed by a concurrent free, and
+    /// leaves the area exhausted for everything else if it panics before
+    /// cleaning up. Injection is deterministic, consumes nothing, and the flag
+    /// is process-local, so a test in another backend cannot see it.
     #[pg_test]
-    fn cache_full_leaves_the_previous_object_intact() {
+    fn a_failed_replacement_leaves_the_previous_object_intact() {
+        use crate::shmem::fail_next_alloc;
+
         let ns = "prop-oom";
         let (slot, id) = slot_for(ns);
         clear(slot, id).expect("start from empty");
 
-        // A key written first, whose value must survive a later failed
-        // replacement.
-        let keeper = b"{\"keep\":\"original\"}".to_vec();
-        upsert(slot, id, ns, "keeper", "1", &keeper).expect("first write");
+        let original = br#"{"keep":"original"}"#.to_vec();
+        upsert(slot, id, ns, "keeper", "1", &original).expect("first write");
 
-        // Fill until the allocator refuses, in the largest objects the module
-        // accepts. A single oversized object would be rejected as TooLarge
-        // before reaching the allocator, so exhausting the area is the only
-        // way to the OutOfMemory path -- but at just under 4 MiB a 16 MiB
-        // cache is full in a handful of writes.
-        //
-        // Keeping that short matters: the area is shared by every subscription
-        // in the instance, so any test running alongside this one sees a full
-        // cache for as long as the fill lasts. Hence few, large writes and an
-        // immediate clear rather than a long loop of small ones.
-        let blob = vec![b'x'; 4 * 1024 * 1024 - 4096];
-        let mut filled = 0;
-        let mut hit_oom = false;
-        for i in 0..12 {
-            match upsert(slot, id, ns, &format!("fill-{i:03}"), "1", &blob) {
-                Ok(()) => filled += 1,
-                Err(ShmemError::OutOfMemory) => {
-                    hit_oom = true;
-                    break;
-                }
-                Err(e) => panic!("unexpected error while filling: {e}"),
-            }
-        }
-        assert!(
-            hit_oom,
-            "the cache never reported OutOfMemory after {filled} writes; the bound is \
-             not being enforced, or the harness is not applying axiom.cache_size_mb"
-        );
-
-        // The refused write must not have destroyed anything. A replacement of
-        // the existing key now also fails, and the original value must still
-        // be readable afterwards.
-        let replacement = vec![b'y'; 4 * 1024 * 1024 - 4096];
-        let replaced = upsert(slot, id, ns, "keeper", "2", &replacement);
+        // The replacement's allocation fails; the write must be refused.
+        fail_next_alloc::arm();
+        let replaced = upsert(slot, id, ns, "keeper", "2", br#"{"keep":"replacement"}"#);
+        fail_next_alloc::disarm();
         assert!(
             matches!(replaced, Err(ShmemError::OutOfMemory)),
-            "a replacement with no room should fail, got {replaced:?}"
+            "an allocation failure should refuse the write, got {replaced:?}"
         );
+
+        // And the object it was replacing must still be there, unchanged.
         let hits = scan(slot, id, ns, "keeper").expect("scan");
         assert_eq!(
             hits.len(),
@@ -395,17 +367,25 @@ mod tests {
             "the failed replacement lost the object entirely"
         );
         assert_eq!(
-            hits[0], keeper,
+            hits[0], original,
             "the failed replacement left a partially written object"
         );
-
-        // Give the space back before anything else needs it.
-        clear(slot, id).expect("clear");
         assert_eq!(
             status_for(ns),
-            (0, 0),
-            "clear must free the whole subscription"
+            (1, 0),
+            "a refused write must not change the counters"
         );
+
+        // A later write still works: the failure was one allocation, not a
+        // wedged subscription.
+        upsert(slot, id, ns, "keeper", "3", br#"{"keep":"after"}"#).expect("write after failure");
+        assert_eq!(
+            scan(slot, id, ns, "keeper").expect("scan")[0],
+            br#"{"keep":"after"}"#.to_vec(),
+            "the subscription should be usable again after a refused write"
+        );
+
+        clear(slot, id).expect("clear");
     }
 
     /// A tombstone survives until the grace period, and `sweep` then removes
@@ -847,11 +827,6 @@ pub mod pg_test {
             "axiom.gateway_endpoint = 'https://127.0.0.1:1'",
             "axiom.ping_interval_secs = 2",
             "axiom.rpc_timeout_secs = 1",
-            // The minimum the GUC allows. Big enough for every other test,
-            // whose objects are a few hundred bytes, and small enough that the
-            // allocation-failure path can be reached deliberately rather than
-            // left untested (see cache_full_leaves_the_previous_object_intact).
-            "axiom.cache_size_mb = 16",
         ]
     }
 }
