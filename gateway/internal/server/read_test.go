@@ -381,7 +381,7 @@ func TestListReportsASingleObjectOverTheBudget(t *testing.T) {
 	}
 	// Paging cannot split one object, so the message must say so rather than
 	// leaving the caller to retry something that can never succeed.
-	if !strings.Contains(err.Error(), "cannot split one object") {
+	if !strings.Contains(err.Error(), "cannot be split further") {
 		t.Errorf("error should explain that paging cannot help: %v", err)
 	}
 }

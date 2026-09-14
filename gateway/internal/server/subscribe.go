@@ -75,12 +75,16 @@ func (s *Server) Subscribe(req *axiomv1.SubscribeRequest, stream axiomv1.Gateway
 			count int
 			token string
 		)
+		// One limit for the whole walk, as the Kubernetes continuation
+		// contract expects. Subscribe owns both ends of this loop, so unlike
+		// the unary List it never has to carry the choice across a request.
+		pageLimit := int32(defaultPageSize)
 		for {
 			// The same byte-bounded fetch the unary List uses. Paging by count
 			// alone would leave the memory spike in place for exactly the
 			// kinds that cause it: 200 ConfigMaps of a megabyte each is 200
 			// MiB materialised before the first event goes out.
-			_, list, _, err := s.fetchBoundedPage(ctx, gvk, ns, "", defaultPageSize, token)
+			_, list, _, err := s.fetchBoundedPage(ctx, gvk, ns, "", pageLimit, token, true)
 			if err != nil {
 				return err
 			}

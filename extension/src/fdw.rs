@@ -834,13 +834,17 @@ fn fetch_from_cache(state: &ScanState) -> Option<VecDeque<Row>> {
     }
 }
 
-/// Fetches all matching rows: from the watch cache when the table is in
-/// `cache_mode 'watch'` and its subscription is servable, otherwise with one
-/// RPC (or none, for an impossible filter).
 /// Fetches the next page of rows, advancing the scan's cursor.
 ///
-/// A cache-served scan has no pages: the shared-memory cache already holds the
-/// whole collection, so it returns everything and marks the scan exhausted.
+/// An on-demand scan reads a collection over several RPCs rather than one,
+/// because a whole collection does not fit a single gRPC message on any
+/// cluster of size. The page size and the resume point are the gateway's to
+/// choose; this only carries its token back.
+///
+/// A cache-served scan has no pages: when the table is in `cache_mode 'watch'`
+/// and its subscription is servable, the shared-memory cache already holds the
+/// whole collection, so it returns everything at once and marks the scan
+/// exhausted. An impossible filter returns nothing and does the same.
 fn fetch_rows(state: &mut ScanState) -> VecDeque<Row> {
     if state.filter.impossible {
         state.exhausted = true;
