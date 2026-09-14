@@ -156,6 +156,13 @@ SELECT * FROM axiom_watch_status();
   is offered, never silently.
 - **`RESYNCING`** — the stream is being re-established.
 
+Two of the columns are worth watching over time. `objects` is what a scan will
+return. `tombstones` is objects deleted in the cluster that the cache still
+holds briefly, so that a scan running at the moment of a delete does not watch
+a row vanish. They are never returned, and a sweep clears them a couple of
+seconds later. A count that keeps climbing rather than returning to zero means
+sweeping is not keeping up, and that memory is not being reclaimed.
+
 Recovery resumes from the last bookmark rather than relisting, so a gateway
 restart does not re-fetch every object. The trade is simple: caching means
 never paying for a scan, at the cost of a window where the rows are stale and

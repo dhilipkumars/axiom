@@ -231,6 +231,15 @@ pub struct SubStatus {
     pub state: SubState,
     /// Live (non-tombstoned) objects.
     pub objects: u32,
+    /// Objects deleted but still held for the tombstone grace period.
+    ///
+    /// Not visible to a scan, but they occupy cache memory until `sweep`
+    /// removes them, so an operator watching cache growth needs to see them.
+    /// It is also the only way to observe that sweeping honours the grace
+    /// period at all: a tombstone is invisible to a scan whether or not it has
+    /// been swept, so without this, sweeping too early has no detectable
+    /// effect.
+    pub tombstones: u32,
     /// Bookmark.
     pub resource_version: String,
     /// Microseconds since 2000-01-01 of the last stream event, 0 = never.
@@ -385,6 +394,7 @@ pub fn status() -> Result<Vec<SubStatus>, ShmemError> {
             namespace: get(&s.namespace, s.ns_len as usize),
             state: SubState::from_u8(s.state),
             objects: s.live_count,
+            tombstones: s.tombstone_count,
             resource_version: get(&s.bookmark_rv, s.rv_len as usize),
             last_event_us: s.last_event_us,
             state_since_us: s.state_since_us,
@@ -582,6 +592,37 @@ unsafe fn view<'a>(area: *mut pg_sys::dsa_area, ptr: pg_sys::dsa_pointer) -> Ent
     }
 }
 
+/// Forces the next cache allocation to fail, for tests.
+///
+/// Deliberately not a way to simulate a full cache in general: it makes one
+/// allocation fail so the rollback path can be checked deterministically,
+/// without consuming the shared area that every other subscription depends on.
+#[cfg(any(test, feature = "pg_test"))]
+pub mod fail_next_alloc {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Arms the next allocation to fail with `OutOfMemory`.
+    pub fn arm() {
+        ARMED.with(|a| a.set(true));
+    }
+
+    /// Disarms, whether or not it fired. Safe to call unconditionally, which
+    /// is what makes cleanup panic-safe: nothing is left armed for the next
+    /// test in this backend.
+    pub fn disarm() {
+        ARMED.with(|a| a.set(false));
+    }
+
+    /// Consumes the flag, returning whether this allocation should fail.
+    pub(super) fn take() -> bool {
+        ARMED.with(Cell::take)
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "private constructor mirroring the on-disk entry layout"
@@ -606,6 +647,20 @@ unsafe fn alloc_entry(
     {
         return Err(ShmemError::TooLarge("object key"));
     }
+    // Test-only allocation failure.
+    //
+    // The alternative is exhausting the DSA area for real, and the area is
+    // shared by every subscription in the postmaster: a test that fills it
+    // makes unrelated cache operations fail while it runs, can have its own
+    // result changed by a concurrent free, and leaves the cache exhausted for
+    // everything else if it panics before cleaning up. Compiled out of release
+    // builds, and the flag is a plain process-local static, so setting it in
+    // one backend cannot affect a test running in another.
+    #[cfg(any(test, feature = "pg_test"))]
+    if fail_next_alloc::take() {
+        return Err(ShmemError::OutOfMemory);
+    }
+
     let total = HDR + ns.len() + name.len() + rv.len() + json.len();
     // SAFETY: NO_OOM makes allocation failure a null pointer, never an ERROR.
     unsafe {

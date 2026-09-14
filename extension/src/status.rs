@@ -20,6 +20,7 @@ fn axiom_watch_status() -> TableIterator<
         name!(namespace, String),
         name!(state, String),
         name!(objects, i64),
+        name!(tombstones, i64),
         name!(resource_version, String),
         name!(last_event_age_secs, Option<f64>),
         name!(state_age_secs, f64),
@@ -45,6 +46,7 @@ fn axiom_watch_status() -> TableIterator<
             r.namespace,
             r.state.name().to_owned(),
             i64::from(r.objects),
+            i64::from(r.tombstones),
             r.resource_version,
             if r.last_event_us == 0 {
                 None

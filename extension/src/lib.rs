@@ -101,6 +101,365 @@ mod tests {
         assert_eq!(n, Ok(Some(1)));
     }
 
+    // --- shared-memory cache: model-based property tests -----------------------
+    //
+    // The harness calls these through schema "tests", which pgrx-tests
+    // hard-codes, so they live here rather than in a module of their own
+    // beside the code they exercise.
+
+    use crate::cache::TOMBSTONE_GRACE_US;
+    use crate::resource::Resource;
+    use crate::shmem::{clear, lookup_or_request, scan, sweep, tombstone, upsert, ShmemError};
+    use crate::transport::Target;
+    use std::collections::{HashMap, HashSet};
+    use std::time::Duration;
+
+    /// A tiny deterministic generator.
+    ///
+    /// Not `rand`: a failing sequence has to be reproducible from the seed
+    /// printed in the failure, and a dependency whose algorithm may change
+    /// between versions cannot promise that. xorshift64* is a few lines and
+    /// good enough to shuffle operations.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            usize::try_from(self.next() % n as u64).unwrap_or(0)
+        }
+    }
+
+    /// Registers a subscription to operate on, returning its (slot, id).
+    ///
+    /// Each test uses a distinct namespace so slots do not collide: identity is
+    /// (endpoint, CA, kind, namespace), and the harness runs tests in parallel
+    /// against one Postgres.
+    fn slot_for(namespace: &str) -> (usize, u32) {
+        let target = Target::parse(Some("https://shmem-test:8443"), None).expect("target");
+        let resource = Resource::new("", "v1", "Pod", "pods", true).expect("resource");
+        let (slot, id, _) =
+            lookup_or_request(&target, Duration::from_secs(5), &resource, namespace)
+                .expect("a free subscription slot");
+        (slot, id)
+    }
+
+    /// What the cache is expected to hold: the live objects, and the keys
+    /// currently tombstoned.
+    #[derive(Default)]
+    struct Model {
+        live: HashMap<(String, String), Vec<u8>>,
+        tombstoned: HashSet<(String, String)>,
+    }
+
+    /// Checks the cache against the model. `scan` is the real observation: it
+    /// is what a SQL query actually reads, so agreeing with it is the property
+    /// that matters, not the internal counters.
+    fn assert_matches(slot: usize, id: u32, ns: &str, model: &Model, step: usize, seed: u64) {
+        let mut got = scan(slot, id, ns, "").expect("scan");
+        got.sort_unstable();
+        let mut want: Vec<Vec<u8>> = model.live.values().cloned().collect();
+        want.sort_unstable();
+        assert_eq!(
+            got.len(),
+            want.len(),
+            "step {step} (seed {seed}): scan returned {} objects, model has {}",
+            got.len(),
+            want.len()
+        );
+        assert_eq!(
+            got, want,
+            "step {step} (seed {seed}): scan disagrees with the model"
+        );
+
+        // Every tombstoned key must be invisible to a scan, which is the whole
+        // point of a tombstone: present for the grace period, never returned.
+        for (ns_key, name) in &model.tombstoned {
+            let hits = scan(slot, id, ns_key, name).expect("scan by key");
+            assert!(
+                hits.is_empty(),
+                "step {step} (seed {seed}): tombstoned {ns_key}/{name} was returned by a scan"
+            );
+        }
+
+        // A point lookup must find exactly the live objects, which exercises
+        // the hash chains rather than the full walk.
+        for ((ns_key, name), json) in &model.live {
+            let hits = scan(slot, id, ns_key, name).expect("scan by key");
+            assert_eq!(
+                hits.len(),
+                1,
+                "step {step} (seed {seed}): {ns_key}/{name} should be found exactly once"
+            );
+            assert_eq!(
+                &hits[0], json,
+                "step {step} (seed {seed}): stale value for {ns_key}/{name}"
+            );
+        }
+    }
+
+    /// Randomised upsert/tombstone/clear sequences must leave the cache
+    /// agreeing with a plain `HashMap`.
+    ///
+    /// This module is ~950 lines with 25 `unsafe` blocks doing its own hashing,
+    /// chaining and allocation inside a DSA area, and until now nothing tested
+    /// it directly: a corruption bug surfaced as "a scan returned the wrong
+    /// rows" somewhere else entirely. The key count is deliberately small
+    /// relative to the operation count so the same keys are hit repeatedly,
+    /// which is what exercises replacement, resurrection and chain edits
+    /// rather than just insertion.
+    #[pg_test]
+    fn cache_agrees_with_a_reference_map_under_random_operations() {
+        const SEED: u64 = 0x5EED_1234_ABCD_0001;
+        const OPS: usize = 400;
+        const KEYS: usize = 24;
+
+        let ns = "prop-random";
+        let (slot, id) = slot_for(ns);
+        clear(slot, id).expect("start from empty");
+
+        let mut rng = Rng(SEED);
+        let mut model = Model::default();
+
+        for step in 0..OPS {
+            let k = rng.below(KEYS);
+            let name = format!("obj-{k:02}");
+            let key = (ns.to_owned(), name.clone());
+
+            match rng.below(100) {
+                // Upsert dominates, as a real watch stream does.
+                0..=59 => {
+                    let json = format!(r#"{{"name":"{name}","v":{step}}}"#).into_bytes();
+                    upsert(slot, id, ns, &name, &step.to_string(), &json).expect("upsert");
+                    model.live.insert(key.clone(), json);
+                    model.tombstoned.remove(&key);
+                }
+                60..=84 => {
+                    tombstone(slot, id, ns, &name).expect("tombstone");
+                    // Only a live object becomes a tombstone; tombstoning an
+                    // absent or already-deleted key is a no-op by contract.
+                    if model.live.remove(&key).is_some() {
+                        model.tombstoned.insert(key);
+                    }
+                }
+                85..=97 => {
+                    // A scan of a key that may or may not exist: the result is
+                    // checked below like every other step.
+                }
+                _ => {
+                    clear(slot, id).expect("clear");
+                    model.live.clear();
+                    model.tombstoned.clear();
+                }
+            }
+
+            assert_matches(slot, id, ns, &model, step, SEED);
+        }
+
+        // The run must actually have built something, or the assertions above
+        // were checking an empty cache 400 times.
+        assert!(
+            !model.live.is_empty(),
+            "the generated sequence left nothing live; it is not exercising the cache"
+        );
+    }
+
+    /// Growing past the load factor rehashes, and must not lose or duplicate a
+    /// key while doing it.
+    ///
+    /// Buckets start at 64 and double past 75% load, so inserting several
+    /// hundred keys crosses the threshold more than once. A rehash that
+    /// dropped a chain would show up as a short scan; one that relinked an
+    /// entry twice as a duplicate.
+    #[pg_test]
+    fn rehashing_preserves_every_key() {
+        const N: usize = 500;
+        let ns = "prop-rehash";
+        let (slot, id) = slot_for(ns);
+        clear(slot, id).expect("start from empty");
+
+        for i in 0..N {
+            let name = format!("k-{i:04}");
+            let json = format!(r#"{{"i":{i}}}"#).into_bytes();
+            upsert(slot, id, ns, &name, "1", &json).expect("upsert");
+        }
+
+        let got = scan(slot, id, ns, "").expect("scan");
+        assert_eq!(got.len(), N, "rehashing lost or duplicated entries");
+
+        // Every key individually reachable, which a broken chain would fail
+        // even when the total happens to come out right.
+        for i in 0..N {
+            let name = format!("k-{i:04}");
+            let hits = scan(slot, id, ns, &name).expect("scan by key");
+            assert_eq!(
+                hits.len(),
+                1,
+                "{name} not found exactly once after rehashing"
+            );
+        }
+        clear(slot, id).expect("clear");
+    }
+
+    /// The (live, tombstone) counts for one slot.
+    ///
+    /// The tombstone half is the only way to see that a tombstone exists at
+    /// all: a scan never returns one.
+    fn status_for(ns: &str) -> (u32, u32) {
+        crate::shmem::status()
+            .expect("status")
+            .into_iter()
+            .find(|r| r.namespace == ns && r.endpoint == "https://shmem-test:8443")
+            .map_or((0, 0), |r| (r.objects, r.tombstones))
+    }
+
+    fn tombstones_for(ns: &str) -> u32 {
+        status_for(ns).1
+    }
+
+    /// A replacement that fails to allocate leaves the previous object intact.
+    ///
+    /// The highest-risk path in the module, and it had no coverage at all.
+    /// `upsert` allocates the new entry before unlinking the old one, so a
+    /// failure partway through must leave the old entry linked rather than a
+    /// hole. Losing an object because the cache was full would be far worse
+    /// than refusing the write: the refusal is visible and the loss is not.
+    ///
+    /// The failure is injected rather than produced by filling the cache for
+    /// real. The DSA area is shared by every subscription in the postmaster,
+    /// so a test that exhausts it makes unrelated cache operations fail while
+    /// it runs, can have its own outcome changed by a concurrent free, and
+    /// leaves the area exhausted for everything else if it panics before
+    /// cleaning up. Injection is deterministic, consumes nothing, and the flag
+    /// is process-local, so a test in another backend cannot see it.
+    #[pg_test]
+    fn a_failed_replacement_leaves_the_previous_object_intact() {
+        use crate::shmem::fail_next_alloc;
+
+        let ns = "prop-oom";
+        let (slot, id) = slot_for(ns);
+        clear(slot, id).expect("start from empty");
+
+        let original = br#"{"keep":"original"}"#.to_vec();
+        upsert(slot, id, ns, "keeper", "1", &original).expect("first write");
+
+        // The replacement's allocation fails; the write must be refused.
+        fail_next_alloc::arm();
+        let replaced = upsert(slot, id, ns, "keeper", "2", br#"{"keep":"replacement"}"#);
+        fail_next_alloc::disarm();
+        assert!(
+            matches!(replaced, Err(ShmemError::OutOfMemory)),
+            "an allocation failure should refuse the write, got {replaced:?}"
+        );
+
+        // And the object it was replacing must still be there, unchanged.
+        let hits = scan(slot, id, ns, "keeper").expect("scan");
+        assert_eq!(
+            hits.len(),
+            1,
+            "the failed replacement lost the object entirely"
+        );
+        assert_eq!(
+            hits[0], original,
+            "the failed replacement left a partially written object"
+        );
+        assert_eq!(
+            status_for(ns),
+            (1, 0),
+            "a refused write must not change the counters"
+        );
+
+        // A later write still works: the failure was one allocation, not a
+        // wedged subscription.
+        upsert(slot, id, ns, "keeper", "3", br#"{"keep":"after"}"#).expect("write after failure");
+        assert_eq!(
+            scan(slot, id, ns, "keeper").expect("scan")[0],
+            br#"{"keep":"after"}"#.to_vec(),
+            "the subscription should be usable again after a refused write"
+        );
+
+        clear(slot, id).expect("clear");
+    }
+
+    /// A tombstone survives until the grace period, and `sweep` then removes
+    /// it.
+    ///
+    /// Asserted on the tombstone count rather than on scan results, because a
+    /// scan cannot see the difference: a tombstone is invisible whether or not
+    /// it has been swept. An earlier version of this test checked scans and
+    /// passed even with the expiry check removed entirely, which is how the
+    /// count came to be exposed in the first place.
+    ///
+    /// The grace period exists so a scan that began before a delete does not
+    /// watch an object vanish, so sweeping early is as wrong as never
+    /// sweeping.
+    #[pg_test]
+    fn sweep_removes_expired_tombstones_and_spares_fresh_ones() {
+        let ns = "prop-sweep";
+        let (slot, id) = slot_for(ns);
+        clear(slot, id).expect("start from empty");
+
+        for i in 0..6 {
+            let name = format!("s-{i}");
+            upsert(
+                slot,
+                id,
+                ns,
+                &name,
+                "1",
+                format!(r#"{{"i":{i}}}"#).as_bytes(),
+            )
+            .expect("upsert");
+        }
+        for i in 0..4 {
+            tombstone(slot, id, ns, &format!("s-{i}")).expect("tombstone");
+        }
+        assert_eq!(tombstones_for(ns), 4, "four objects were deleted");
+        assert_eq!(
+            scan(slot, id, ns, "").expect("scan").len(),
+            2,
+            "tombstones must not be visible to a scan"
+        );
+
+        // Fresh tombstones survive a sweep. This is the assertion the earlier
+        // version could not make.
+        sweep().expect("sweep");
+        assert_eq!(
+            tombstones_for(ns),
+            4,
+            "sweep removed tombstones that are still inside the grace period"
+        );
+        assert_eq!(
+            scan(slot, id, ns, "").expect("scan").len(),
+            2,
+            "sweeping must not drop live objects"
+        );
+
+        // Past the grace period they go, and the live objects stay.
+        std::thread::sleep(Duration::from_micros(
+            u64::try_from(TOMBSTONE_GRACE_US).unwrap_or(2_000_000) + 250_000,
+        ));
+        sweep().expect("sweep");
+        assert_eq!(
+            tombstones_for(ns),
+            0,
+            "sweep left tombstones that are past the grace period"
+        );
+        assert_eq!(
+            scan(slot, id, ns, "").expect("scan").len(),
+            2,
+            "sweeping expired tombstones must leave the live objects alone"
+        );
+        clear(slot, id).expect("clear");
+    }
+
     // --- Phase 1: FDW DDL and scan behaviour without a real gateway ------------
 
     /// A server pointing at a port nothing listens on, with a short timeout.
