@@ -48,9 +48,15 @@ type Client interface {
 	// for a cluster-scoped kind. Across all namespaces it can yield several,
 	// since a name is unique only within one. A filter matching nothing is an
 	// empty list, not an error.
-	// List returns one page. limit bounds the objects returned (zero lets the
-	// API server choose) and continueToken resumes a previous page. The
+	// List returns one page. continueToken resumes a previous page, and the
 	// returned list's GetContinue() is non-empty when more remain.
+	//
+	// limit is passed straight to the API server, where **zero means no
+	// paging at all**, not "choose a sensible size": the whole collection
+	// comes back in one response. Callers that want a bounded page must pass
+	// a positive number. The server's own entry points do, via clampLimit,
+	// which is what keeps a request for "no limit" from becoming an unbounded
+	// fetch.
 	List(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string, limit int64, continueToken string) (*unstructured.UnstructuredList, error)
 	// Create creates obj. apiVersion/kind must already match gvk.
 	Create(ctx context.Context, gvk schema.GroupVersionKind, namespace string, obj *unstructured.Unstructured) (*unstructured.Unstructured, error)

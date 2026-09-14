@@ -131,7 +131,11 @@ func (s *Server) fetchBoundedPage(
 		if size <= maxPageBytes || limit <= 1 {
 			return objs, list, size, nil
 		}
-		limit /= 2
+		// Round up, so 3 becomes 2 rather than 1. Halving downwards
+		// overshoots on small limits and buys an extra round trip for a page
+		// that would have fit. Still strictly decreasing while limit > 1, so
+		// the loop terminates.
+		limit = (limit + 1) / 2
 		s.log.LogAttrs(ctx, slog.LevelInfo, "list_page_shrunk",
 			slog.String("gvk", gvk.String()),
 			slog.Int("bytes", size),

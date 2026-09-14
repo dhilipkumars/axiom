@@ -204,7 +204,23 @@ impl GatewayService for Stub {
         // merely compiled. The token is the index to resume from, which is
         // enough to model the API server's contract: opaque to the client,
         // meaningful only to the server that issued it.
-        let start: usize = req.continue_token.parse().unwrap_or(0);
+        // A malformed token is an error, not a silent restart. Falling back
+        // to 0 would turn "the extension forwarded garbage" into "the listing
+        // began again", which is indistinguishable from correct behaviour in
+        // a test that only counts rows.
+        let start: usize = if req.continue_token.is_empty() {
+            0
+        } else {
+            match req.continue_token.parse() {
+                Ok(n) => n,
+                Err(_) => {
+                    return Err(Status::invalid_argument(format!(
+                        "stub: malformed continue token {:?}",
+                        req.continue_token
+                    )))
+                }
+            }
+        };
         let limit = if let Ok(n) = usize::try_from(req.limit).map(|n| n.max(1)) {
             if req.limit > 0 {
                 n
