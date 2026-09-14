@@ -45,9 +45,11 @@ spec:
       containers:
         - name: gateway
           image: ghcr.io/dhilipkumars/axiom-gateway:main
-          # Default to the published GHCR image. The E2E gates deliberately
-          # side-load a local build under this exact reference, so
-          # IfNotPresent still prefers the node's cached copy there.
+          # Default to the published GHCR image for this repository. A fork that
+          # publishes under a different owner needs to patch only this field.
+          # The E2E gates deliberately side-load a local build under this exact
+          # reference, so IfNotPresent still prefers the node's cached copy
+          # there.
           imagePullPolicy: IfNotPresent
           # Arguments match gateway/cmd/gateway/main.go.
           # -kubeconfig is omitted so k8s.Config falls back to rest.InClusterConfig(),

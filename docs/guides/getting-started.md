@@ -105,9 +105,11 @@ kubectl -n axiom-system rollout status deploy/axiom-gateway
 ```
 
 `deploy/k8s/gateway-deployment.yaml` pulls
-`ghcr.io/dhilipkumars/axiom-gateway:main` by default. If you are iterating on a
-local gateway build and want kind to run that instead, tag it with the same
-reference and side-load it before the `kubectl apply` above:
+`ghcr.io/dhilipkumars/axiom-gateway:main` by default. If you are following this
+from a fork that publishes under a different owner, patch the manifest's
+`image:` field to that owner first. If you are iterating on a local gateway
+build and want kind to run that instead, tag it with the same reference and
+side-load it before the `kubectl apply` above:
 
 ```sh
 docker build -f gateway/Dockerfile -t ghcr.io/dhilipkumars/axiom-gateway:main .
