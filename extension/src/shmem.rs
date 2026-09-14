@@ -231,6 +231,15 @@ pub struct SubStatus {
     pub state: SubState,
     /// Live (non-tombstoned) objects.
     pub objects: u32,
+    /// Objects deleted but still held for the tombstone grace period.
+    ///
+    /// Not visible to a scan, but they occupy cache memory until `sweep`
+    /// removes them, so an operator watching cache growth needs to see them.
+    /// It is also the only way to observe that sweeping honours the grace
+    /// period at all: a tombstone is invisible to a scan whether or not it has
+    /// been swept, so without this, sweeping too early has no detectable
+    /// effect.
+    pub tombstones: u32,
     /// Bookmark.
     pub resource_version: String,
     /// Microseconds since 2000-01-01 of the last stream event, 0 = never.
@@ -385,6 +394,7 @@ pub fn status() -> Result<Vec<SubStatus>, ShmemError> {
             namespace: get(&s.namespace, s.ns_len as usize),
             state: SubState::from_u8(s.state),
             objects: s.live_count,
+            tombstones: s.tombstone_count,
             resource_version: get(&s.bookmark_rv, s.rv_len as usize),
             last_event_us: s.last_event_us,
             state_since_us: s.state_since_us,
