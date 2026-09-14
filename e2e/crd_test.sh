@@ -44,7 +44,9 @@ kubectl_e2e apply -f "$E2E_ROOT/e2e/fixtures/widgets.yaml" >/dev/null || fail "a
 stack_up
 # gizmos is deliberately absent: this gate asserts that a kind outside
 # --serve is withheld even though discovery can see it.
-kind_deploy_gateway "pods,configmaps,widgets.example.com"
+# 3s discovery TTL: this gate proves a deleted CRD stops being offered, and the
+# five-minute default cannot be waited out in a test.
+kind_deploy_gateway "pods,configmaps,widgets.example.com" "3s"
 
 log "the gateway is running on in-cluster credentials, not a kubeconfig"
 gw_args="$(kubectl_e2e -n "$E2E_GATEWAY_SA_NS" get deploy/axiom-gateway -o jsonpath='{.spec.template.spec.containers[0].args}')"
@@ -308,6 +310,37 @@ psql_axiom "IMPORT FOREIGN SCHEMA \"example.com\" FROM SERVER kind INTO onlyw;"
 got="$(psql_axiom "SELECT string_agg(c.relname, ',' ORDER BY c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'onlyw' AND c.relkind = 'f';")"
 [[ "$got" == "widgets" ]] || fail "group-scoped import gave '$got', want 'widgets'"
 echo "example.com import: $got"
+
+log "a CRD deleted from the cluster stops being offered once the cache expires"
+# The opposite direction from "a new CRD needs no restart", which is covered
+# above. A resource list fetched successfully used to be kept for the life of
+# the process, so a kind that was uninstalled kept resolving and IMPORT kept
+# generating a table for it. Found by uninstalling an operator and re-importing.
+#
+# This is the case a unit test cannot reach: the fix has to drop client-go's own
+# discovery cache as well as ours, and only a real cached discovery client shows
+# whether it does.
+kubectl_e2e delete crd widgets.example.com --ignore-not-found --wait=true >/dev/null \
+  || fail "failed to delete the widget CRD"
+
+# Re-import until widgets is gone, not until the import merely succeeds. The
+# first import after the delete succeeds while the cache is still warm and
+# still offers widgets, so a retry-until-success loop exits immediately with
+# the answer it was meant to wait out.
+got=""
+deadline=$((SECONDS + 60))
+while (( SECONDS < deadline )); do
+  psql_axiom "DROP SCHEMA IF EXISTS gone CASCADE;" >/dev/null 2>&1
+  psql_axiom "CREATE SCHEMA gone;" >/dev/null 2>&1
+  psql_axiom "IMPORT FOREIGN SCHEMA \"example.com\" FROM SERVER kind INTO gone;" >/dev/null 2>&1
+  got="$(psql_axiom "SELECT coalesce(string_agg(c.relname, ',' ORDER BY c.relname), '') FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'gone' AND c.relkind = 'f';" 2>/dev/null || echo "?")"
+  grep -q "widgets" <<<"$got" || break
+  sleep 2
+done
+grep -q "widgets" <<<"$got" \
+  && fail "a deleted CRD was still offered 60s after the 3s discovery TTL: '$got'"
+echo "deleted CRD no longer offered (import produced: '${got:-nothing}')"
+psql_axiom "DROP SCHEMA IF EXISTS gone CASCADE;" >/dev/null
 
 log "cleanup"
 kubectl_e2e -n "$NS" delete widgets --all --ignore-not-found --wait=false >/dev/null

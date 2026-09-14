@@ -753,7 +753,7 @@ func TestDiscoveryStopsOfferingARemovedKind(t *testing.T) {
 	d.now = func() time.Time { return base }
 	d.mu.Lock()
 	for gv, e := range d.cache {
-		e.fetched = base.Add(-resourceTTL - time.Second)
+		e.fetched = base.Add(-d.resourceTTL - time.Second)
 		d.cache[gv] = e
 	}
 	d.mu.Unlock()
@@ -761,5 +761,47 @@ func TestDiscoveryStopsOfferingARemovedKind(t *testing.T) {
 	_, _, err := d.Resolve(context.Background(), widget)
 	if !errors.Is(err, ErrUnsupportedKind) {
 		t.Errorf("after the TTL a removed kind must stop resolving, got %v", err)
+	}
+}
+
+// Describe must be as uninformative as Resolve about why a kind is refused.
+//
+// Resolve had a shared error for all three causes and Describe did not: its
+// allowlist and access-check branches kept a terse message, so DiscoverSchema
+// answered differently for "no such kind" than for "exists but not served".
+// That is the enumeration hole the shared message exists to close, reachable
+// by anyone who can ask the gateway to describe a kind.
+func TestDescribeDoesNotRevealWhyAKindIsRefused(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// Excluded by the serve list, but present in the cluster.
+	byAllowlist, _ := newTestDiscovery(t, "pods")
+	_, denied := byAllowlist.Describe(ctx, schema.GroupVersionKind{Version: "v1", Kind: "Secret"})
+	if !errors.Is(denied, ErrUnsupportedKind) {
+		t.Fatalf("Describe(Secret) = %v, want ErrUnsupportedKind", denied)
+	}
+
+	// Not in the cluster at all.
+	_, absent := byAllowlist.Describe(ctx, schema.GroupVersionKind{Version: "v1", Kind: "Nonexistent"})
+	if !errors.Is(absent, ErrUnsupportedKind) {
+		t.Fatalf("Describe(Nonexistent) = %v, want ErrUnsupportedKind", absent)
+	}
+
+	// Served, but the identity may not list it.
+	byAccess, _ := newTestDiscoveryWithAccess(t, "*.*", &fakeAccess{allowed: map[string]bool{"pods": true}})
+	_, noAccess := byAccess.Describe(ctx, schema.GroupVersionKind{Version: "v1", Kind: "Secret"})
+	if !errors.Is(noAccess, ErrUnsupportedKind) {
+		t.Fatalf("Describe(Secret) without access = %v, want ErrUnsupportedKind", noAccess)
+	}
+
+	norm := func(e error, kind string) string {
+		return strings.ReplaceAll(e.Error(), kind, "KIND")
+	}
+	a := norm(denied, "Secret")
+	b := norm(absent, "Nonexistent")
+	c := norm(noAccess, "Secret")
+	if a != b || a != c {
+		t.Errorf("the three refusals differ, so the reason is enumerable:\n allowlist: %s\n absent:    %s\n no access: %s", a, b, c)
 	}
 }

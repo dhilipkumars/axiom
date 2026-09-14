@@ -188,7 +188,7 @@ fn write_sqlstate(e: &WriteError) -> PgSqlErrorCode {
 /// anything. Making the deadline per-call rather than per-channel is the way
 /// to do it and is its own change; this message is the half that helps today.
 fn raise_import(op: &str, server: &ServerOptions, e: &ClientError) -> ! {
-    if e.class() == ErrorClass::Connection && e.to_string().to_lowercase().contains("timeout") {
+    if e.is_deadline() {
         raise(
             client_sqlstate(e),
             format!(

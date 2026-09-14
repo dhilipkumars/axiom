@@ -72,7 +72,8 @@ type resourceCacheEntry struct {
 // On the other side, a kind that has genuinely gone stops being offered within
 // five minutes instead of never, which is the difference between a puzzle and
 // a wait.
-const resourceTTL = 5 * time.Minute
+// DefaultResourceTTL is the default; -discovery-ttl overrides it.
+const DefaultResourceTTL = 5 * time.Minute
 
 // Discovery is the cluster-backed Mapper.
 //
@@ -100,6 +101,8 @@ type Discovery struct {
 	// now is time.Now, overridden in tests so the resource TTL can be
 	// exercised without waiting for it.
 	now func() time.Time
+	// resourceTTL is how long a fetched resource list is trusted.
+	resourceTTL time.Duration
 
 	openapiFetches atomic.Uint64
 
@@ -135,6 +138,14 @@ type Discovery struct {
 
 // NewDiscovery builds a Mapper over a cached discovery client, serving only
 // what allow permits.
+// SetResourceTTL overrides how long a group-version's resource list is
+// trusted. Zero or negative leaves the default in place.
+func (d *Discovery) SetResourceTTL(ttl time.Duration) {
+	if ttl > 0 {
+		d.resourceTTL = ttl
+	}
+}
+
 func NewDiscovery(disco discovery.CachedDiscoveryInterface, allow Allowlist, access AccessChecker, logger *slog.Logger) *Discovery {
 	if access == nil {
 		access = AllowAll{}
@@ -144,6 +155,7 @@ func NewDiscovery(disco discovery.CachedDiscoveryInterface, allow Allowlist, acc
 	}
 	return &Discovery{
 		now:         time.Now,
+		resourceTTL: DefaultResourceTTL,
 		log:         logger,
 		disco:       disco,
 		access:      access,
@@ -164,7 +176,7 @@ func (d *Discovery) resourcesFor(gv schema.GroupVersion, refresh bool) (resource
 		d.mu.RUnlock()
 		// Expired entries are refetched rather than served. Without this a
 		// removed kind is offered for the life of the process.
-		if ok && time.Since(e.fetched) < resourceTTL {
+		if ok && d.now().Sub(e.fetched) < d.resourceTTL {
 			return e, nil
 		}
 		if ok {
@@ -290,7 +302,7 @@ func (d *Discovery) Describe(ctx context.Context, gvk schema.GroupVersionKind) (
 		return KindInfo{}, err
 	}
 	if !d.allow.Permits(gvk.Group, r.Name) {
-		return KindInfo{}, fmt.Errorf("%w: %s", ErrUnsupportedKind, gvk.String())
+		return KindInfo{}, unservedKind(gvk)
 	}
 	// A kind the gateway cannot list has no rows, and generating a table for
 	// it would turn an RBAC gap into a confusing runtime error on every scan.
@@ -300,7 +312,7 @@ func (d *Discovery) Describe(ctx context.Context, gvk schema.GroupVersionKind) (
 		return KindInfo{}, err
 	}
 	if !allowed {
-		return KindInfo{}, fmt.Errorf("%w: %s", ErrUnsupportedKind, gvk.String())
+		return KindInfo{}, unservedKind(gvk)
 	}
 	topLevel, err := d.topLevelFields(ctx, gvk)
 	if err != nil {

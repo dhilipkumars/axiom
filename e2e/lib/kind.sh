@@ -186,6 +186,10 @@ check ownership in $tmp"
 # ConfigMap rather than being baked into the manifest.
 kind_deploy_gateway() {
   local serve="${1:-pods,configmaps,widgets.example.com}"
+  # Second argument: how long the gateway trusts a cached resource list.
+  # Seconds here, because a gate cannot wait out the five-minute default to
+  # prove that a deleted kind stops being offered.
+  local discovery_ttl="${2:-${E2E_DISCOVERY_TTL:-5m}}"
   # A standalone gate has no suite to have loaded the image for it, and the
   # load is skipped when the node already has it, so this is safe either way.
   kind_load_gateway_image
@@ -193,9 +197,10 @@ kind_deploy_gateway() {
   kind_gateway_tls_secret
   kubectl_e2e -n "$E2E_GATEWAY_SA_NS" create configmap axiom-gateway-config \
     --from-literal=serve="$serve" \
+    --from-literal=discoveryTtl="$discovery_ttl" \
     --dry-run=client -o yaml | kubectl_e2e apply -f - >/dev/null \
     || fail "create configmap axiom-gateway-config"
-  log "deploying the gateway in-cluster (serve=$serve)"
+  log "deploying the gateway in-cluster (serve=$serve, discovery-ttl=$discovery_ttl)"
   kubectl_e2e apply -f "$E2E_ROOT/deploy/k8s/gateway-deployment.yaml" >/dev/null \
     || fail "apply gateway deployment"
   # A changed ConfigMap does not restart a running Pod, so force a fresh one.
