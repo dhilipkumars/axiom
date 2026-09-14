@@ -108,12 +108,19 @@ kubectl -n axiom-system rollout status deploy/axiom-gateway
 `ghcr.io/dhilipkumars/axiom-gateway:development` by default. If you are following this
 from a fork that publishes under a different owner, patch the manifest's
 `image:` field to that owner first. If you are iterating on a local gateway
-build and want kind to run that instead, tag it with the same reference and
-side-load it before the `kubectl apply` above:
+build and want kind to run that instead, tag it with the same reference,
+side-load it, and patch the Deployment's pull policy back to `IfNotPresent`
+before restarting it:
 
 ```sh
 docker build -f gateway/Dockerfile -t ghcr.io/dhilipkumars/axiom-gateway:development .
 kind load docker-image ghcr.io/dhilipkumars/axiom-gateway:development --name axiom
+kubectl -n axiom-system patch deploy/axiom-gateway --type=json -p='[{
+  "op": "replace", "path": "/spec/template/spec/containers/0/imagePullPolicy",
+  "value": "IfNotPresent"
+}]'
+kubectl -n axiom-system rollout restart deploy/axiom-gateway
+kubectl -n axiom-system rollout status deploy/axiom-gateway
 ```
 
 [Deploying the gateway](deploying.md) covers the exposure choices and how they

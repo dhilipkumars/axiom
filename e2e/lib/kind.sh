@@ -13,6 +13,7 @@
 #   E2E_KUBE_DIR       where the gateway kubeconfig is written (default e2e/.kind)
 #   E2E_GATEWAY_LOCAL_IMAGE   locally built image to side-load (default axiom-gateway:latest)
 #   E2E_GATEWAY_DEPLOY_IMAGE  image reference the manifest uses (default ghcr.io/dhilipkumars/axiom-gateway:development)
+#   E2E_GATEWAY_PULL_POLICY   pull policy E2E patches onto the Deployment (default IfNotPresent)
 
 [[ -n "${_AXIOM_E2E_KIND_LIB:-}" ]] && return 0
 _AXIOM_E2E_KIND_LIB=1
@@ -104,6 +105,7 @@ kind_wait_pods() {
 E2E_GATEWAY_NODEPORT="${E2E_GATEWAY_NODEPORT:-30443}"
 E2E_GATEWAY_LOCAL_IMAGE="${E2E_GATEWAY_LOCAL_IMAGE:-axiom-gateway:latest}"
 E2E_GATEWAY_DEPLOY_IMAGE="${E2E_GATEWAY_DEPLOY_IMAGE:-ghcr.io/dhilipkumars/axiom-gateway:development}"
+E2E_GATEWAY_PULL_POLICY="${E2E_GATEWAY_PULL_POLICY:-IfNotPresent}"
 
 # kind_gateway_endpoint: the https URL an out-of-cluster client uses.
 kind_gateway_endpoint() {
@@ -135,23 +137,38 @@ kind_load_gateway_image() {
   # `|| true` on the substitutions: under `set -e` a command substitution that
   # exits non-zero aborts the assignment and takes the whole gate with it, with
   # no error message, and both of these legitimately fail on a first run.
-  local want have
-  want="$(docker image inspect "$source" --format '{{.Id}}' 2>/dev/null || true)"
+  local source_id deploy_id want have restore="" created_ref=0
+  source_id="$(docker image inspect "$source" --format '{{.Id}}' 2>/dev/null || true)"
+  deploy_id="$(docker image inspect "$image" --format '{{.Id}}' 2>/dev/null || true)"
+  want="${image}|${source_id}"
   have="$(docker exec "$node" cat "$stamp" 2>/dev/null || true)"
   if [[ -n "$want" && "$want" == "$have" ]]; then
     log "$source already loaded in $E2E_KIND_CLUSTER as $image, skipping"
     return 0
   fi
 
-  docker tag "$source" "$image" >/dev/null || fail "tag $source as $image"
+  if [[ "$source" != "$image" && "$deploy_id" != "$source_id" ]]; then
+    if [[ -n "$deploy_id" ]]; then
+      restore="axiom-e2e-restore:$RANDOM-$$"
+      docker tag "$image" "$restore" >/dev/null || fail "save existing $image tag"
+    else
+      created_ref=1
+    fi
+    docker tag "$source" "$image" >/dev/null || fail "tag $source as $image"
+  fi
   log "loading $source into kind cluster $E2E_KIND_CLUSTER as $image"
   kind load docker-image "$image" --name "$E2E_KIND_CLUSTER" >/dev/null \
     || fail "kind load docker-image $image"
   # Written only after a successful load, so an interrupted one reloads.
   docker exec "$node" sh -c "printf '%s' '$want' > $stamp" >/dev/null 2>&1 || true
-  # The deploy-image tag is just a staging name for `kind load`; keep a run from
-  # rewriting the developer's local image namespace permanently.
-  [[ "$source" == "$image" ]] || docker image rm "$image" >/dev/null 2>&1 || true
+  # The deploy-image tag is just a staging name for `kind load`; restore an
+  # existing local reference or remove only the one this run created.
+  if [[ -n "$restore" ]]; then
+    docker tag "$restore" "$image" >/dev/null || fail "restore existing $image tag"
+    docker image rm "$restore" >/dev/null 2>&1 || true
+  elif (( created_ref )); then
+    docker image rm "$image" >/dev/null 2>&1 || true
+  fi
 }
 
 # kind_gateway_tls_secret: publish the compose-generated CA and server cert as a
@@ -208,6 +225,12 @@ kind_deploy_gateway() {
   log "deploying the gateway in-cluster (serve=$serve)"
   kubectl_e2e apply -f "$E2E_ROOT/deploy/k8s/gateway-deployment.yaml" >/dev/null \
     || fail "apply gateway deployment"
+  # The checked-in manifest uses Always because :development is a moving tag.
+  # E2E deliberately overrides that to a cache-preferring policy so the
+  # side-loaded local build wins without a registry pull.
+  kubectl_e2e -n "$E2E_GATEWAY_SA_NS" patch deploy/axiom-gateway --type=json \
+    -p="[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/imagePullPolicy\",\"value\":\"$E2E_GATEWAY_PULL_POLICY\"}]" >/dev/null \
+    || fail "patch gateway imagePullPolicy"
   # A changed ConfigMap does not restart a running Pod, so force a fresh one.
   # Gates also need a clean process: the gateway caches discovery and access
   # answers for its lifetime, and those must not leak between gates.

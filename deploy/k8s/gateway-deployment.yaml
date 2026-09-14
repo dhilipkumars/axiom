@@ -47,10 +47,11 @@ spec:
           image: ghcr.io/dhilipkumars/axiom-gateway:development
           # Default to the published GHCR image for this repository. A fork that
           # publishes under a different owner needs to patch only this field.
-          # The E2E gates deliberately side-load a local build under this exact
-          # reference, so IfNotPresent still prefers the node's cached copy
+          # This tag moves on every push to main, so kubelet must re-resolve it
+          # on every start. The E2E gates deliberately override the policy to
+          # IfNotPresent after apply so a side-loaded local build still wins
           # there.
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           # Arguments match gateway/cmd/gateway/main.go.
           # -kubeconfig is omitted so k8s.Config falls back to rest.InClusterConfig(),
           # picking up the projected ServiceAccount token mounted by kubelet.
