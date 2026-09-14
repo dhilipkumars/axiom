@@ -223,14 +223,13 @@ kind_deploy_gateway() {
     --dry-run=client -o yaml | kubectl_e2e apply -f - >/dev/null \
     || fail "create configmap axiom-gateway-config"
   log "deploying the gateway in-cluster (serve=$serve)"
-  kubectl_e2e apply -f "$E2E_ROOT/deploy/k8s/gateway-deployment.yaml" >/dev/null \
-    || fail "apply gateway deployment"
   # The checked-in manifest uses Always because :development is a moving tag.
-  # E2E deliberately overrides that to a cache-preferring policy so the
-  # side-loaded local build wins without a registry pull.
-  kubectl_e2e -n "$E2E_GATEWAY_SA_NS" patch deploy/axiom-gateway --type=json \
-    -p="[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/imagePullPolicy\",\"value\":\"$E2E_GATEWAY_PULL_POLICY\"}]" >/dev/null \
-    || fail "patch gateway imagePullPolicy"
+  # E2E needs the opposite: a cache-preferring policy so the side-loaded local
+  # build wins without a registry pull. Patch the manifest *before* apply so
+  # the first Pod is created with the override already in place.
+  sed "0,/imagePullPolicy: Always/s//imagePullPolicy: $E2E_GATEWAY_PULL_POLICY/" \
+    "$E2E_ROOT/deploy/k8s/gateway-deployment.yaml" | kubectl_e2e apply -f - >/dev/null \
+    || fail "apply gateway deployment"
   # A changed ConfigMap does not restart a running Pod, so force a fresh one.
   # Gates also need a clean process: the gateway caches discovery and access
   # answers for its lifetime, and those must not leak between gates.
