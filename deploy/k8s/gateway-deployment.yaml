@@ -44,10 +44,14 @@ spec:
           type: RuntimeDefault
       containers:
         - name: gateway
-          image: axiom-gateway:latest
-          # The image is built locally and side-loaded into the kind cluster (or
-          # node image cache), never pulled from a remote registry.
-          imagePullPolicy: IfNotPresent
+          image: ghcr.io/dhilipkumars/axiom-gateway:development
+          # Default to the published GHCR image for this repository. A fork that
+          # publishes under a different owner needs to patch only this field.
+          # This tag moves on every push to main, so kubelet must re-resolve it
+          # on every start. The E2E gates deliberately override the policy to
+          # IfNotPresent after apply so a side-loaded local build still wins
+          # there.
+          imagePullPolicy: Always
           # Arguments match gateway/cmd/gateway/main.go.
           # -kubeconfig is omitted so k8s.Config falls back to rest.InClusterConfig(),
           # picking up the projected ServiceAccount token mounted by kubelet.

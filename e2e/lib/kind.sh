@@ -11,6 +11,9 @@
 #   E2E_KIND_CLUSTER   cluster name (default axiom-e2e)
 #   E2E_KIND_KEEP=1    leave the cluster running after the test
 #   E2E_KUBE_DIR       where the gateway kubeconfig is written (default e2e/.kind)
+#   E2E_GATEWAY_LOCAL_IMAGE   locally built image to side-load (default axiom-gateway:latest)
+#   E2E_GATEWAY_DEPLOY_IMAGE  image reference the manifest uses (default ghcr.io/dhilipkumars/axiom-gateway:development)
+#   E2E_GATEWAY_PULL_POLICY   pull policy E2E patches onto the Deployment (default IfNotPresent)
 
 [[ -n "${_AXIOM_E2E_KIND_LIB:-}" ]] && return 0
 _AXIOM_E2E_KIND_LIB=1
@@ -100,20 +103,25 @@ kind_wait_pods() {
 # NodePort the gateway Service publishes, and the host:port Postgres dials. The
 # compose stack joins kind's Docker network, so it reaches the node by name.
 E2E_GATEWAY_NODEPORT="${E2E_GATEWAY_NODEPORT:-30443}"
+E2E_GATEWAY_LOCAL_IMAGE="${E2E_GATEWAY_LOCAL_IMAGE:-axiom-gateway:latest}"
+E2E_GATEWAY_DEPLOY_IMAGE="${E2E_GATEWAY_DEPLOY_IMAGE:-ghcr.io/dhilipkumars/axiom-gateway:development}"
+E2E_GATEWAY_PULL_POLICY="${E2E_GATEWAY_PULL_POLICY:-IfNotPresent}"
 
 # kind_gateway_endpoint: the https URL an out-of-cluster client uses.
 kind_gateway_endpoint() {
   echo "https://${E2E_KIND_CLUSTER}-control-plane:${E2E_GATEWAY_NODEPORT}"
 }
 
-# kind_load_gateway_image: side-load the locally built image into the cluster.
-# Done once per suite rather than per gate: each load costs 20-40s and the image
-# does not change between gates.
+# kind_load_gateway_image: side-load the locally built image into the cluster,
+# retagged to match the raw manifest's published-image reference. Done once per
+# suite rather than per gate: each load costs 20-40s and the image does not
+# change between gates.
 kind_load_gateway_image() {
-  local image="${1:-axiom-gateway:latest}" node="${E2E_KIND_CLUSTER}-control-plane"
+  local source="${1:-$E2E_GATEWAY_LOCAL_IMAGE}" image="${2:-$E2E_GATEWAY_DEPLOY_IMAGE}"
+  local node="${E2E_KIND_CLUSTER}-control-plane"
   local stamp="/etc/axiom-loaded-image-id"
-  docker image inspect "$image" >/dev/null 2>&1 \
-    || fail "image $image is not built; run 'docker compose -f $E2E_COMPOSE_FILE build gateway' first"
+  docker image inspect "$source" >/dev/null 2>&1 \
+    || fail "image $source is not built; run 'docker compose -f $E2E_COMPOSE_FILE build gateway' first"
 
   # Skip when the node already has this exact build. Compare by the *docker*
   # image ID recorded at load time, not by anything containerd reports:
@@ -129,19 +137,38 @@ kind_load_gateway_image() {
   # `|| true` on the substitutions: under `set -e` a command substitution that
   # exits non-zero aborts the assignment and takes the whole gate with it, with
   # no error message, and both of these legitimately fail on a first run.
-  local want have
-  want="$(docker image inspect "$image" --format '{{.Id}}' 2>/dev/null || true)"
+  local source_id deploy_id want have restore="" created_ref=0
+  source_id="$(docker image inspect "$source" --format '{{.Id}}' 2>/dev/null || true)"
+  deploy_id="$(docker image inspect "$image" --format '{{.Id}}' 2>/dev/null || true)"
+  want="${image}|${source_id}"
   have="$(docker exec "$node" cat "$stamp" 2>/dev/null || true)"
   if [[ -n "$want" && "$want" == "$have" ]]; then
-    log "$image already loaded in $E2E_KIND_CLUSTER, skipping"
+    log "$source already loaded in $E2E_KIND_CLUSTER as $image, skipping"
     return 0
   fi
 
-  log "loading $image into kind cluster $E2E_KIND_CLUSTER"
+  if [[ "$source" != "$image" && "$deploy_id" != "$source_id" ]]; then
+    if [[ -n "$deploy_id" ]]; then
+      restore="axiom-e2e-restore:$RANDOM-$$"
+      docker tag "$image" "$restore" >/dev/null || fail "save existing $image tag"
+    else
+      created_ref=1
+    fi
+    docker tag "$source" "$image" >/dev/null || fail "tag $source as $image"
+  fi
+  log "loading $source into kind cluster $E2E_KIND_CLUSTER as $image"
   kind load docker-image "$image" --name "$E2E_KIND_CLUSTER" >/dev/null \
     || fail "kind load docker-image $image"
   # Written only after a successful load, so an interrupted one reloads.
   docker exec "$node" sh -c "printf '%s' '$want' > $stamp" >/dev/null 2>&1 || true
+  # The deploy-image tag is just a staging name for `kind load`; restore an
+  # existing local reference or remove only the one this run created.
+  if [[ -n "$restore" ]]; then
+    docker tag "$restore" "$image" >/dev/null || fail "restore existing $image tag"
+    docker image rm "$restore" >/dev/null 2>&1 || true
+  elif (( created_ref )); then
+    docker image rm "$image" >/dev/null 2>&1 || true
+  fi
 }
 
 # kind_gateway_tls_secret: publish the compose-generated CA and server cert as a
@@ -200,7 +227,12 @@ kind_deploy_gateway() {
     --dry-run=client -o yaml | kubectl_e2e apply -f - >/dev/null \
     || fail "create configmap axiom-gateway-config"
   log "deploying the gateway in-cluster (serve=$serve, discovery-ttl=$discovery_ttl)"
-  kubectl_e2e apply -f "$E2E_ROOT/deploy/k8s/gateway-deployment.yaml" >/dev/null \
+  # The checked-in manifest uses Always because :development is a moving tag.
+  # E2E needs the opposite: a cache-preferring policy so the side-loaded local
+  # build wins without a registry pull. Patch the manifest *before* apply so
+  # the first Pod is created with the override already in place.
+  sed "0,/imagePullPolicy: Always/s//imagePullPolicy: $E2E_GATEWAY_PULL_POLICY/" \
+    "$E2E_ROOT/deploy/k8s/gateway-deployment.yaml" | kubectl_e2e apply -f - >/dev/null \
     || fail "apply gateway deployment"
   # Override the manifest's default the same way an operator would. Not a
   # ConfigMap key: that would make it required, and a Pod whose ConfigMap
