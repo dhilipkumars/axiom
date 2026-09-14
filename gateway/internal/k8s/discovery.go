@@ -103,6 +103,9 @@ type Discovery struct {
 	now func() time.Time
 	// resourceTTL is how long a fetched resource list is trusted.
 	resourceTTL time.Duration
+	// lastInvalidated is when the discovery client's cache was last dropped,
+	// so expiring entries do not each drop it again. Guarded by mu.
+	lastInvalidated time.Time
 
 	openapiFetches atomic.Uint64
 
@@ -166,6 +169,27 @@ func NewDiscovery(disco discovery.CachedDiscoveryInterface, allow Allowlist, acc
 	}
 }
 
+// invalidateOnce drops the discovery client's cache at most once per TTL
+// window, recording when it last did so.
+//
+// The client's Invalidate is all-or-nothing: it clears every group-version.
+// Calling it per expired entry means each refetch throws away the one before
+// it, so the cost of a post-expiry enumeration grows with the square of the
+// number of group-versions rather than linearly.
+func (d *Discovery) invalidateOnce() {
+	now := d.now()
+	d.mu.Lock()
+	recent := !d.lastInvalidated.IsZero() && now.Sub(d.lastInvalidated) < d.resourceTTL
+	if !recent {
+		d.lastInvalidated = now
+	}
+	d.mu.Unlock()
+	if recent {
+		return
+	}
+	d.disco.Invalidate()
+}
+
 // resourcesFor returns the cached resources of one group-version, fetching and
 // caching on a miss. refresh forces a re-fetch and drops the discovery client's
 // own cache first.
@@ -182,11 +206,28 @@ func (d *Discovery) resourcesFor(gv schema.GroupVersion, refresh bool) (resource
 		if ok {
 			// Stale: drop the discovery client's own cache too, or the
 			// refetch below is answered from it and nothing changes.
-			d.disco.Invalidate()
+			//
+			// At most once per TTL window, though. Invalidate() on a
+			// memory-cached client clears *every* group-version, not the one
+			// asked about, and entries expire together because they were
+			// fetched together by the first import. Without this guard,
+			// enumerating N group-versions after the TTL means N full
+			// invalidations, each discarding what the previous refetch just
+			// repopulated -- one import turning into quadratic discovery
+			// traffic, which is the opposite of what the import-timeout work
+			// in this same change is for.
+			//
+			// Skipping it is safe: an invalidation within the window already
+			// emptied the client's cache, so this group-version's refetch
+			// still reaches the API server.
+			d.invalidateOnce()
 		}
 	} else {
+		// An explicit refresh is the retry-on-miss path and must really
+		// refetch, so it invalidates unconditionally and resets the window.
 		d.disco.Invalidate()
 		d.mu.Lock()
+		d.lastInvalidated = d.now()
 		delete(d.cache, gv)
 		d.mu.Unlock()
 	}

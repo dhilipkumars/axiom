@@ -805,3 +805,50 @@ func TestDescribeDoesNotRevealWhyAKindIsRefused(t *testing.T) {
 		t.Errorf("the three refusals differ, so the reason is enumerable:\n allowlist: %s\n absent:    %s\n no access: %s", a, b, c)
 	}
 }
+
+// Expiring entries must not each drop the whole discovery cache.
+//
+// Invalidate() on a memory-cached client is all-or-nothing: it clears every
+// group-version, not the one being refetched. Entries expire together, because
+// the first enumeration fetched them together, so invalidating per expired
+// entry means each refetch discards what the previous one repopulated. One
+// import after the TTL then costs invalidations proportional to the number of
+// group-versions, which works against the import timeout this same change
+// tries to make manageable.
+func TestDiscoveryInvalidatesOncePerWindowNotPerGroupVersion(t *testing.T) {
+	t.Parallel()
+	d, fd := newTestDiscovery(t, "*.*")
+	ctx := context.Background()
+
+	// Populate every group-version the fake serves.
+	if _, err := d.Kinds(ctx, nil, nil); err != nil {
+		t.Fatalf("first enumeration: %v", err)
+	}
+	groupVersions := len(fd.byGV)
+	if groupVersions < 2 {
+		t.Fatalf("need at least two group-versions to show the difference, have %d", groupVersions)
+	}
+	before := fd.invalidations.Load()
+
+	// Age every entry past the TTL, as happens when they were all fetched by
+	// the same earlier enumeration.
+	base := time.Now()
+	d.now = func() time.Time { return base }
+	d.mu.Lock()
+	for gv, e := range d.cache {
+		e.fetched = base.Add(-d.resourceTTL - time.Second)
+		d.cache[gv] = e
+	}
+	d.lastInvalidated = time.Time{}
+	d.mu.Unlock()
+
+	if _, err := d.Kinds(ctx, nil, nil); err != nil {
+		t.Fatalf("enumeration after expiry: %v", err)
+	}
+
+	got := fd.invalidations.Load() - before
+	if got > 1 {
+		t.Errorf("expiring %d group-versions caused %d invalidations, want at most 1: "+
+			"each one clears the whole discovery cache", groupVersions, got)
+	}
+}
