@@ -8,6 +8,7 @@ The gateway takes all of its configuration from flags. It reads no environment v
 
 | Flag | Default | Description |
 |---|---|---|
+| `-discovery-ttl` | `5m0s` | how long a cached list of an API group's resources is trusted before being refetched; lower it to notice a deleted custom resource sooner, at the cost of more discovery traffic |
 | `-kubeconfig` | _(none)_ | path to a kubeconfig; empty means in-cluster config |
 | `-listen` | `:8443` | TCP address to listen on |
 | `-no-cluster` | `false` | serve Ping only; Get/List fail with FAILED_PRECONDITION (Phase 0 plumbing mode) |

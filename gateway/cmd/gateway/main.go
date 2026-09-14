@@ -93,6 +93,7 @@ func run(ctx context.Context, args []string, stderr *os.File) error {
 		}
 		access := k8s.NewSelfAccess(authz.SelfSubjectAccessReviews())
 		mapper := k8s.NewDiscovery(memory.NewMemCacheClient(disco), allow, access, logger)
+		mapper.SetResourceTTL(*opts.DiscoveryTTL)
 		dyn, err := k8s.NewFromConfig(cfg, mapper)
 		if err != nil {
 			return err
