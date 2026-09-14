@@ -75,14 +75,24 @@ spec:
                 configMapKeyRef:
                   name: axiom-gateway-config
                   key: serve
-            # How long a cached resource list is trusted. The default is five
-            # minutes; the E2E sets seconds, because a gate cannot wait out the
-            # real value to prove a deleted kind stops being offered.
+            # How long a cached resource list is trusted before it is
+            # refetched, so a kind deleted from the cluster stops being
+            # offered. Matches the binary's own default.
+            #
+            # A literal, not a ConfigMap key. Sourcing it from the ConfigMap
+            # would make that key required: a Pod whose ConfigMap lacks it
+            # fails with CreateContainerConfigError, which would break every
+            # existing deployment and every set of instructions that creates
+            # the ConfigMap with `serve` alone. Marking the key optional does
+            # not help either, because an undefined variable leaves
+            # "$(AXIOM_DISCOVERY_TTL)" literal in the arguments and the
+            # gateway then fails to parse it as a duration.
+            #
+            # Override it on a running Deployment with:
+            #   kubectl -n axiom-system set env deploy/axiom-gateway \
+            #     AXIOM_DISCOVERY_TTL=30s
             - name: AXIOM_DISCOVERY_TTL
-              valueFrom:
-                configMapKeyRef:
-                  name: axiom-gateway-config
-                  key: discoveryTtl
+              value: "5m"
           ports:
             - name: grpc
               containerPort: 8443

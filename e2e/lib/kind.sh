@@ -197,12 +197,17 @@ kind_deploy_gateway() {
   kind_gateway_tls_secret
   kubectl_e2e -n "$E2E_GATEWAY_SA_NS" create configmap axiom-gateway-config \
     --from-literal=serve="$serve" \
-    --from-literal=discoveryTtl="$discovery_ttl" \
     --dry-run=client -o yaml | kubectl_e2e apply -f - >/dev/null \
     || fail "create configmap axiom-gateway-config"
   log "deploying the gateway in-cluster (serve=$serve, discovery-ttl=$discovery_ttl)"
   kubectl_e2e apply -f "$E2E_ROOT/deploy/k8s/gateway-deployment.yaml" >/dev/null \
     || fail "apply gateway deployment"
+  # Override the manifest's default the same way an operator would. Not a
+  # ConfigMap key: that would make it required, and a Pod whose ConfigMap
+  # lacks it never starts (deploy/k8s/gateway-deployment.yaml says why).
+  kubectl_e2e -n "$E2E_GATEWAY_SA_NS" set env deploy/axiom-gateway \
+    AXIOM_DISCOVERY_TTL="$discovery_ttl" >/dev/null \
+    || fail "set AXIOM_DISCOVERY_TTL"
   # A changed ConfigMap does not restart a running Pod, so force a fresh one.
   # Gates also need a clean process: the gateway caches discovery and access
   # answers for its lifetime, and those must not leak between gates.
