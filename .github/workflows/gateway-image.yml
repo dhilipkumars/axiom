@@ -3,9 +3,6 @@ name: gateway image
 on:
   push:
     branches: [main]
-    paths:
-      - gateway/**
-      - .github/workflows/gateway-image.yml
   release:
     types: [published]
 
