@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -52,7 +53,26 @@ type Mapper interface {
 type resourceCacheEntry struct {
 	// byKind maps a Kind to its APIResource, subresources excluded.
 	byKind map[string]metav1.APIResource
+	// fetched is when this entry was read from the API server, for the TTL.
+	fetched time.Time
 }
+
+// resourceTTL bounds how long a group-version's resource list is trusted.
+//
+// Discovery already retries once through an invalidation on a *miss*, so a
+// newly created custom resource resolves without a restart. The opposite
+// direction had no answer: a list fetched successfully was never refetched, so
+// a kind that was deleted from the cluster kept being offered and IMPORT kept
+// generating a table for it. Observed by uninstalling an operator and
+// re-importing, whose four kinds came back until the gateway was restarted.
+//
+// Five minutes is chosen against what it costs on each side. Discovery sits on
+// the path of every Get, List and write, so the cache cannot be short-lived;
+// one refetch per group-version per five minutes is negligible against that.
+// On the other side, a kind that has genuinely gone stops being offered within
+// five minutes instead of never, which is the difference between a puzzle and
+// a wait.
+const resourceTTL = 5 * time.Minute
 
 // Discovery is the cluster-backed Mapper.
 //
@@ -76,6 +96,10 @@ type Discovery struct {
 	// RBAC, not the allowlist, is the real boundary; the allowlist narrows
 	// further for deployments that want to hide kinds they could read.
 	access AccessChecker
+
+	// now is time.Now, overridden in tests so the resource TTL can be
+	// exercised without waiting for it.
+	now func() time.Time
 
 	openapiFetches atomic.Uint64
 
@@ -119,6 +143,7 @@ func NewDiscovery(disco discovery.CachedDiscoveryInterface, allow Allowlist, acc
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	return &Discovery{
+		now:         time.Now,
 		log:         logger,
 		disco:       disco,
 		access:      access,
@@ -137,8 +162,15 @@ func (d *Discovery) resourcesFor(gv schema.GroupVersion, refresh bool) (resource
 		d.mu.RLock()
 		e, ok := d.cache[gv]
 		d.mu.RUnlock()
-		if ok {
+		// Expired entries are refetched rather than served. Without this a
+		// removed kind is offered for the life of the process.
+		if ok && time.Since(e.fetched) < resourceTTL {
 			return e, nil
+		}
+		if ok {
+			// Stale: drop the discovery client's own cache too, or the
+			// refetch below is answered from it and nothing changes.
+			d.disco.Invalidate()
 		}
 	} else {
 		d.disco.Invalidate()
@@ -151,7 +183,10 @@ func (d *Discovery) resourcesFor(gv schema.GroupVersion, refresh bool) (resource
 	if err != nil {
 		return resourceCacheEntry{}, fmt.Errorf("discovery for %s: %w", gv.String(), err)
 	}
-	e := resourceCacheEntry{byKind: make(map[string]metav1.APIResource, len(list.APIResources))}
+	e := resourceCacheEntry{
+		byKind:  make(map[string]metav1.APIResource, len(list.APIResources)),
+		fetched: d.now(),
+	}
 	for _, r := range list.APIResources {
 		// Subresources ("pods/log", "widgets/status") are addressed through
 		// their parent and are never tables of their own.
@@ -176,7 +211,7 @@ func (d *Discovery) lookup(gvk schema.GroupVersionKind) (metav1.APIResource, err
 			// A group-version the cluster does not have is not a transport
 			// failure; report it as an unsupported kind after the retry.
 			if refresh {
-				return metav1.APIResource{}, fmt.Errorf("%w: %s", ErrUnsupportedKind, gvk.String())
+				return metav1.APIResource{}, unservedKind(gvk)
 			}
 			continue
 		}
@@ -184,7 +219,30 @@ func (d *Discovery) lookup(gvk schema.GroupVersionKind) (metav1.APIResource, err
 			return r, nil
 		}
 	}
-	return metav1.APIResource{}, fmt.Errorf("%w: %s", ErrUnsupportedKind, gvk.String())
+	return metav1.APIResource{}, unservedKind(gvk)
+}
+
+// unservedKind is the error for a kind this gateway will not serve.
+//
+// Deliberately one message for three different causes: the cluster has no such
+// kind, the gateway's --serve list excludes it, or its RBAC does not permit
+// it. Which one it is must not leak, because the allowlist and the RBAC are
+// deployment decisions rather than facts about the cluster that a caller may
+// enumerate -- distinguishing them would turn any foreign table into a probe
+// for what exists.
+//
+// What it can do is tell the operator where to look. A table that worked
+// yesterday and fails today almost always means the gateway's configuration
+// changed, and foreign tables are catalog objects that do not move when it
+// does, so the table has to be re-imported.
+func unservedKind(gvk schema.GroupVersionKind) error {
+	return fmt.Errorf(
+		"%w: %s. The gateway does not serve this kind: either the cluster has no "+
+			"such kind, or the gateway's --serve list or its RBAC excludes it. If "+
+			"it was served before, the gateway's configuration changed; restart it "+
+			"and re-run IMPORT FOREIGN SCHEMA, because existing foreign tables do "+
+			"not follow that change",
+		ErrUnsupportedKind, gvk.String())
 }
 
 // Resolve implements Mapper.
@@ -196,7 +254,7 @@ func (d *Discovery) Resolve(_ context.Context, gvk schema.GroupVersionKind) (sch
 	if !d.allow.Permits(gvk.Group, r.Name) {
 		// Same error as "no such kind": the allowlist is a deployment
 		// decision, not a fact about the cluster a caller may enumerate.
-		return schema.GroupVersionResource{}, false, fmt.Errorf("%w: %s", ErrUnsupportedKind, gvk.String())
+		return schema.GroupVersionResource{}, false, unservedKind(gvk)
 	}
 	return gvk.GroupVersion().WithResource(r.Name), r.Namespaced, nil
 }

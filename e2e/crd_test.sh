@@ -278,7 +278,18 @@ got="$(psql_axiom "DO \$\$ BEGIN PERFORM count(*) FROM k8s.gizmos; RAISE EXCEPTI
   EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'caught % %', SQLSTATE, SQLERRM; END \$\$;" 2>&1 || true)"
 grep -q "caught" <<<"$got" || fail "a hand-written table for an unserved kind should fail at scan: $got"
 grep -qi "unsupported kind" <<<"$got" || fail "the error should say the kind is unsupported: $got"
-echo "scan refused, and the message does not reveal whether it is the allowlist or the cluster"
+# And it tells the operator what to do. A table for a kind the gateway stopped
+# serving is the confusing case: it is still in the catalog and simply fails,
+# because foreign tables do not follow a configuration change.
+grep -qi "does not serve this kind" <<<"$got" \
+  || fail "the error should explain what happened: $got"
+grep -qi "IMPORT FOREIGN SCHEMA" <<<"$got" \
+  || fail "the error should tell the operator to re-import: $got"
+# It must still not say *which* of the three causes applies, or the allowlist
+# becomes enumerable by anyone who can define a foreign table.
+grep -qi "excludes it" <<<"$got" \
+  || fail "the error should name all the possible causes, not the actual one: $got"
+echo "scan refused with an actionable message that does not reveal the cause"
 
 log "RBAC is least-privilege: the gateway identity cannot reach kinds it does not serve"
 # `kubectl auth can-i` exits 1 on "no", which would trip set -e; swallow the

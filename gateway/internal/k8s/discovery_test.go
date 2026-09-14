@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -216,14 +217,23 @@ func TestDiscoveryRespectsTheAllowlist(t *testing.T) {
 	if !errors.Is(err, ErrUnsupportedKind) {
 		t.Fatalf("Resolve(Secret) = %v, want ErrUnsupportedKind", err)
 	}
-	// The error must not distinguish "not allowed" from "does not exist",
-	// or the allowlist becomes enumerable by probing.
+	// The error must not distinguish "not allowed" from "does not exist", or
+	// the allowlist becomes enumerable: anyone able to define a foreign table
+	// could probe for what the cluster holds.
 	_, _, missing := d.Resolve(context.Background(), schema.GroupVersionKind{Version: "v1", Kind: "Nonexistent"})
 	if !errors.Is(missing, ErrUnsupportedKind) {
 		t.Fatalf("Resolve(Nonexistent) = %v, want ErrUnsupportedKind", missing)
 	}
-	if strings.Contains(err.Error(), "allow") || strings.Contains(err.Error(), "serve") {
-		t.Errorf("denied-by-allowlist error leaks the reason: %q", err)
+	// Compare the two messages directly, with the kind removed, rather than
+	// looking for words like "serve" in one of them. The property is that the
+	// two are indistinguishable, and a substring check is only a proxy for it:
+	// it rejects a message that names every possible cause, which leaks
+	// nothing because it is the same message either way, while it would accept
+	// two differently-worded messages that leak everything.
+	denied := strings.ReplaceAll(err.Error(), "Secret", "KIND")
+	absent := strings.ReplaceAll(missing.Error(), "Nonexistent", "KIND")
+	if denied != absent {
+		t.Errorf("the two errors differ, so the allowlist is enumerable:\n denied: %s\n absent: %s", denied, absent)
 	}
 }
 
@@ -706,5 +716,50 @@ func TestDiscoveryStats(t *testing.T) {
 	}
 	if got := d.OpenAPIGroupVersions(); got != 1 {
 		t.Errorf("OpenAPIGroupVersions after cached Describe = %d, want 1", got)
+	}
+}
+
+// A kind removed from the cluster stops being offered once the cache expires.
+//
+// Discovery already retries through an invalidation on a miss, so a newly
+// created custom resource resolves without a restart. The opposite direction
+// had no answer at all: a resource list fetched successfully was never
+// refetched, so a deleted kind kept resolving and IMPORT kept generating a
+// table for it until the gateway was restarted.
+//
+// The clock is injected rather than slept through: waiting out the real TTL
+// would put five minutes into the suite for one assertion.
+func TestDiscoveryStopsOfferingARemovedKind(t *testing.T) {
+	t.Parallel()
+	d, fd := newTestDiscovery(t, "*.*")
+	widget := schema.GroupVersionKind{Group: "example.com", Version: "v1", Kind: "Widget"}
+
+	if _, _, err := d.Resolve(context.Background(), widget); err != nil {
+		t.Fatalf("Widget should resolve while the CRD exists: %v", err)
+	}
+
+	// The operator is uninstalled: the group-version no longer answers.
+	delete(fd.byGV, "example.com/v1")
+
+	// Still cached, so still offered. This is the behaviour being fixed, and
+	// asserting it first proves the refetch below is what changes the answer
+	// rather than the deletion alone.
+	if _, _, err := d.Resolve(context.Background(), widget); err != nil {
+		t.Fatalf("within the TTL the cached answer should still be served: %v", err)
+	}
+
+	// Past the TTL.
+	base := time.Now()
+	d.now = func() time.Time { return base }
+	d.mu.Lock()
+	for gv, e := range d.cache {
+		e.fetched = base.Add(-resourceTTL - time.Second)
+		d.cache[gv] = e
+	}
+	d.mu.Unlock()
+
+	_, _, err := d.Resolve(context.Background(), widget)
+	if !errors.Is(err, ErrUnsupportedKind) {
+		t.Errorf("after the TTL a removed kind must stop resolving, got %v", err)
 	}
 }
