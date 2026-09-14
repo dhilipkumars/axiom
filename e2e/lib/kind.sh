@@ -222,10 +222,6 @@ kind_deploy_gateway() {
   kind_load_gateway_image
   kubectl_e2e apply -f "$E2E_ROOT/deploy/k8s/gateway-rbac.yaml" >/dev/null || fail "apply RBAC"
   kind_gateway_tls_secret
-  kubectl_e2e -n "$E2E_GATEWAY_SA_NS" create configmap axiom-gateway-config \
-    --from-literal=serve="$serve" \
-    --dry-run=client -o yaml | kubectl_e2e apply -f - >/dev/null \
-    || fail "create configmap axiom-gateway-config"
   log "deploying the gateway in-cluster (serve=$serve, discovery-ttl=$discovery_ttl)"
   # The checked-in manifest uses Always because :development is a moving tag.
   # E2E needs the opposite: a cache-preferring policy so the side-loaded local
@@ -234,13 +230,15 @@ kind_deploy_gateway() {
   sed "0,/imagePullPolicy: Always/s//imagePullPolicy: $E2E_GATEWAY_PULL_POLICY/" \
     "$E2E_ROOT/deploy/k8s/gateway-deployment.yaml" | kubectl_e2e apply -f - >/dev/null \
     || fail "apply gateway deployment"
-  # Override the manifest's default the same way an operator would. Not a
-  # ConfigMap key: that would make it required, and a Pod whose ConfigMap
+  # Override the manifest's defaults the same way an operator would. Not
+  # ConfigMap keys: a referenced key is required, and a Pod whose ConfigMap
   # lacks it never starts (deploy/k8s/gateway-deployment.yaml says why).
+  # Each gate needs its own serve list, which is why this is set here rather
+  # than baked into the manifest.
   kubectl_e2e -n "$E2E_GATEWAY_SA_NS" set env deploy/axiom-gateway \
-    AXIOM_DISCOVERY_TTL="$discovery_ttl" >/dev/null \
-    || fail "set AXIOM_DISCOVERY_TTL"
-  # A changed ConfigMap does not restart a running Pod, so force a fresh one.
+    AXIOM_SERVE="$serve" AXIOM_DISCOVERY_TTL="$discovery_ttl" >/dev/null \
+    || fail "set AXIOM_SERVE / AXIOM_DISCOVERY_TTL"
+  # `set env` on an unchanged value patches nothing, so force a fresh Pod.
   # Gates also need a clean process: the gateway caches discovery and access
   # answers for its lifetime, and those must not leak between gates.
   kubectl_e2e -n "$E2E_GATEWAY_SA_NS" rollout restart deploy/axiom-gateway >/dev/null 2>&1 || true

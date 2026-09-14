@@ -69,32 +69,23 @@ spec:
             - -discovery-ttl
             - $(AXIOM_DISCOVERY_TTL)
           env:
-            # Which kinds this gateway offers. Sourced from a ConfigMap because
-            # the E2E gates need different values: most want the narrow Phase
-            # 1-4 set, while the whole-cluster gate wants "*.*" so that RBAC is
-            # the only bound. Baking it into the manifest would mean a second
-            # manifest per gate.
+            # Which kinds this gateway offers, before RBAC. The default narrows
+            # nothing, so RBAC alone decides, which is the one bound worth
+            # having: the API server enforces it, and a second list to keep in
+            # step with it is a way to be confused rather than a way to be
+            # safe. Narrow it only to offer less than RBAC permits.
+            #
+            # Literals, not ConfigMap keys. A key referenced here is required:
+            # a Pod whose ConfigMap lacks it never starts, which would break
+            # every existing deployment on upgrade. Override either on a
+            # running Deployment with:
+            #   kubectl -n axiom-system set env deploy/axiom-gateway \
+            #     AXIOM_SERVE='pods,configmaps'
             - name: AXIOM_SERVE
-              valueFrom:
-                configMapKeyRef:
-                  name: axiom-gateway-config
-                  key: serve
+              value: "*.*"
             # How long a cached resource list is trusted before it is
             # refetched, so a kind deleted from the cluster stops being
             # offered. Matches the binary's own default.
-            #
-            # A literal, not a ConfigMap key. Sourcing it from the ConfigMap
-            # would make that key required: a Pod whose ConfigMap lacks it
-            # fails with CreateContainerConfigError, which would break every
-            # existing deployment and every set of instructions that creates
-            # the ConfigMap with `serve` alone. Marking the key optional does
-            # not help either, because an undefined variable leaves
-            # "$(AXIOM_DISCOVERY_TTL)" literal in the arguments and the
-            # gateway then fails to parse it as a duration.
-            #
-            # Override it on a running Deployment with:
-            #   kubectl -n axiom-system set env deploy/axiom-gateway \
-            #     AXIOM_DISCOVERY_TTL=30s
             - name: AXIOM_DISCOVERY_TTL
               value: "5m"
           ports:

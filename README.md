@@ -2,6 +2,8 @@
 
 **A Postgres foreign data wrapper for Kubernetes.**
 
+### 📖 [Documentation](https://dhilipkumars.github.io/axiom/) &nbsp;·&nbsp; [Getting started](https://dhilipkumars.github.io/axiom/guides/getting-started/) &nbsp;·&nbsp; [Querying](https://dhilipkumars.github.io/axiom/guides/querying/) &nbsp;·&nbsp; [Deploying](https://dhilipkumars.github.io/axiom/guides/deploying/)
+
 Axiom lets you query and control Kubernetes resources, built-in kinds and CRDs
 alike, from plain SQL, across one or more clusters, from a Postgres instance
 that may live entirely outside those clusters' networks. It goes beyond
@@ -19,12 +21,14 @@ SELECT name, namespace, phase FROM prod.pods WHERE namespace = 'payments' AND ph
 UPDATE prod.configmaps SET data = data || '{"LOG_LEVEL":"debug"}' WHERE namespace = 'payments' AND name = 'api';
 ```
 
-That is the end goal. Read the three design documents for the full picture:
+To *use* Axiom, start at the
+[documentation site](https://dhilipkumars.github.io/axiom/). The rest of this
+README is for working *on* it, alongside the engineering documents:
 
 | Document | What it covers |
 |---|---|
 | [docs/DESIGN.md](docs/DESIGN.md) | Architecture, why a gateway, consistency tiers, schema mapping, multi-cluster, auth |
-| [docs/PLAN.md](docs/PLAN.md) | Six phases from plumbing to hardened multi-cluster, each with its own E2E test |
+| [docs/PLAN.md](docs/PLAN.md) | The phase plan, each phase with its own E2E test |
 | [docs/AUTH.md](docs/AUTH.md) | Per-caller identity: the options, the threat model, and the recommended flow |
 | [docs/RULES.md](docs/RULES.md) | Engineering gates every phase must meet: quality, testability, security, E2E |
 

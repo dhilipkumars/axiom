@@ -9,15 +9,14 @@ This is how the gateway is meant to run, and what every end-to-end gate
 exercises. The manifests are in `deploy/k8s/`:
 
 - `gateway-rbac.yaml` — the `axiom-system` namespace, the `axiom-gateway`
-  ServiceAccount, and a ClusterRole bounding what it may read and write.
+  ServiceAccount, and the ClusterRole that decides what it may read and write.
+  This is the only thing that bounds what appears in SQL.
 - `gateway-deployment.yaml` — the Deployment and a `NodePort` Service.
 
 ```sh
 kubectl apply -f deploy/k8s/gateway-rbac.yaml
 kubectl -n axiom-system create secret generic axiom-gateway-tls \
   --from-file=tls.crt=gateway.crt --from-file=tls.key=gateway.key
-kubectl -n axiom-system create configmap axiom-gateway-config \
-  --from-literal=serve='pods,configmaps,widgets.example.com'
 kubectl apply -f deploy/k8s/gateway-deployment.yaml
 ```
 
@@ -101,8 +100,7 @@ go run ./cmd/gateway \
   -kubeconfig ~/.kube/config \
   -listen 127.0.0.1:8443 \
   -tls-cert /tmp/certs/gateway.crt \
-  -tls-key  /tmp/certs/gateway.key \
-  -serve 'pods,configmaps'
+  -tls-key  /tmp/certs/gateway.key
 ```
 
 Then point Postgres at `https://localhost:8443`. The certificate the compose
@@ -126,7 +124,7 @@ intend to believe.
 
 **Restarting** the gateway is safe at any time, and is sometimes required:
 a kind removed from the cluster stays on offer until the process restarts, and
-changes to `-serve` or RBAC only take effect on a fresh process.
+changes to RBAC only take effect on a fresh process.
 
 ```sh
 kubectl -n axiom-system rollout restart deploy/axiom-gateway
