@@ -24,6 +24,9 @@ jobs:
         run: |
           if [[ "$GITHUB_EVENT_NAME" == "release" ]]; then
             echo "release_tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+            echo "build_version=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "build_version=main" >> "$GITHUB_OUTPUT"
           fi
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -40,13 +43,13 @@ jobs:
             # Publish a moving branch tag for the default branch, but not :latest:
             # callers must opt into "main" rather than silently taking whatever
             # was pushed most recently.
-            type=raw,value=main,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=raw,value=main,enable=${{ github.event_name == 'push' || github.event_name == 'release' }}
             type=raw,value=${{ steps.image.outputs.release_tag }},enable=${{ github.event_name == 'release' }}
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: gateway/Dockerfile
-          build-args: VERSION=${{ steps.meta.outputs.version }}
+          build-args: VERSION=${{ steps.image.outputs.build_version }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
