@@ -205,12 +205,36 @@ message ListRequest {
   // If non-empty, only the object with exactly this name is returned
   // (server-side metadata.name field selector).
   string name = 3;
+  // Maximum objects in one response. Zero asks the gateway to choose. The
+  // gateway clamps this to its own maximum, so a caller cannot use it to
+  // demand a response too large to send.
+  //
+  // A page is bounded by bytes as well as by count, because objects vary by
+  // three orders of magnitude: a count that is comfortable for Pods can exceed
+  // the message limit for ConfigMaps holding a megabyte each.
+  int32 limit = 4;
+  // Continues a previous List. Pass back the continue_token from the last
+  // response; empty starts a new listing.
+  //
+  // The token is the gateway's, not the API server's: it wraps the Kubernetes
+  // continuation together with the page size settled for this walk, and is not
+  // usable against Kubernetes directly. Treat it as opaque.
+  //
+  // It carries a snapshot, so it expires when that snapshot is compacted.
+  // Resuming an expired one fails with ABORTED rather than silently
+  // restarting, because earlier pages have already been returned to the caller
+  // and restarting would duplicate them.
+  string continue_token = 5;
 }
 
 message ListResponse {
   repeated Object objects = 1;
   // resourceVersion of the list itself, usable as a watch start point.
   string resource_version = 2;
+  // Non-empty when more objects remain: pass it as the next request's
+  // continue_token, unchanged. Empty means this was the last page. Opaque, and
+  // issued by the gateway rather than by Kubernetes.
+  string continue_token = 3;
 }
 
 message CreateRequest {

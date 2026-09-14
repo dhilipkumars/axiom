@@ -63,18 +63,50 @@ func (s *Server) Subscribe(req *axiomv1.SubscribeRequest, stream axiomv1.Gateway
 
 	if rv == "" {
 		s.subscribeListCalls.Add(1)
-		list, err := s.k8s.List(ctx, gvk, ns, "")
-		if err != nil {
-			return toGRPC(err)
-		}
-		for i := range list.Items {
-			// Empty stream RV: a partially delivered listing is not a resume point.
-			if err := send(axiomv1.SubscribeResponse_TYPE_ADDED, &list.Items[i], ""); err != nil {
+		// Paged, not one call. An unpaged listing pulls the whole collection
+		// into gateway memory before a single event goes out, which on a large
+		// kind is both a memory spike and a long silence before SYNCED.
+		//
+		// Every page after the first carries the first page's snapshot, so the
+		// listing is consistent even though it arrives in pieces. That is what
+		// makes the resourceVersion of the *first* page the correct watch start
+		// point, and why it is captured rather than taken from the last page.
+		var (
+			count int
+			token string
+		)
+		// One limit for the whole walk. A continue token may only be used
+		// with identical query parameters apart from continue itself (see
+		// ListOptions.Continue), so the size is settled on the first page and
+		// then carried, rather than renegotiated per page.
+		pageLimit := int32(defaultPageSize)
+		for {
+			// The same byte-bounded fetch the unary List uses. Paging by count
+			// alone would leave the memory spike in place for exactly the
+			// kinds that cause it: 200 ConfigMaps of a megabyte each is 200
+			// MiB materialised before the first event goes out.
+			// Only the first page may shrink; after that the token fixes it.
+			_, list, _, effective, err := s.fetchBoundedPage(ctx, gvk, ns, "", pageLimit, token, token == "")
+			if err != nil {
 				return err
 			}
+			for i := range list.Items {
+				// Empty stream RV: a partially delivered listing is not a resume point.
+				if err := send(axiomv1.SubscribeResponse_TYPE_ADDED, &list.Items[i], ""); err != nil {
+					return err
+				}
+			}
+			pageLimit = effective
+			count += len(list.Items)
+			if rv == "" {
+				rv = list.GetResourceVersion()
+			}
+			token = list.GetContinue()
+			if token == "" {
+				break
+			}
 		}
-		rv = list.GetResourceVersion()
-		s.log.LogAttrs(ctx, slog.LevelInfo, "subscribe_list", append(logAttrs, slog.Int("count", len(list.Items)), slog.String("resource_version", rv))...)
+		s.log.LogAttrs(ctx, slog.LevelInfo, "subscribe_list", append(logAttrs, slog.Int("count", count), slog.String("resource_version", rv))...)
 		if err := send(axiomv1.SubscribeResponse_TYPE_SYNCED, nil, rv); err != nil {
 			return err
 		}

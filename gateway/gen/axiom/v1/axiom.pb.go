@@ -513,7 +513,27 @@ type ListRequest struct {
 	Namespace string `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
 	// If non-empty, only the object with exactly this name is returned
 	// (server-side metadata.name field selector).
-	Name          string `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	Name string `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	// Maximum objects in one response. Zero asks the gateway to choose. The
+	// gateway clamps this to its own maximum, so a caller cannot use it to
+	// demand a response too large to send.
+	//
+	// A page is bounded by bytes as well as by count, because objects vary by
+	// three orders of magnitude: a count that is comfortable for Pods can exceed
+	// the message limit for ConfigMaps holding a megabyte each.
+	Limit int32 `protobuf:"varint,4,opt,name=limit,proto3" json:"limit,omitempty"`
+	// Continues a previous List. Pass back the continue_token from the last
+	// response; empty starts a new listing.
+	//
+	// The token is the gateway's, not the API server's: it wraps the Kubernetes
+	// continuation together with the page size settled for this walk, and is not
+	// usable against Kubernetes directly. Treat it as opaque.
+	//
+	// It carries a snapshot, so it expires when that snapshot is compacted.
+	// Resuming an expired one fails with ABORTED rather than silently
+	// restarting, because earlier pages have already been returned to the caller
+	// and restarting would duplicate them.
+	ContinueToken string `protobuf:"bytes,5,opt,name=continue_token,json=continueToken,proto3" json:"continue_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -569,13 +589,31 @@ func (x *ListRequest) GetName() string {
 	return ""
 }
 
+func (x *ListRequest) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+func (x *ListRequest) GetContinueToken() string {
+	if x != nil {
+		return x.ContinueToken
+	}
+	return ""
+}
+
 type ListResponse struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	Objects []*Object              `protobuf:"bytes,1,rep,name=objects,proto3" json:"objects,omitempty"`
 	// resourceVersion of the list itself, usable as a watch start point.
 	ResourceVersion string `protobuf:"bytes,2,opt,name=resource_version,json=resourceVersion,proto3" json:"resource_version,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Non-empty when more objects remain: pass it as the next request's
+	// continue_token, unchanged. Empty means this was the last page. Opaque, and
+	// issued by the gateway rather than by Kubernetes.
+	ContinueToken string `protobuf:"bytes,3,opt,name=continue_token,json=continueToken,proto3" json:"continue_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ListResponse) Reset() {
@@ -618,6 +656,13 @@ func (x *ListResponse) GetObjects() []*Object {
 func (x *ListResponse) GetResourceVersion() string {
 	if x != nil {
 		return x.ResourceVersion
+	}
+	return ""
+}
+
+func (x *ListResponse) GetContinueToken() string {
+	if x != nil {
+		return x.ContinueToken
 	}
 	return ""
 }
@@ -1632,14 +1677,17 @@ const file_axiom_v1_axiom_proto_rawDesc = "" +
 	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12\x12\n" +
 	"\x04name\x18\x03 \x01(\tR\x04name\"7\n" +
 	"\vGetResponse\x12(\n" +
-	"\x06object\x18\x01 \x01(\v2\x10.axiom.v1.ObjectR\x06object\"m\n" +
+	"\x06object\x18\x01 \x01(\v2\x10.axiom.v1.ObjectR\x06object\"\xaa\x01\n" +
 	"\vListRequest\x12,\n" +
 	"\x03gvk\x18\x01 \x01(\v2\x1a.axiom.v1.GroupVersionKindR\x03gvk\x12\x1c\n" +
 	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12\x12\n" +
-	"\x04name\x18\x03 \x01(\tR\x04name\"e\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name\x12\x14\n" +
+	"\x05limit\x18\x04 \x01(\x05R\x05limit\x12%\n" +
+	"\x0econtinue_token\x18\x05 \x01(\tR\rcontinueToken\"\x8c\x01\n" +
 	"\fListResponse\x12*\n" +
 	"\aobjects\x18\x01 \x03(\v2\x10.axiom.v1.ObjectR\aobjects\x12)\n" +
-	"\x10resource_version\x18\x02 \x01(\tR\x0fresourceVersion\"\x83\x01\n" +
+	"\x10resource_version\x18\x02 \x01(\tR\x0fresourceVersion\x12%\n" +
+	"\x0econtinue_token\x18\x03 \x01(\tR\rcontinueToken\"\x83\x01\n" +
 	"\rCreateRequest\x12,\n" +
 	"\x03gvk\x18\x01 \x01(\v2\x1a.axiom.v1.GroupVersionKindR\x03gvk\x12\x1c\n" +
 	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12\x12\n" +

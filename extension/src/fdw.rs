@@ -612,8 +612,19 @@ struct ScanState {
     filter: Filter,
     /// The table's resolved columns, in attribute order.
     schema: TableSchema,
-    /// `None` until the first `Iterate` fetches; then the remaining rows.
+    /// `None` until the first `Iterate` fetches; then the remaining rows of
+    /// the current page.
     rows: Option<VecDeque<Row>>,
+    /// Where the next page starts. `None` before the first fetch; `Some("")`
+    /// once the gateway has said there are no more pages.
+    ///
+    /// Distinguishing "not started" from "finished" matters: both have no rows
+    /// left, and confusing them either re-lists a finished scan forever or
+    /// returns nothing for a fresh one.
+    next_page: Option<String>,
+    /// True once the whole collection has been read. Only meaningful for an
+    /// on-demand scan; a cache-served scan returns everything at once.
+    exhausted: bool,
 }
 
 /// Resolves the relation's declared columns against its kind, validating types.
@@ -785,6 +796,8 @@ unsafe extern "C-unwind" fn begin_foreign_scan(node: *mut pg_sys::ForeignScanSta
             filter: Filter::from_quals(&quals),
             schema,
             rows: None,
+            next_page: None,
+            exhausted: false,
         };
         // Dropped when the executor's per-query context is reset, error or not.
         (*node).fdw_state = PgMemoryContexts::CurrentMemoryContext
@@ -854,20 +867,66 @@ fn fetch_from_cache(state: &ScanState) -> Option<VecDeque<Row>> {
     }
 }
 
-/// Fetches all matching rows: from the watch cache when the table is in
-/// `cache_mode 'watch'` and its subscription is servable, otherwise with one
-/// RPC (or none, for an impossible filter).
-fn fetch_rows(state: &ScanState) -> VecDeque<Row> {
+/// Fetches the next page of rows, advancing the scan's cursor.
+///
+/// An on-demand scan reads a collection over several RPCs rather than one,
+/// because a whole collection does not fit a single gRPC message on any
+/// cluster of size. The page size and the resume point are the gateway's to
+/// choose; this only carries its token back.
+///
+/// A cache-served scan has no pages: when the table is in `cache_mode 'watch'`
+/// and its subscription is servable, the shared-memory cache already holds the
+/// whole collection, so it returns everything at once and marks the scan
+/// exhausted. An impossible filter returns nothing and does the same.
+fn fetch_rows(state: &mut ScanState) -> VecDeque<Row> {
     if state.filter.impossible {
+        state.exhausted = true;
         return VecDeque::new();
     }
-    if state.config.cache_mode == CacheMode::Watch {
+    // The cache is consulted once, before the first page, and never again.
+    //
+    // A subscription can become servable partway through a scan. Probing again
+    // on a later page would hand back the whole collection from the cache on
+    // top of the pages already returned, duplicating every row read so far and
+    // mixing two snapshots. Which source a scan uses is decided when it starts
+    // and holds for its lifetime.
+    if state.next_page.is_none() && state.config.cache_mode == CacheMode::Watch {
         if let Some(rows) = fetch_from_cache(state) {
+            state.exhausted = true;
+            // Marks the source as chosen, so a later page cannot re-probe.
+            state.next_page = Some(String::new());
             return rows;
         }
     }
-    match client::list(&state.config.server, &state.config.resource, &state.filter) {
-        Ok(objects) => decode_rows(&state.schema, &objects),
+    let token = state.next_page.clone().unwrap_or_default();
+    match client::list_page(
+        &state.config.server,
+        &state.config.resource,
+        &state.filter,
+        &token,
+    ) {
+        Ok(page) => {
+            state.exhausted = page.continue_token.is_empty();
+            state.next_page = Some(page.continue_token);
+            decode_rows(&state.schema, &page.objects)
+        }
+        Err(e) if e.class() == ErrorClass::Conflict => {
+            // The gateway reports an expired continuation as a conflict, the
+            // same class as a write losing a race, and the generic wording for
+            // that is "re-read the row and retry" -- wrong advice here. This
+            // scan has already returned rows to the executor from an earlier
+            // page, so there is nothing to re-read: the whole scan has to
+            // start again. Same SQLSTATE, because the recourse is still a
+            // retry and callers catch it by name.
+            raise(
+                client_sqlstate(&e),
+                format!(
+                    "axiom: the listing expired part way through this scan and cannot be \
+                     resumed; the snapshot it was reading was compacted by the API \
+                     server. Run the query again (or retry the transaction): {e}"
+                ),
+            )
+        }
         Err(e) => raise_client("list", &state.config.server, &e),
     }
 }
@@ -887,8 +946,16 @@ unsafe extern "C-unwind" fn iterate_foreign_scan(
             );
         }
         let state = &mut *state_ptr;
-        if state.rows.is_none() {
-            state.rows = Some(fetch_rows(state));
+        // Fetch when nothing is buffered, and again whenever the buffer empties
+        // while the gateway still has pages. A page can legitimately come back
+        // empty while a continue token remains, so this loops rather than
+        // fetching once.
+        while state.rows.as_ref().is_none_or(VecDeque::is_empty) {
+            if state.rows.is_some() && state.exhausted {
+                break;
+            }
+            let page = fetch_rows(state);
+            state.rows = Some(page);
         }
         let Some(row) = state.rows.as_mut().and_then(VecDeque::pop_front) else {
             // End of scan: the executor stops only on an *empty* slot, so clear
@@ -914,6 +981,20 @@ unsafe extern "C-unwind" fn rescan_foreign_scan(node: *mut pg_sys::ForeignScanSt
         if !state_ptr.is_null() {
             // Quals with params could change between rescans; re-fetch.
             (*state_ptr).rows = None;
+            // The paging cursor goes back with them. A nested loop join rescans
+            // the inner side once per outer row, and a rescan that began part
+            // way through a page would otherwise resume from the previous
+            // iteration's cursor rather than from the start of the collection.
+            //
+            // Defensive rather than demonstrated: no query could be built that
+            // shows the difference, because an exhausted cursor is stored as
+            // the empty token, which reads as "start from the beginning" on
+            // the next fetch. So a surviving cursor currently self-corrects
+            // once it runs off the end. That is an accident of the
+            // representation, not a property worth relying on -- give the
+            // empty token a distinct meaning and the bug becomes real.
+            (*state_ptr).next_page = None;
+            (*state_ptr).exhausted = false;
         }
     }
 }

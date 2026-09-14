@@ -124,6 +124,12 @@ func run(ctx context.Context, args []string, stderr *os.File) error {
 	// they stay compatible with the extension's ping interval.
 	gs := grpc.NewServer(
 		grpc.Creds(credentials.NewTLS(tlsCfg)),
+		// Both directions, set explicitly rather than inherited. gRPC defaults
+		// to 4 MiB, which an ordinary cluster reaches: a few hundred Pods
+		// carrying managedFields will do it. Paging keeps responses well under
+		// this, so the limit is a backstop rather than the mechanism.
+		grpc.MaxSendMsgSize(server.MaxMessageBytes),
+		grpc.MaxRecvMsgSize(server.MaxMessageBytes),
 		grpc.KeepaliveParams(server.KeepaliveParams()),
 		grpc.KeepaliveEnforcementPolicy(server.KeepaliveEnforcement()),
 	)

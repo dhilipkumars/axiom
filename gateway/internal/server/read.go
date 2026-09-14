@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -47,6 +49,161 @@ func validName(field, v string) error {
 // toGRPC maps k8s/client errors onto gRPC status codes. The message never
 // includes request headers or credentials: apimachinery StatusError messages
 // describe the resource, and client-go transport errors describe the endpoint.
+// Paging bounds, in objects and in bytes.
+//
+// defaultPageSize is what a caller asking for nothing gets. It is a
+// compromise: too small multiplies WAN round trips across a scan, too large
+// re-creates the unbounded response this exists to prevent. 500 is the same
+// order client-go's own reflectors use.
+//
+// maxPageSize is the ceiling a caller can ask for, so a client cannot demand a
+// response the gateway would fail to send.
+//
+// maxPageBytes bounds the JSON in one response and is deliberately well under
+// MaxMessageBytes: the message carries protobuf framing and per-object
+// metadata on top of the JSON, and the margin means a page that fits the
+// budget always fits the message.
+const (
+	defaultPageSize = 200
+	// A caller cannot raise the first allocation without bound. The byte
+	// budget below is measured only after client-go has decoded the page, so
+	// the object count is the only thing standing between a request and the
+	// memory it costs to answer: 1000 ConfigMaps of a megabyte each is a
+	// gigabyte materialised before a single byte is counted. Shrinking after
+	// the fact protects the response, not the fetch; this protects the fetch.
+	maxPageSize  = 1000
+	maxPageBytes = 4 << 20
+	// MaxMessageBytes is the gRPC message limit both ends must agree on. The
+	// 4 MiB default is reachable on an ordinary cluster: a few hundred Pods
+	// carrying managedFields will do it. Exported so the server sets the same
+	// number it documents, and so the extension's matching constant has one
+	// place to be compared against.
+	MaxMessageBytes = 16 << 20
+)
+
+// clampLimit turns a caller's requested page size into one the gateway will
+// serve. Zero (or negative, which the wire type permits) means "choose for me".
+func clampLimit(requested int32) int32 {
+	switch {
+	case requested <= 0:
+		return defaultPageSize
+	case requested > maxPageSize:
+		return maxPageSize
+	default:
+		return requested
+	}
+}
+
+// fetchBoundedPage reads one page, shrinking it until its JSON fits the byte
+// budget, and returns the encoded objects alongside the raw list.
+//
+// The limit bounds objects, not bytes, and objects vary by three orders of
+// magnitude: a count that is comfortable for Pods can be hundreds of megabytes
+// of ConfigMaps holding a megabyte each. A Kubernetes continue token is opaque
+// and points at a page boundary, so a page cannot be split after the fact --
+// but the token that produced it is still valid, so asking again for half as
+// many returns the same objects from the same snapshot. Nothing has reached
+// the caller at that point.
+//
+// What this does not do is bound the *fetch*: client-go decodes the whole
+// requested page before its size can be measured. maxPageSize is what bounds
+// that, which is why it is modest.
+func (s *Server) fetchBoundedPage(
+	ctx context.Context,
+	gvk schema.GroupVersionKind,
+	namespace, name string,
+	limit int32,
+	continueToken string,
+	mayShrink bool,
+) ([]*axiomv1.Object, *unstructured.UnstructuredList, int, int32, error) {
+	for {
+		list, err := s.k8s.List(ctx, gvk, namespace, name, int64(limit), continueToken)
+		if err != nil {
+			return nil, nil, 0, 0, toGRPC(err)
+		}
+		objs := make([]*axiomv1.Object, 0, len(list.Items))
+		size := 0
+		for i := range list.Items {
+			po, err := objectToProto(&list.Items[i])
+			if err != nil {
+				return nil, nil, 0, 0, err
+			}
+			size += len(po.GetJson())
+			objs = append(objs, po)
+		}
+		if size <= maxPageBytes || limit <= 1 || !mayShrink {
+			return objs, list, size, limit, nil
+		}
+		// Round up, so 3 becomes 2 rather than 1. Halving downwards
+		// overshoots on small limits and buys an extra round trip for a page
+		// that would have fit. Still strictly decreasing while limit > 1, so
+		// the loop terminates.
+		limit = (limit + 1) / 2
+		s.log.LogAttrs(ctx, slog.LevelInfo, "list_page_shrunk",
+			slog.String("gvk", gvk.String()),
+			slog.Int("bytes", size),
+			slog.Int("new_limit", int(limit)))
+	}
+}
+
+// cursor is what the gateway hands back as a continue token.
+//
+// It wraps the API server's own token together with the page size chosen for
+// this walk. Carrying the size is the point: Kubernetes treats a continuation
+// as requiring the same query parameters, and the caller sends an identical
+// request for every page, so the gateway is the only thing that can remember
+// what it picked. Without this the size would reset to the default on every
+// page, which defeats any shrinking done on the first one.
+//
+// Opaque to the caller by design, exactly like the token it wraps. The
+// extension passes it back verbatim and never inspects it.
+type cursor struct {
+	// Continue is the API server's token; empty starts a new listing.
+	Continue string `json:"c,omitempty"`
+	// Limit is the page size chosen when this walk began.
+	Limit int32 `json:"l,omitempty"`
+}
+
+// encodeCursor builds the token for the next page, or "" when the walk is done.
+func encodeCursor(k8sContinue string, limit int32) string {
+	if k8sContinue == "" {
+		return ""
+	}
+	b, err := json.Marshal(cursor{Continue: k8sContinue, Limit: limit})
+	if err != nil {
+		// cursor is two plain fields; marshalling cannot fail. Returning ""
+		// would silently truncate the listing, so fail loudly instead.
+		panic(fmt.Sprintf("axiom: encoding a list cursor: %v", err))
+	}
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// decodeCursor reads a token produced by encodeCursor. An empty token starts a
+// new listing.
+func decodeCursor(token string) (cursor, error) {
+	if token == "" {
+		return cursor{}, nil
+	}
+	b, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		return cursor{}, status.Error(codes.InvalidArgument,
+			"list: continue_token is not a token this gateway issued")
+	}
+	var c cursor
+	if err := json.Unmarshal(b, &c); err != nil {
+		return cursor{}, status.Error(codes.InvalidArgument,
+			"list: continue_token is not a token this gateway issued")
+	}
+	if c.Continue == "" {
+		return cursor{}, status.Error(codes.InvalidArgument,
+			"list: continue_token carries no continuation")
+	}
+	if c.Limit <= 0 || c.Limit > maxPageSize {
+		c.Limit = defaultPageSize
+	}
+	return c, nil
+}
+
 func toGRPC(err error) error {
 	switch {
 	case err == nil:
@@ -60,6 +217,14 @@ func toGRPC(err error) error {
 	case apierrors.IsConflict(err):
 		// Stale resourceVersion on Update: distinct so callers can re-read and retry.
 		return status.Error(codes.Aborted, err.Error())
+	case apierrors.IsResourceExpired(err), apierrors.IsGone(err):
+		// A continue token whose snapshot the API server has compacted away.
+		// ABORTED, the same code as a write conflict, because the caller's
+		// recourse is identical: start again. It must not be retried
+		// transparently here -- earlier pages have already gone to the SQL
+		// executor, so resuming from scratch would duplicate rows, and
+		// docs/RULES.md §1 forbids papering over it.
+		return status.Error(codes.Aborted, fmt.Sprintf("list continuation expired: %v", err))
 	case apierrors.IsAlreadyExists(err):
 		return status.Error(codes.AlreadyExists, err.Error())
 	case apierrors.IsForbidden(err), apierrors.IsUnauthorized(err):
@@ -149,20 +314,50 @@ func (s *Server) List(ctx context.Context, req *axiomv1.ListRequest) (*axiomv1.L
 	if err := validName("name", req.GetName()); err != nil {
 		return nil, err
 	}
-	list, err := s.k8s.List(ctx, gvk, req.GetNamespace(), req.GetName())
+	// The page size is chosen once, on the first page, and carried through the
+	// rest of the walk in the gateway's own cursor. Only the first page may be
+	// shrunk to fit the byte budget.
+	//
+	// Kubernetes documents a continuation as requiring the same query
+	// parameters, and client-go's own pager never varies the limit mid-walk:
+	// it keeps one and restarts from scratch when a token expires. Shrinking
+	// against a live token risks rejection by a conforming or aggregated API
+	// server, and the caller cannot carry the choice either, since it sends
+	// the same request for every page.
+	cur, err := decodeCursor(req.GetContinueToken())
 	if err != nil {
-		return nil, toGRPC(err)
+		return nil, err
+	}
+	limit, mayShrink := cur.Limit, false
+	if cur.Continue == "" {
+		limit, mayShrink = clampLimit(req.GetLimit()), true
+	}
+
+	objs, list, size, effective, err := s.fetchBoundedPage(ctx, gvk, req.GetNamespace(), req.GetName(),
+		limit, cur.Continue, mayShrink)
+	if err != nil {
+		return nil, err
+	}
+	// Over budget with nothing left to give. Either one object is too large to
+	// send, or this is a continuation whose limit is fixed, or the backing API
+	// ignored the limit entirely -- the Kubernetes List contract permits that.
+	// Say so, rather than letting the transport reject the message with a size
+	// error that names nothing (docs/RULES.md §1).
+	if size > maxPageBytes {
+		return nil, status.Errorf(codes.ResourceExhausted,
+			"a page of %d %s object(s) is %d bytes, over the %d byte limit for one "+
+				"response, and cannot be split further; a single object may be too "+
+				"large, or the API server did not honour the requested page size",
+			len(objs), gvk.Kind, size, maxPageBytes)
 	}
 	resp := &axiomv1.ListResponse{
-		Objects:         make([]*axiomv1.Object, 0, len(list.Items)),
+		Objects:         objs,
 		ResourceVersion: list.GetResourceVersion(),
-	}
-	for i := range list.Items {
-		po, err := objectToProto(&list.Items[i])
-		if err != nil {
-			return nil, err
-		}
-		resp.Objects = append(resp.Objects, po)
+		// The *effective* limit, not the requested one. A first page that had
+		// to shrink proved the requested size too large, and a continuation
+		// cannot shrink, so recording the original would guarantee the next
+		// page fails.
+		ContinueToken: encodeCursor(list.GetContinue(), effective),
 	}
 	s.log.LogAttrs(ctx, slog.LevelInfo, "list",
 		slog.String("gvk", gvk.String()),

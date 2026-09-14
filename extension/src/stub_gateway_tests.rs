@@ -40,6 +40,8 @@ struct Cluster {
     pods: Mutex<Vec<Value>>,
     next_rv: AtomicUsize,
     list_calls: AtomicUsize,
+    /// Objects per List page when the caller does not ask for a size.
+    list_page_size: AtomicUsize,
     subscribe_calls: AtomicUsize,
     force_conflict_once: AtomicBool,
     /// While set, Subscribe is refused with UNAVAILABLE (gateway "down").
@@ -66,6 +68,7 @@ impl Default for Cluster {
             ]),
             next_rv: AtomicUsize::new(0),
             list_calls: AtomicUsize::new(0),
+            list_page_size: AtomicUsize::new(1000),
             subscribe_calls: AtomicUsize::new(0),
             force_conflict_once: AtomicBool::new(false),
             refuse_subscribe: AtomicBool::new(false),
@@ -166,20 +169,24 @@ impl GatewayService for Stub {
                 && (req.name.is_empty() || req.name == name)
         };
         let objects: Vec<Object> = match kind.as_str() {
-            "Pod" => [
-                pod("shop", "web-0", "Running", "n1"),
-                pod("shop", "web-1", "Pending", ""),
-                pod("other", "db", "Running", "n2"),
-            ]
-            .iter()
-            .filter(|p| {
-                matches(
-                    p["metadata"]["namespace"].as_str().unwrap_or(""),
-                    p["metadata"]["name"].as_str().unwrap_or(""),
-                )
-            })
-            .map(to_object)
-            .collect(),
+            // From the cluster's own state, like Subscribe, not a fixed array.
+            // A List that ignored the seeded pods made any test about listing
+            // behaviour meaningless: it silently answered about three
+            // hard-coded objects whatever the test had set up.
+            "Pod" => self
+                .0
+                .pods
+                .lock()
+                .expect("lock")
+                .iter()
+                .filter(|p| {
+                    matches(
+                        p["metadata"]["namespace"].as_str().unwrap_or(""),
+                        p["metadata"]["name"].as_str().unwrap_or(""),
+                    )
+                })
+                .map(to_object)
+                .collect(),
             "ConfigMap" => {
                 let cms = self.0.configmaps.lock().expect("lock");
                 cms.iter()
@@ -193,9 +200,43 @@ impl GatewayService for Stub {
                 )))
             }
         };
+        // Page, so the extension's continuation loop is exercised rather than
+        // merely compiled. The token is the index to resume from, which is
+        // enough to model the API server's contract: opaque to the client,
+        // meaningful only to the server that issued it.
+        // A malformed token is an error, not a silent restart. Falling back
+        // to 0 would turn "the extension forwarded garbage" into "the listing
+        // began again", which is indistinguishable from correct behaviour in
+        // a test that only counts rows.
+        let start: usize = if req.continue_token.is_empty() {
+            0
+        } else {
+            match req.continue_token.parse() {
+                Ok(n) => n,
+                Err(_) => {
+                    return Err(Status::invalid_argument(format!(
+                        "stub: malformed continue token {:?}",
+                        req.continue_token
+                    )))
+                }
+            }
+        };
+        let limit = if let Ok(n) = usize::try_from(req.limit).map(|n| n.max(1)) {
+            if req.limit > 0 {
+                n
+            } else {
+                self.0.list_page_size.load(Ordering::SeqCst).max(1)
+            }
+        } else {
+            self.0.list_page_size.load(Ordering::SeqCst).max(1)
+        };
+        let end = (start + limit).min(objects.len());
+        let more = end < objects.len();
+        let page: Vec<Object> = objects[start.min(objects.len())..end].to_vec();
         Ok(Response::new(ListResponse {
-            objects,
+            objects: page,
             resource_version: "1".into(),
+            continue_token: if more { end.to_string() } else { String::new() },
         }))
     }
 
@@ -1331,5 +1372,71 @@ fn initial_listing_does_not_notify_but_later_changes_do() {
         ours[0].contains("\"type\":\"ADDED\""),
         "notification should name the event type: {}",
         ours[0]
+    );
+}
+
+/// A scan spanning several pages returns every object exactly once.
+///
+/// The gateway hands back a continue token and the scan follows it. The two
+/// ways this breaks are both silent: stopping at the first page truncates the
+/// result, and mishandling the cursor repeats or skips objects. Counting rows
+/// catches truncation; checking for duplicates and for the exact expected set
+/// catches the rest.
+#[test]
+fn a_scan_follows_continuations_across_pages() {
+    let stub = start_stub();
+    let mut pg = pg_client();
+    let port = stub.addr.port();
+    let ca = stub.ca_path.display();
+
+    {
+        let mut pods = stub.cluster.pods.lock().expect("lock");
+        pods.clear();
+        for i in 0..25 {
+            pods.push(pod("paged", &format!("p-{i:02}"), "Running", "n1"));
+        }
+    }
+    // Small enough to need several pages for 25 objects.
+    stub.cluster.list_page_size.store(4, Ordering::SeqCst);
+
+    pg.batch_execute(&format!(
+        "DROP SERVER IF EXISTS stub_p CASCADE;
+         CREATE SERVER stub_p FOREIGN DATA WRAPPER axiom_fdw OPTIONS (endpoint 'https://localhost:{port}', ca_cert '{ca}', rpc_timeout_secs '5');
+         CREATE FOREIGN TABLE paged_pods (name text, namespace text, phase text, node text, raw jsonb)
+           SERVER stub_p OPTIONS (resource 'pods');"
+    ))
+    .expect("ddl");
+
+    let n: i64 = pg
+        .query_one(
+            "SELECT count(*) FROM paged_pods WHERE namespace = 'paged'",
+            &[],
+        )
+        .expect("scan")
+        .get(0);
+    assert_eq!(n, 25, "a paged scan must return every object");
+
+    let distinct: i64 = pg
+        .query_one(
+            "SELECT count(DISTINCT name) FROM paged_pods WHERE namespace = 'paged'",
+            &[],
+        )
+        .expect("scan")
+        .get(0);
+    assert_eq!(distinct, 25, "a paged scan must not repeat an object");
+
+    // The exact set, so a page boundary cannot quietly drop one.
+    let names: String = pg
+        .query_one(
+            "SELECT string_agg(name, ',' ORDER BY name) FROM paged_pods WHERE namespace = 'paged'",
+            &[],
+        )
+        .expect("scan")
+        .get(0);
+    let want: Vec<String> = (0..25).map(|i| format!("p-{i:02}")).collect();
+    assert_eq!(
+        names,
+        want.join(","),
+        "page boundaries lost or reordered rows"
     );
 }

@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -143,7 +145,7 @@ type goneClient struct {
 	viaWatchError bool
 }
 
-func (g goneClient) List(context.Context, schema.GroupVersionKind, string, string) (*unstructured.UnstructuredList, error) {
+func (g goneClient) List(context.Context, schema.GroupVersionKind, string, string, int64, string) (*unstructured.UnstructuredList, error) {
 	l := &unstructured.UnstructuredList{}
 	l.SetResourceVersion("100")
 	return l, nil
@@ -183,7 +185,7 @@ type countingClient struct {
 	lists int
 }
 
-func (c *countingClient) List(context.Context, schema.GroupVersionKind, string, string) (*unstructured.UnstructuredList, error) {
+func (c *countingClient) List(context.Context, schema.GroupVersionKind, string, string, int64, string) (*unstructured.UnstructuredList, error) {
 	c.lists++
 	l := &unstructured.UnstructuredList{}
 	l.SetResourceVersion("100")
@@ -219,4 +221,113 @@ func TestSubscribeWithResourceVersionSkipsList(t *testing.T) {
 		t.Fatalf("unexpected event on resume: %v", ev.GetType())
 	default:
 	}
+}
+
+// pagingSubClient serves its items in pages and records the limits it saw.
+//
+// dynamicfake ignores Limit and Continue, so the existing Subscribe test
+// exercises the unpaged path whatever the server asks for: removing the
+// continuation loop, or failing to forward the token, would still pass there.
+type pagingSubClient struct {
+	goneClient
+	items  []unstructured.Unstructured
+	limits []int64
+	conts  []string
+}
+
+func (c *pagingSubClient) List(_ context.Context, _ schema.GroupVersionKind, _, _ string, limit int64, cont string) (*unstructured.UnstructuredList, error) {
+	c.limits = append(c.limits, limit)
+	c.conts = append(c.conts, cont)
+	start := 0
+	if cont != "" {
+		n, err := strconv.Atoi(cont)
+		if err != nil {
+			return nil, fmt.Errorf("bad continue token %q", cont)
+		}
+		start = n
+	}
+	end := len(c.items)
+	if limit > 0 && start+int(limit) < end {
+		end = start + int(limit)
+	}
+	out := &unstructured.UnstructuredList{Items: append([]unstructured.Unstructured(nil), c.items[start:end]...)}
+	// Every page carries the first page's snapshot, as the API server does.
+	out.SetResourceVersion("100")
+	if end < len(c.items) {
+		out.SetContinue(strconv.Itoa(end))
+	}
+	return out, nil
+}
+
+func (c *pagingSubClient) Watch(ctx context.Context, _ schema.GroupVersionKind, _, _ string) (watch.Interface, error) {
+	fw := watch.NewFake()
+	go func() { <-ctx.Done(); fw.Stop() }()
+	return fw, nil
+}
+
+// A paged initial listing delivers every object exactly once, then SYNCED.
+func TestSubscribeListsEveryPageBeforeSyncing(t *testing.T) {
+	t.Parallel()
+	const total = defaultPageSize*2 + 7 // forces three pages
+	items := make([]unstructured.Unstructured, total)
+	for i := range items {
+		items[i] = unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata": map[string]any{
+				"name":      fmt.Sprintf("p-%d", i),
+				"namespace": "default",
+			},
+		}}
+	}
+	c := &pagingSubClient{items: items}
+	srv := New("t", nil, c, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := newRecorder(ctx)
+	done := make(chan error, 1)
+	go func() { done <- srv.Subscribe(&axiomv1.SubscribeRequest{Gvk: podGVK, Namespace: "default"}, rec) }()
+
+	seen := map[string]int{}
+	var synced *axiomv1.SubscribeResponse
+	for synced == nil {
+		ev := rec.next(t)
+		switch ev.GetType() {
+		case axiomv1.SubscribeResponse_TYPE_ADDED:
+			seen[ev.GetObject().GetName()]++
+		case axiomv1.SubscribeResponse_TYPE_SYNCED:
+			synced = ev
+		default:
+			t.Fatalf("unexpected event before SYNCED: %v", ev.GetType())
+		}
+	}
+
+	if len(seen) != total {
+		t.Errorf("saw %d distinct objects, want %d: a page was dropped", len(seen), total)
+	}
+	for name, n := range seen {
+		if n != 1 {
+			t.Errorf("%s delivered %d times, want once: a continuation repeated a page", name, n)
+		}
+	}
+	// SYNCED carries the listing's resourceVersion, which is the first page's.
+	if synced.GetResourceVersion() != "100" {
+		t.Errorf("SYNCED resource_version = %q, want the listing's snapshot", synced.GetResourceVersion())
+	}
+	if len(c.limits) < 3 {
+		t.Fatalf("expected at least 3 pages, saw %d calls", len(c.limits))
+	}
+	// The limit stays put across a continuation: Kubernetes treats a resumed
+	// list as requiring the same query parameters.
+	for i, l := range c.limits {
+		if l != c.limits[0] {
+			t.Errorf("limit changed mid-walk: call %d used %d, first used %d", i, l, c.limits[0])
+		}
+	}
+	if c.conts[0] != "" {
+		t.Errorf("first call carried a continue token %q", c.conts[0])
+	}
+	cancel()
+	<-done
 }

@@ -84,7 +84,7 @@ func TestDynamicList(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			list, err := c.List(context.Background(), podGVK, tc.ns, "")
+			list, err := c.List(context.Background(), podGVK, tc.ns, "", 0, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -164,7 +164,7 @@ func TestUnconfigured(t *testing.T) {
 	if _, err := c.Get(context.Background(), podGVK, "d", "a"); !errors.Is(err, ErrNoCluster) {
 		t.Fatalf("Get err = %v", err)
 	}
-	if _, err := c.List(context.Background(), podGVK, "", ""); !errors.Is(err, ErrNoCluster) {
+	if _, err := c.List(context.Background(), podGVK, "", "", 0, ""); !errors.Is(err, ErrNoCluster) {
 		t.Fatalf("List err = %v", err)
 	}
 	if _, err := c.Create(context.Background(), cmGVK, "d", cm("d", "a", nil)); !errors.Is(err, ErrNoCluster) {
@@ -261,7 +261,7 @@ func TestListByNameAcrossAllNamespaces(t *testing.T) {
 	})
 	c := NewDynamic(dyn, NewStaticMapper(BuiltinKinds()...))
 
-	if _, err := c.List(context.Background(), podGVK, "", "c"); err != nil {
+	if _, err := c.List(context.Background(), podGVK, "", "c", 0, ""); err != nil {
 		t.Fatalf("List(name=c, no namespace) = %v", err)
 	}
 	if listed != 1 {
@@ -306,7 +306,7 @@ func TestListByNameSendsAFieldSelectorAndNeverAGet(t *testing.T) {
 			})
 			c := NewDynamic(dyn, NewStaticMapper(BuiltinKinds()...))
 
-			if _, err := c.List(context.Background(), podGVK, tc.ns, "a"); err != nil {
+			if _, err := c.List(context.Background(), podGVK, tc.ns, "a", 0, ""); err != nil {
 				t.Fatalf("List = %v", err)
 			}
 			if gets != 0 {
@@ -328,7 +328,7 @@ func TestListMissIsAnEmptyResultNotAnError(t *testing.T) {
 	// The fake cannot filter, so drive the miss through an empty namespace,
 	// which it does scope correctly.
 	c := newFake(t)
-	got, err := c.List(context.Background(), podGVK, "empty", "")
+	got, err := c.List(context.Background(), podGVK, "empty", "", 0, "")
 	if err != nil {
 		t.Fatalf("List of an empty namespace = %v, want no error", err)
 	}
