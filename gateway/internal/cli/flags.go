@@ -11,7 +11,12 @@
 // can register the flags without starting a gateway.
 package cli
 
-import "flag"
+import (
+	"flag"
+	"time"
+
+	"github.com/dhilipkumars/axiom/gateway/internal/k8s"
+)
 
 // Options holds the parsed command line. The fields are pointers because they
 // are bound by flag.FlagSet before Parse runs.
@@ -29,6 +34,8 @@ type Options struct {
 	NoCluster *bool
 	// Serve bounds which resources the gateway offers, before RBAC.
 	Serve *string
+	// DiscoveryTTL is how long a group-version's resource list is trusted.
+	DiscoveryTTL *time.Duration
 }
 
 // Register binds every gateway flag onto fs and returns the bound options.
@@ -40,6 +47,10 @@ func Register(fs *flag.FlagSet, defaultServe string) *Options {
 		Kubeconfig: fs.String("kubeconfig", "", "path to a kubeconfig; empty means in-cluster config"),
 		NoCluster: fs.Bool("no-cluster", false,
 			"serve Ping only; Get/List fail with FAILED_PRECONDITION (Phase 0 plumbing mode)"),
+		DiscoveryTTL: fs.Duration("discovery-ttl", k8s.DefaultResourceTTL,
+			"how long a cached list of an API group's resources is trusted before "+
+				"being refetched; lower it to notice a deleted custom resource sooner, "+
+				"at the cost of more discovery traffic"),
 		Serve: fs.String("serve", defaultServe,
 			"comma-separated resources this gateway serves, as `plural[.group]` "+
 				"(e.g. \"pods,configmaps,widgets.example.com\"); \"*.group\" covers a whole group. "+

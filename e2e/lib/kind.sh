@@ -186,6 +186,10 @@ check ownership in $tmp"
 # ConfigMap rather than being baked into the manifest.
 kind_deploy_gateway() {
   local serve="${1:-pods,configmaps,widgets.example.com}"
+  # Second argument: how long the gateway trusts a cached resource list.
+  # Seconds here, because a gate cannot wait out the five-minute default to
+  # prove that a deleted kind stops being offered.
+  local discovery_ttl="${2:-${E2E_DISCOVERY_TTL:-5m}}"
   # A standalone gate has no suite to have loaded the image for it, and the
   # load is skipped when the node already has it, so this is safe either way.
   kind_load_gateway_image
@@ -195,9 +199,15 @@ kind_deploy_gateway() {
     --from-literal=serve="$serve" \
     --dry-run=client -o yaml | kubectl_e2e apply -f - >/dev/null \
     || fail "create configmap axiom-gateway-config"
-  log "deploying the gateway in-cluster (serve=$serve)"
+  log "deploying the gateway in-cluster (serve=$serve, discovery-ttl=$discovery_ttl)"
   kubectl_e2e apply -f "$E2E_ROOT/deploy/k8s/gateway-deployment.yaml" >/dev/null \
     || fail "apply gateway deployment"
+  # Override the manifest's default the same way an operator would. Not a
+  # ConfigMap key: that would make it required, and a Pod whose ConfigMap
+  # lacks it never starts (deploy/k8s/gateway-deployment.yaml says why).
+  kubectl_e2e -n "$E2E_GATEWAY_SA_NS" set env deploy/axiom-gateway \
+    AXIOM_DISCOVERY_TTL="$discovery_ttl" >/dev/null \
+    || fail "set AXIOM_DISCOVERY_TTL"
   # A changed ConfigMap does not restart a running Pod, so force a fresh one.
   # Gates also need a clean process: the gateway caches discovery and access
   # answers for its lifetime, and those must not leak between gates.

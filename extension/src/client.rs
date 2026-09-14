@@ -74,6 +74,26 @@ pub enum ErrorClass {
 }
 
 impl ClientError {
+    /// Whether this is a deadline, from either side of the call.
+    ///
+    /// Two different things produce one: the gateway (or the API server behind
+    /// it) exceeding a deadline, and this client's own
+    /// `tokio::time::timeout`, which reports `DeadlineExceeded: no reply
+    /// within Ns`. Matching on the message would miss the second, whose text
+    /// contains neither "timeout" nor "timed out", and that is the common case
+    /// -- it is what an `rpc_timeout_secs` that is too short actually looks
+    /// like.
+    pub fn is_deadline(&self) -> bool {
+        match self {
+            Self::Rpc(s) => {
+                s.code() == tonic::Code::DeadlineExceeded
+                    || (s.code() == tonic::Code::Cancelled
+                        && s.message().to_lowercase().contains("timeout"))
+            }
+            _ => false,
+        }
+    }
+
     /// Classifies the error for SQLSTATE selection.
     pub fn class(&self) -> ErrorClass {
         use tonic::Code;
@@ -442,5 +462,33 @@ mod tests {
             "{err:?}"
         );
         assert_eq!(err.class(), ErrorClass::Connection);
+    }
+
+    /// Both shapes of deadline are recognised.
+    ///
+    /// The client's own timeout is the one that matters and the one a message
+    /// match would miss: `tokio::time::timeout` produces
+    /// `DeadlineExceeded: no reply within Ns`, whose text contains neither
+    /// "timeout" nor "timed out". That is what an `rpc_timeout_secs` set too
+    /// low actually looks like, so matching on prose would have left the
+    /// IMPORT hint firing only for the rarer server-side case.
+    #[test]
+    fn deadlines_are_recognised_by_code_not_by_wording() {
+        let ours = ClientError::Rpc(Box::new(tonic::Status::deadline_exceeded(
+            "no reply within 30s",
+        )));
+        assert!(ours.is_deadline(), "the client's own timeout must count");
+
+        let theirs = ClientError::Rpc(Box::new(tonic::Status::cancelled("Timeout expired")));
+        assert!(theirs.is_deadline(), "a cancelled-with-timeout must count");
+
+        let other = ClientError::Rpc(Box::new(tonic::Status::unavailable("dns error")));
+        assert!(
+            !other.is_deadline(),
+            "an unreachable gateway is not a deadline"
+        );
+
+        let denied = ClientError::Rpc(Box::new(tonic::Status::permission_denied("nope")));
+        assert!(!denied.is_deadline());
     }
 }

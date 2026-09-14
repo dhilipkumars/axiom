@@ -62,6 +62,8 @@ spec:
             - /certs/tls.key
             - -serve
             - $(AXIOM_SERVE)
+            - -discovery-ttl
+            - $(AXIOM_DISCOVERY_TTL)
           env:
             # Which kinds this gateway offers. Sourced from a ConfigMap because
             # the E2E gates need different values: most want the narrow Phase
@@ -73,6 +75,24 @@ spec:
                 configMapKeyRef:
                   name: axiom-gateway-config
                   key: serve
+            # How long a cached resource list is trusted before it is
+            # refetched, so a kind deleted from the cluster stops being
+            # offered. Matches the binary's own default.
+            #
+            # A literal, not a ConfigMap key. Sourcing it from the ConfigMap
+            # would make that key required: a Pod whose ConfigMap lacks it
+            # fails with CreateContainerConfigError, which would break every
+            # existing deployment and every set of instructions that creates
+            # the ConfigMap with `serve` alone. Marking the key optional does
+            # not help either, because an undefined variable leaves
+            # "$(AXIOM_DISCOVERY_TTL)" literal in the arguments and the
+            # gateway then fails to parse it as a duration.
+            #
+            # Override it on a running Deployment with:
+            #   kubectl -n axiom-system set env deploy/axiom-gateway \
+            #     AXIOM_DISCOVERY_TTL=30s
+            - name: AXIOM_DISCOVERY_TTL
+              value: "5m"
           ports:
             - name: grpc
               containerPort: 8443

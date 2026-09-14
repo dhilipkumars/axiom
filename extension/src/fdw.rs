@@ -172,6 +172,39 @@ fn write_sqlstate(e: &WriteError) -> PgSqlErrorCode {
 }
 
 /// Raises the SQL error for a failed gateway call.
+/// Raises for a failed import, naming the setting to change on a timeout.
+///
+/// A bare `Cancelled: Timeout expired` gives an operator nothing to act on. It
+/// does not say which timeout applied, and the obvious guess -- that a scan
+/// was slow -- is wrong: an import is a different shape of call, enumerating
+/// every kind, fetching an `OpenAPI` document per API group and checking access
+/// per kind. On a bare cluster with `--serve '*.*'` that already exceeded a 10
+/// second `rpc_timeout_secs`.
+///
+/// Giving IMPORT its own longer budget was tried here and reverted. The
+/// channel cache is keyed on `(target, rpc_timeout)`, so a different timeout
+/// builds a second connection to the same gateway, and the whole-cluster
+/// import then failed with `Unknown: transport error` before fetching
+/// anything. Making the deadline per-call rather than per-channel is the way
+/// to do it and is its own change; this message is the half that helps today.
+fn raise_import(op: &str, server: &ServerOptions, e: &ClientError) -> ! {
+    if e.is_deadline() {
+        raise(
+            client_sqlstate(e),
+            format!(
+                "axiom: IMPORT FOREIGN SCHEMA timed out after {}s. Discovery fetches an \
+                 OpenAPI document per API group and runs an access check for every kind, \
+                 so an import takes far longer than a scan of one table. Raise the \
+                 server's rpc_timeout_secs with ALTER SERVER ... OPTIONS (SET \
+                 rpc_timeout_secs '...'), or import one API group at a time instead of \
+                 the whole cluster: {e}",
+                server.rpc_timeout.as_secs(),
+            ),
+        );
+    }
+    raise_client(op, server, e);
+}
+
 fn raise_client(op: &str, server: &ServerOptions, e: &ClientError) -> ! {
     let msg = match e.class() {
         ErrorClass::Conflict => format!(
@@ -1328,7 +1361,7 @@ unsafe extern "C-unwind" fn import_foreign_schema(
         };
         let kinds = match client::list_kinds(&server_opts, group.as_deref(), &plurals) {
             Ok(k) => k,
-            Err(e) => raise_client("list_kinds", &server_opts, &e),
+            Err(e) => raise_import("list_kinds", &server_opts, &e),
         };
 
         // Decide every table name up front: a plural is only unique within an
