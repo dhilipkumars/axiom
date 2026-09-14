@@ -36,7 +36,7 @@ jobs:
             # callers must opt into "main" rather than silently taking whatever
             # was pushed most recently.
             type=raw,value=main,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-            type=raw,value=${{ github.event.release.tag_name }},enable=${{ github.event_name == 'release' }}
+            type=raw,value=${{ github.ref_name }},enable=${{ github.event_name == 'release' }}
       - uses: docker/build-push-action@v6
         with:
           context: .
