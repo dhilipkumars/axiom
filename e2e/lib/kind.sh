@@ -11,6 +11,8 @@
 #   E2E_KIND_CLUSTER   cluster name (default axiom-e2e)
 #   E2E_KIND_KEEP=1    leave the cluster running after the test
 #   E2E_KUBE_DIR       where the gateway kubeconfig is written (default e2e/.kind)
+#   E2E_GATEWAY_LOCAL_IMAGE   locally built image to side-load (default axiom-gateway:latest)
+#   E2E_GATEWAY_DEPLOY_IMAGE  image reference the manifest uses (default ghcr.io/dhilipkumars/axiom-gateway:main)
 
 [[ -n "${_AXIOM_E2E_KIND_LIB:-}" ]] && return 0
 _AXIOM_E2E_KIND_LIB=1
@@ -100,20 +102,24 @@ kind_wait_pods() {
 # NodePort the gateway Service publishes, and the host:port Postgres dials. The
 # compose stack joins kind's Docker network, so it reaches the node by name.
 E2E_GATEWAY_NODEPORT="${E2E_GATEWAY_NODEPORT:-30443}"
+E2E_GATEWAY_LOCAL_IMAGE="${E2E_GATEWAY_LOCAL_IMAGE:-axiom-gateway:latest}"
+E2E_GATEWAY_DEPLOY_IMAGE="${E2E_GATEWAY_DEPLOY_IMAGE:-ghcr.io/dhilipkumars/axiom-gateway:main}"
 
 # kind_gateway_endpoint: the https URL an out-of-cluster client uses.
 kind_gateway_endpoint() {
   echo "https://${E2E_KIND_CLUSTER}-control-plane:${E2E_GATEWAY_NODEPORT}"
 }
 
-# kind_load_gateway_image: side-load the locally built image into the cluster.
-# Done once per suite rather than per gate: each load costs 20-40s and the image
-# does not change between gates.
+# kind_load_gateway_image: side-load the locally built image into the cluster,
+# retagged to match the raw manifest's published-image reference. Done once per
+# suite rather than per gate: each load costs 20-40s and the image does not
+# change between gates.
 kind_load_gateway_image() {
-  local image="${1:-axiom-gateway:latest}" node="${E2E_KIND_CLUSTER}-control-plane"
+  local source="${1:-$E2E_GATEWAY_LOCAL_IMAGE}" image="${2:-$E2E_GATEWAY_DEPLOY_IMAGE}"
+  local node="${E2E_KIND_CLUSTER}-control-plane"
   local stamp="/etc/axiom-loaded-image-id"
-  docker image inspect "$image" >/dev/null 2>&1 \
-    || fail "image $image is not built; run 'docker compose -f $E2E_COMPOSE_FILE build gateway' first"
+  docker image inspect "$source" >/dev/null 2>&1 \
+    || fail "image $source is not built; run 'docker compose -f $E2E_COMPOSE_FILE build gateway' first"
 
   # Skip when the node already has this exact build. Compare by the *docker*
   # image ID recorded at load time, not by anything containerd reports:
@@ -130,14 +136,15 @@ kind_load_gateway_image() {
   # exits non-zero aborts the assignment and takes the whole gate with it, with
   # no error message, and both of these legitimately fail on a first run.
   local want have
-  want="$(docker image inspect "$image" --format '{{.Id}}' 2>/dev/null || true)"
+  want="$(docker image inspect "$source" --format '{{.Id}}' 2>/dev/null || true)"
   have="$(docker exec "$node" cat "$stamp" 2>/dev/null || true)"
   if [[ -n "$want" && "$want" == "$have" ]]; then
-    log "$image already loaded in $E2E_KIND_CLUSTER, skipping"
+    log "$source already loaded in $E2E_KIND_CLUSTER as $image, skipping"
     return 0
   fi
 
-  log "loading $image into kind cluster $E2E_KIND_CLUSTER"
+  docker tag "$source" "$image" >/dev/null || fail "tag $source as $image"
+  log "loading $source into kind cluster $E2E_KIND_CLUSTER as $image"
   kind load docker-image "$image" --name "$E2E_KIND_CLUSTER" >/dev/null \
     || fail "kind load docker-image $image"
   # Written only after a successful load, so an interrupted one reloads.

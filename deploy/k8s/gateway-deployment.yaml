@@ -44,9 +44,10 @@ spec:
           type: RuntimeDefault
       containers:
         - name: gateway
-          image: axiom-gateway:latest
-          # The image is built locally and side-loaded into the kind cluster (or
-          # node image cache), never pulled from a remote registry.
+          image: ghcr.io/dhilipkumars/axiom-gateway:main
+          # Default to the published GHCR image. The E2E gates deliberately
+          # side-load a local build under this exact reference, so
+          # IfNotPresent still prefers the node's cached copy there.
           imagePullPolicy: IfNotPresent
           # Arguments match gateway/cmd/gateway/main.go.
           # -kubeconfig is omitted so k8s.Config falls back to rest.InClusterConfig(),

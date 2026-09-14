@@ -85,22 +85,7 @@ RSA keys, and SHA-256 signatures**. The subject alternative names must cover
 the name Postgres will dial, which for a `NodePort` is the node address or
 `localhost`, not the in-cluster Service DNS.
 
-## 3. Build the gateway image and load it
-
-The Deployment references `axiom-gateway:latest`. Nothing publishes that image,
-so unless it is already on the node the Deployment tries to pull it from Docker
-Hub and fails with `ImagePullBackOff`. Build it and load it first:
-
-```sh
-docker build -f gateway/Dockerfile -t axiom-gateway:latest .
-kind load docker-image axiom-gateway:latest --name axiom
-```
-
-Not on kind? Push the image to a registry your nodes can pull from and change
-`image:` in `deploy/k8s/gateway-deployment.yaml` to match. Axiom does not
-publish images yet.
-
-## 4. Run the gateway in the cluster
+## 3. Run the gateway in the cluster
 
 The gateway is the only piece that needs cluster credentials. It runs as a
 Deployment with a ServiceAccount and the projected token kubelet mounts.
@@ -117,6 +102,16 @@ kubectl -n axiom-system create configmap axiom-gateway-config \
 
 kubectl apply -f deploy/k8s/gateway-deployment.yaml
 kubectl -n axiom-system rollout status deploy/axiom-gateway
+```
+
+`deploy/k8s/gateway-deployment.yaml` pulls
+`ghcr.io/dhilipkumars/axiom-gateway:main` by default. If you are iterating on a
+local gateway build and want kind to run that instead, tag it with the same
+reference and side-load it before the `kubectl apply` above:
+
+```sh
+docker build -f gateway/Dockerfile -t ghcr.io/dhilipkumars/axiom-gateway:main .
+kind load docker-image ghcr.io/dhilipkumars/axiom-gateway:main --name axiom
 ```
 
 [Deploying the gateway](deploying.md) covers the exposure choices and how they
@@ -155,7 +150,7 @@ Grant only the verbs you want available. A kind granted `get`, `list` and
 `watch` is readable and cacheable but not writable, and the generated table
 reflects that.
 
-## 5. Install the extension into Postgres
+## 4. Install the extension into Postgres
 
 Axiom is a pgrx extension, built and installed like any other:
 
@@ -175,7 +170,7 @@ CREATE EXTENSION axiom;
 SELECT axiom_version();
 ```
 
-## 6. Point Postgres at the gateway
+## 5. Point Postgres at the gateway
 
 ```sql
 CREATE SERVER prod
@@ -200,7 +195,7 @@ gateway's certificate is signed by a real CA.
 Every accepted option is listed in the
 [foreign data wrapper options](../generated/fdw-options.md) reference.
 
-## 7. Import a schema
+## 6. Import a schema
 
 `IMPORT FOREIGN SCHEMA` asks the gateway what it serves, reads the cluster's
 OpenAPI documents, and writes one foreign table per kind.
@@ -224,7 +219,7 @@ raise the timeout on the server rather than narrowing the import:
 ALTER SERVER prod OPTIONS (SET rpc_timeout_secs '120');
 ```
 
-## 8. Query
+## 7. Query
 
 ```sql
 SELECT name, namespace, phase, node
