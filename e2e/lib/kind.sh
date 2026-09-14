@@ -12,7 +12,7 @@
 #   E2E_KIND_KEEP=1    leave the cluster running after the test
 #   E2E_KUBE_DIR       where the gateway kubeconfig is written (default e2e/.kind)
 #   E2E_GATEWAY_LOCAL_IMAGE   locally built image to side-load (default axiom-gateway:latest)
-#   E2E_GATEWAY_DEPLOY_IMAGE  image reference the manifest uses (default ghcr.io/dhilipkumars/axiom-gateway:main)
+#   E2E_GATEWAY_DEPLOY_IMAGE  image reference the manifest uses (default ghcr.io/dhilipkumars/axiom-gateway:development)
 
 [[ -n "${_AXIOM_E2E_KIND_LIB:-}" ]] && return 0
 _AXIOM_E2E_KIND_LIB=1
@@ -103,7 +103,7 @@ kind_wait_pods() {
 # compose stack joins kind's Docker network, so it reaches the node by name.
 E2E_GATEWAY_NODEPORT="${E2E_GATEWAY_NODEPORT:-30443}"
 E2E_GATEWAY_LOCAL_IMAGE="${E2E_GATEWAY_LOCAL_IMAGE:-axiom-gateway:latest}"
-E2E_GATEWAY_DEPLOY_IMAGE="${E2E_GATEWAY_DEPLOY_IMAGE:-ghcr.io/dhilipkumars/axiom-gateway:main}"
+E2E_GATEWAY_DEPLOY_IMAGE="${E2E_GATEWAY_DEPLOY_IMAGE:-ghcr.io/dhilipkumars/axiom-gateway:development}"
 
 # kind_gateway_endpoint: the https URL an out-of-cluster client uses.
 kind_gateway_endpoint() {

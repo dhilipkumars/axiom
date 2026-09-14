@@ -44,7 +44,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: gateway
-          image: ghcr.io/dhilipkumars/axiom-gateway:main
+          image: ghcr.io/dhilipkumars/axiom-gateway:development
           # Default to the published GHCR image for this repository. A fork that
           # publishes under a different owner needs to patch only this field.
           # The E2E gates deliberately side-load a local build under this exact
