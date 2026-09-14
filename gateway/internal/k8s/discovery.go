@@ -136,8 +136,6 @@ type Discovery struct {
 	pathsCache map[string]openapi.GroupVersion
 }
 
-// NewDiscovery builds a Mapper over a cached discovery client, serving only
-// what allow permits.
 // SetResourceTTL overrides how long a group-version's resource list is
 // trusted. Zero or negative leaves the default in place.
 func (d *Discovery) SetResourceTTL(ttl time.Duration) {
@@ -146,6 +144,8 @@ func (d *Discovery) SetResourceTTL(ttl time.Duration) {
 	}
 }
 
+// NewDiscovery builds a Mapper over a cached discovery client, serving only
+// what allow permits.
 func NewDiscovery(disco discovery.CachedDiscoveryInterface, allow Allowlist, access AccessChecker, logger *slog.Logger) *Discovery {
 	if access == nil {
 		access = AllowAll{}

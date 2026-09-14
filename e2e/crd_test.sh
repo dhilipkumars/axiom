@@ -328,15 +328,27 @@ kubectl_e2e delete crd widgets.example.com --ignore-not-found --wait=true >/dev/
 # still offers widgets, so a retry-until-success loop exits immediately with
 # the answer it was meant to wait out.
 got=""
+imported=0
+last_err=""
 deadline=$((SECONDS + 60))
 while (( SECONDS < deadline )); do
   psql_axiom "DROP SCHEMA IF EXISTS gone CASCADE;" >/dev/null 2>&1
   psql_axiom "CREATE SCHEMA gone;" >/dev/null 2>&1
-  psql_axiom "IMPORT FOREIGN SCHEMA \"example.com\" FROM SERVER kind INTO gone;" >/dev/null 2>&1
-  got="$(psql_axiom "SELECT coalesce(string_agg(c.relname, ',' ORDER BY c.relname), '') FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'gone' AND c.relkind = 'f';" 2>/dev/null || echo "?")"
+  # The import must succeed before its result means anything. A failed import
+  # leaves `gone` empty, which is indistinguishable from "widgets is no longer
+  # offered" -- so a gateway that had crashed would satisfy this assertion
+  # without the TTL doing anything.
+  if ! last_err="$(psql_axiom "IMPORT FOREIGN SCHEMA \"example.com\" FROM SERVER kind INTO gone;" 2>&1)"; then
+    sleep 2
+    continue
+  fi
+  imported=1
+  got="$(psql_axiom "SELECT coalesce(string_agg(c.relname, ',' ORDER BY c.relname), '') FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'gone' AND c.relkind = 'f';")"
   grep -q "widgets" <<<"$got" || break
   sleep 2
 done
+(( imported == 1 )) \
+  || fail $'no IMPORT succeeded within 60s, so the TTL was never exercised; last error:\n'"$last_err"
 grep -q "widgets" <<<"$got" \
   && fail "a deleted CRD was still offered 60s after the 3s discovery TTL: '$got'"
 echo "deleted CRD no longer offered (import produced: '${got:-nothing}')"
