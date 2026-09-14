@@ -33,7 +33,7 @@ use crate::proto::v1::gateway_service_client::GatewayServiceClient;
 use crate::proto::v1::subscribe_response::Type as EvType;
 use crate::proto::v1::{PingRequest, SubscribeRequest, SubscribeResponse};
 use crate::shmem::{self, ShmemError, SubSpec};
-use crate::transport::{build_channel, build_channel_with, ChannelError, Keepalive};
+use crate::transport::{self, build_channel, build_channel_with, ChannelError, Keepalive};
 
 /// Human-readable worker name; also its `backend_type` in `pg_stat_activity`.
 pub const WORKER_NAME: &str = "axiom gateway pinger";
@@ -199,7 +199,9 @@ impl Pinger {
                         settings.target.endpoint
                     );
                     self.conn = Some(Conn {
-                        client: GatewayServiceClient::new(ch),
+                        client: GatewayServiceClient::new(ch)
+                            .max_decoding_message_size(transport::MAX_MESSAGE_BYTES)
+                            .max_encoding_message_size(transport::MAX_MESSAGE_BYTES),
                         settings,
                     });
                 }
@@ -463,7 +465,11 @@ async fn run_stream(
     // not do this; see transport::Keepalive.
     let channel = build_channel_with(&spec.target, spec.rpc_timeout, Keepalive::WhileIdle)
         .map_err(|e| e.to_string())?;
-    let mut client = GatewayServiceClient::new(channel);
+    // A watch's initial listing arrives as individual events, but one object
+    // can still be large, so the subscription client needs the same ceiling.
+    let mut client = GatewayServiceClient::new(channel)
+        .max_decoding_message_size(transport::MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(transport::MAX_MESSAGE_BYTES);
     let r = &spec.resource;
     let req = SubscribeRequest {
         gvk: Some(crate::proto::v1::GroupVersionKind {

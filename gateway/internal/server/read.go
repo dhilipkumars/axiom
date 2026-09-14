@@ -62,9 +62,15 @@ func validName(field, v string) error {
 // metadata on top of the JSON, and the margin means a page that fits the
 // budget always fits the message.
 const (
-	defaultPageSize = 500
-	maxPageSize     = 5000
-	maxPageBytes    = 4 << 20
+	defaultPageSize = 200
+	// A caller cannot raise the first allocation without bound. The byte
+	// budget below is measured only after client-go has decoded the page, so
+	// the object count is the only thing standing between a request and the
+	// memory it costs to answer: 1000 ConfigMaps of a megabyte each is a
+	// gigabyte materialised before a single byte is counted. Shrinking after
+	// the fact protects the response, not the fetch; this protects the fetch.
+	maxPageSize  = 1000
+	maxPageBytes = 4 << 20
 	// MaxMessageBytes is the gRPC message limit both ends must agree on. The
 	// 4 MiB default is reachable on an ordinary cluster: a few hundred Pods
 	// carrying managedFields will do it. Exported so the server sets the same
@@ -83,6 +89,53 @@ func clampLimit(requested int32) int32 {
 		return maxPageSize
 	default:
 		return requested
+	}
+}
+
+// fetchBoundedPage reads one page, shrinking it until its JSON fits the byte
+// budget, and returns the encoded objects alongside the raw list.
+//
+// The limit bounds objects, not bytes, and objects vary by three orders of
+// magnitude: a count that is comfortable for Pods can be hundreds of megabytes
+// of ConfigMaps holding a megabyte each. A Kubernetes continue token is opaque
+// and points at a page boundary, so a page cannot be split after the fact --
+// but the token that produced it is still valid, so asking again for half as
+// many returns the same objects from the same snapshot. Nothing has reached
+// the caller at that point.
+//
+// What this does not do is bound the *fetch*: client-go decodes the whole
+// requested page before its size can be measured. maxPageSize is what bounds
+// that, which is why it is modest.
+func (s *Server) fetchBoundedPage(
+	ctx context.Context,
+	gvk schema.GroupVersionKind,
+	namespace, name string,
+	limit int32,
+	continueToken string,
+) ([]*axiomv1.Object, *unstructured.UnstructuredList, int, error) {
+	for {
+		list, err := s.k8s.List(ctx, gvk, namespace, name, int64(limit), continueToken)
+		if err != nil {
+			return nil, nil, 0, toGRPC(err)
+		}
+		objs := make([]*axiomv1.Object, 0, len(list.Items))
+		size := 0
+		for i := range list.Items {
+			po, err := objectToProto(&list.Items[i])
+			if err != nil {
+				return nil, nil, 0, err
+			}
+			size += len(po.GetJson())
+			objs = append(objs, po)
+		}
+		if size <= maxPageBytes || limit <= 1 {
+			return objs, list, size, nil
+		}
+		limit /= 2
+		s.log.LogAttrs(ctx, slog.LevelInfo, "list_page_shrunk",
+			slog.String("gvk", gvk.String()),
+			slog.Int("bytes", size),
+			slog.Int("new_limit", int(limit)))
 	}
 }
 
@@ -196,45 +249,10 @@ func (s *Server) List(ctx context.Context, req *axiomv1.ListRequest) (*axiomv1.L
 	if err := validName("name", req.GetName()); err != nil {
 		return nil, err
 	}
-	// Fetch a page, shrinking it until it fits the byte budget.
-	//
-	// The limit bounds objects, not bytes, and objects vary by three orders of
-	// magnitude: a count that is comfortable for Pods can be hundreds of
-	// megabytes of ConfigMaps holding a megabyte each. A Kubernetes continue
-	// token is opaque and points at a page boundary, so a page cannot be split
-	// after the fact -- but the token that produced this page is still valid,
-	// so asking again for half as many is safe and returns the same objects
-	// from the same snapshot. Nothing has been sent to the caller yet.
-	limit := clampLimit(req.GetLimit())
-	var (
-		list *unstructured.UnstructuredList
-		objs []*axiomv1.Object
-		size int
-	)
-	for {
-		var err error
-		list, err = s.k8s.List(ctx, gvk, req.GetNamespace(), req.GetName(), int64(limit), req.GetContinueToken())
-		if err != nil {
-			return nil, toGRPC(err)
-		}
-		objs = make([]*axiomv1.Object, 0, len(list.Items))
-		size = 0
-		for i := range list.Items {
-			po, err := objectToProto(&list.Items[i])
-			if err != nil {
-				return nil, err
-			}
-			size += len(po.GetJson())
-			objs = append(objs, po)
-		}
-		if size <= maxPageBytes || limit <= 1 {
-			break
-		}
-		limit /= 2
-		s.log.LogAttrs(ctx, slog.LevelInfo, "list_page_shrunk",
-			slog.String("gvk", gvk.String()),
-			slog.Int("bytes", size),
-			slog.Int("new_limit", int(limit)))
+	objs, list, size, err := s.fetchBoundedPage(ctx, gvk, req.GetNamespace(), req.GetName(),
+		clampLimit(req.GetLimit()), req.GetContinueToken())
+	if err != nil {
+		return nil, err
 	}
 	// A single object over the budget cannot be paged around. Say so, rather
 	// than letting the transport reject the message with a size error that

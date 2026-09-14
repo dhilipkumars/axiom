@@ -182,7 +182,9 @@ where
     let timeout = server.rpc_timeout;
     with_runtime(|rt| {
         let ch = channel_for(rt, server)?;
-        let client = GatewayServiceClient::new(ch);
+        let client = GatewayServiceClient::new(ch)
+            .max_decoding_message_size(crate::transport::MAX_MESSAGE_BYTES)
+            .max_encoding_message_size(crate::transport::MAX_MESSAGE_BYTES);
         let out: Result<T, ClientError> = rt.block_on(async {
             match tokio::time::timeout(timeout, f(client)).await {
                 Ok(Ok(resp)) => Ok(resp.into_inner()),

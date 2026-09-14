@@ -136,6 +136,20 @@ impl std::error::Error for ChannelError {}
 /// interval (see `keepalive.EnforcementPolicy` in `gateway/cmd/gateway/main.go`)
 /// or the server answers pings with GOAWAY and kills the connection this is
 /// meant to protect.
+/// Largest gRPC message in either direction, matching `MaxMessageBytes` in
+/// `gateway/internal/server/read.go`.
+///
+/// Both ends must agree. Raising only the server's limit lets it send a
+/// message the client then refuses with `RESOURCE_EXHAUSTED`, which is a
+/// confusing way to discover a size problem: the send succeeded.
+///
+/// tonic defaults to 4 MiB in each direction, which is the ceiling paging
+/// exists to stay under, so this is a backstop. The gateway's per-page byte
+/// budget is deliberately well below it, because a page's JSON is not the
+/// whole message: protobuf framing and each object's namespace, name and
+/// resourceVersion ride along on top.
+pub const MAX_MESSAGE_BYTES: usize = 16 << 20;
+
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
 

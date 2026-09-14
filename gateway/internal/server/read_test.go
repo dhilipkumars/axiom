@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -230,5 +233,155 @@ func TestErrorMapping(t *testing.T) {
 				t.Fatalf("delete code = %v, want %v (err=%v)", got, tc.want, err)
 			}
 		})
+	}
+}
+
+// pagingClient is a Client that actually honours Limit and Continue.
+//
+// client-go's dynamicfake ignores both, so every existing test exercises the
+// unpaged path no matter what the server asks for. Without a fake that pages,
+// a regression in forwarding the continuation, shrinking an oversized page, or
+// reporting a single object over the budget would pass unnoticed.
+type pagingClient struct {
+	k8s.Client
+	items []unstructured.Unstructured
+	// limits records the limit of each call, so a test can assert the server
+	// actually halved rather than merely returned something acceptable.
+	limits []int64
+}
+
+func (p *pagingClient) List(_ context.Context, _ schema.GroupVersionKind, _, _ string, limit int64, cont string) (*unstructured.UnstructuredList, error) {
+	p.limits = append(p.limits, limit)
+	start := 0
+	if cont != "" {
+		n, err := strconv.Atoi(cont)
+		if err != nil {
+			return nil, fmt.Errorf("bad continue token %q", cont)
+		}
+		start = n
+	}
+	if start > len(p.items) {
+		start = len(p.items)
+	}
+	end := len(p.items)
+	if limit > 0 && start+int(limit) < end {
+		end = start + int(limit)
+	}
+	out := &unstructured.UnstructuredList{Items: append([]unstructured.Unstructured(nil), p.items[start:end]...)}
+	if end < len(p.items) {
+		out.SetContinue(strconv.Itoa(end))
+	}
+	return out, nil
+}
+
+// padded builds a ConfigMap whose JSON is at least n bytes.
+func padded(name string, n int) unstructured.Unstructured {
+	return unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata":   map[string]any{"name": name, "namespace": "default"},
+		"data":       map[string]any{"blob": strings.Repeat("x", n)},
+	}}
+}
+
+func TestListForwardsTheContinuationToken(t *testing.T) {
+	t.Parallel()
+	items := make([]unstructured.Unstructured, 7)
+	for i := range items {
+		items[i] = padded(fmt.Sprintf("cm-%d", i), 8)
+	}
+	pc := &pagingClient{items: items}
+	s := New("test", nil, pc, nil)
+	gvk := &axiomv1.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}
+
+	// First page, limited to 3.
+	r1, err := s.List(context.Background(), &axiomv1.ListRequest{Gvk: gvk, Limit: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r1.GetObjects()) != 3 || r1.GetContinueToken() == "" {
+		t.Fatalf("first page: %d objects, token %q; want 3 and a token",
+			len(r1.GetObjects()), r1.GetContinueToken())
+	}
+
+	// Resuming walks forward rather than starting again.
+	r2, err := s.List(context.Background(), &axiomv1.ListRequest{
+		Gvk: gvk, Limit: 3, ContinueToken: r1.GetContinueToken(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r2.GetObjects()) != 3 {
+		t.Fatalf("second page: %d objects, want 3", len(r2.GetObjects()))
+	}
+	if string(r2.GetObjects()[0].GetJson()) == string(r1.GetObjects()[0].GetJson()) {
+		t.Error("resuming returned the first page again: the token was not forwarded")
+	}
+
+	// Last page is short and ends the walk.
+	r3, err := s.List(context.Background(), &axiomv1.ListRequest{
+		Gvk: gvk, Limit: 3, ContinueToken: r2.GetContinueToken(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r3.GetObjects()) != 1 || r3.GetContinueToken() != "" {
+		t.Fatalf("last page: %d objects, token %q; want 1 and no token",
+			len(r3.GetObjects()), r3.GetContinueToken())
+	}
+}
+
+func TestListShrinksAPageThatExceedsTheByteBudget(t *testing.T) {
+	t.Parallel()
+	// Eight objects of 1 MiB: four of them already exceed the 4 MiB budget,
+	// so the server must ask for fewer.
+	items := make([]unstructured.Unstructured, 8)
+	for i := range items {
+		items[i] = padded(fmt.Sprintf("big-%d", i), 1<<20)
+	}
+	pc := &pagingClient{items: items}
+	s := New("test", nil, pc, nil)
+
+	resp, err := s.List(context.Background(), &axiomv1.ListRequest{
+		Gvk:   &axiomv1.GroupVersionKind{Version: "v1", Kind: "ConfigMap"},
+		Limit: 8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0
+	for _, o := range resp.GetObjects() {
+		total += len(o.GetJson())
+	}
+	if total > maxPageBytes {
+		t.Errorf("returned %d bytes, over the %d budget", total, maxPageBytes)
+	}
+	if len(pc.limits) < 2 {
+		t.Fatalf("expected the server to retry with a smaller limit, limits were %v", pc.limits)
+	}
+	if pc.limits[1] >= pc.limits[0] {
+		t.Errorf("limit did not shrink: %v", pc.limits)
+	}
+	// A short page must still be resumable, or the rest is silently lost.
+	if resp.GetContinueToken() == "" {
+		t.Error("a shrunk page must carry a continue token")
+	}
+}
+
+func TestListReportsASingleObjectOverTheBudget(t *testing.T) {
+	t.Parallel()
+	pc := &pagingClient{items: []unstructured.Unstructured{padded("huge", 5<<20)}}
+	s := New("test", nil, pc, nil)
+
+	_, err := s.List(context.Background(), &axiomv1.ListRequest{
+		Gvk: &axiomv1.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}, Limit: 1,
+	})
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("err = %v (code %v), want ResourceExhausted", err, status.Code(err))
+	}
+	// Paging cannot split one object, so the message must say so rather than
+	// leaving the caller to retry something that can never succeed.
+	if !strings.Contains(err.Error(), "cannot split one object") {
+		t.Errorf("error should explain that paging cannot help: %v", err)
 	}
 }

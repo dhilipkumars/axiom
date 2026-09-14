@@ -846,9 +846,18 @@ fn fetch_rows(state: &mut ScanState) -> VecDeque<Row> {
         state.exhausted = true;
         return VecDeque::new();
     }
-    if state.config.cache_mode == CacheMode::Watch {
+    // The cache is consulted once, before the first page, and never again.
+    //
+    // A subscription can become servable partway through a scan. Probing again
+    // on a later page would hand back the whole collection from the cache on
+    // top of the pages already returned, duplicating every row read so far and
+    // mixing two snapshots. Which source a scan uses is decided when it starts
+    // and holds for its lifetime.
+    if state.next_page.is_none() && state.config.cache_mode == CacheMode::Watch {
         if let Some(rows) = fetch_from_cache(state) {
             state.exhausted = true;
+            // Marks the source as chosen, so a later page cannot re-probe.
+            state.next_page = Some(String::new());
             return rows;
         }
     }

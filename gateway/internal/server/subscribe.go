@@ -76,9 +76,13 @@ func (s *Server) Subscribe(req *axiomv1.SubscribeRequest, stream axiomv1.Gateway
 			token string
 		)
 		for {
-			list, err := s.k8s.List(ctx, gvk, ns, "", defaultPageSize, token)
+			// The same byte-bounded fetch the unary List uses. Paging by count
+			// alone would leave the memory spike in place for exactly the
+			// kinds that cause it: 200 ConfigMaps of a megabyte each is 200
+			// MiB materialised before the first event goes out.
+			_, list, _, err := s.fetchBoundedPage(ctx, gvk, ns, "", defaultPageSize, token)
 			if err != nil {
-				return toGRPC(err)
+				return err
 			}
 			for i := range list.Items {
 				// Empty stream RV: a partially delivered listing is not a resume point.
