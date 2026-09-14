@@ -163,6 +163,14 @@ a row vanish. They are never returned, and a sweep clears them a couple of
 seconds later. A count that keeps climbing rather than returning to zero means
 sweeping is not keeping up, and that memory is not being reclaimed.
 
+**When the cache fills**, the subscription goes `DEGRADED` with a reason naming
+`axiom.cache_size_mb`, and keeps serving the rows it already holds rather than
+dropping them. It does not stop trying: expired tombstones are reclaimed on a
+sweep, another subscription may be dropped, and raising the setting and
+restarting also frees it, so the subscription recovers on its own once there is
+room. What it will not do is take new objects in the meantime, which means the
+rows it serves are stale and it says so on every scan.
+
 Recovery resumes from the last bookmark rather than relisting, so a gateway
 restart does not re-fetch every object. The trade is simple: caching means
 never paying for a scan, at the cost of a window where the rows are stale and

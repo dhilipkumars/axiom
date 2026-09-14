@@ -420,10 +420,21 @@ async fn stream_task(spec: Rc<SubSpec>) {
         } else {
             Some(spec.bookmark.clone())
         };
+    // Set after a cache-full failure, and cleared as soon as a stream gets
+    // going again. It suppresses the clear-before-listing on the next attempt.
+    let mut cache_full = false;
     loop {
         let rv = resume.clone().unwrap_or_default();
-        let outcome = run_stream(&spec, &rv, &mut resume, &mut state, &mut backoff).await;
-        let (ev, reason) = match outcome {
+        let outcome = run_stream(
+            &spec,
+            &rv,
+            &mut resume,
+            &mut state,
+            &mut backoff,
+            cache_full,
+        )
+        .await;
+        let (ev, reason, was_cache_full) = match outcome {
             Ok(EventAction::Relist) => {
                 resume = None;
                 if let Err(ShmemError::SlotGone) = shmem::clear(spec.slot, spec.id) {
@@ -432,17 +443,72 @@ async fn stream_task(spec: Rc<SubSpec>) {
                 (
                     StreamEvent::ResyncRequired,
                     "gateway requested a full resync".to_owned(),
+                    false,
                 )
             }
-            Ok(_) => (StreamEvent::Lost, "stream ended".to_owned()),
-            Err(e) => (StreamEvent::Lost, e),
+            Ok(_) => (StreamEvent::Lost, "stream ended".to_owned(), false),
+            Err(f) => (StreamEvent::Lost, f.reason, f.cache_full),
         };
+        cache_full = was_cache_full;
         if let Err(ShmemError::SlotGone) =
             transition(&spec, &mut state, ev, resume.is_some(), &reason)
         {
             return;
         }
-        tokio::time::sleep(backoff.on_failure()).await;
+        if was_cache_full {
+            // The longest interval straight away, rather than climbing to it
+            // from a second. Nothing here is transient: until something frees
+            // space, every attempt reopens a stream and walks into the same
+            // wall, and doing that every second costs the gateway and the API
+            // server a full listing each time for no possible progress.
+            //
+            // It does keep trying, though. `sweep` reclaims expired
+            // tombstones, another subscription may be dropped, and the cache
+            // GUC can be raised and the server restarted -- so recovery
+            // happens on its own, without needing anyone to restart the
+            // worker.
+            tokio::time::sleep(BACKOFF_MAX).await;
+        } else {
+            tokio::time::sleep(backoff.on_failure()).await;
+        }
+    }
+}
+
+/// Why a stream ended, and whether retrying can help.
+struct StreamFailure {
+    /// Shown in `axiom_watch_status()` and in the WARNING a stale scan raises.
+    reason: String,
+    /// The shared cache is full. Distinguished because nothing about
+    /// reconnecting changes it: `axiom.cache_size_mb` is a standing condition,
+    /// not a transient one, so the usual reconnect-and-relist is not recovery,
+    /// it is churn.
+    cache_full: bool,
+}
+
+impl StreamFailure {
+    fn lost(reason: String) -> Self {
+        Self {
+            reason,
+            cache_full: false,
+        }
+    }
+
+    /// Classifies a cache write failure.
+    ///
+    /// Only an exhausted cache is treated as standing. Everything else keeps
+    /// the ordinary reconnect-and-relist, because everything else plausibly
+    /// clears on its own.
+    fn from_cache_write(e: &ShmemError) -> Self {
+        match e {
+            ShmemError::OutOfMemory => Self {
+                reason: "the shared cache is full (axiom.cache_size_mb); this subscription \
+                         cannot take new objects until there is room, and is serving what it \
+                         already holds"
+                    .to_owned(),
+                cache_full: true,
+            },
+            other => Self::lost(format!("cache write failed: {other}")),
+        }
     }
 }
 
@@ -458,13 +524,14 @@ async fn run_stream(
     resume: &mut Option<String>,
     state: &mut SubState,
     backoff: &mut Backoff,
-) -> Result<EventAction, String> {
+    keep_cache: bool,
+) -> Result<EventAction, StreamFailure> {
     // WhileIdle: this channel carries the watch stream, which is idle whenever
     // the cluster is quiet and has no next request to discover a dead
     // connection with. The unary channels cached per backend deliberately do
     // not do this; see transport::Keepalive.
     let channel = build_channel_with(&spec.target, spec.rpc_timeout, Keepalive::WhileIdle)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| StreamFailure::lost(e.to_string()))?;
     // A watch's initial listing arrives as individual events, but one object
     // can still be large, so the subscription client needs the same ceiling.
     let mut client = GatewayServiceClient::new(channel)
@@ -482,8 +549,12 @@ async fn run_stream(
     };
     let mut stream = tokio::time::timeout(spec.rpc_timeout, client.subscribe(req))
         .await
-        .map_err(|_| format!("no reply within {}s", spec.rpc_timeout.as_secs()))?
-        .map_err(|s| format!("gateway returned {:?}: {}", s.code(), s.message()))?
+        .map_err(|_| {
+            StreamFailure::lost(format!("no reply within {}s", spec.rpc_timeout.as_secs()))
+        })?
+        .map_err(|s| {
+            StreamFailure::lost(format!("gateway returned {:?}: {}", s.code(), s.message()))
+        })?
         .into_inner();
     let why = if rv.is_empty() {
         "listing"
@@ -491,9 +562,15 @@ async fn run_stream(
         "resuming from bookmark; stale until the first bookmark"
     };
     transition(spec, state, StreamEvent::Opened, resume.is_some(), why)
-        .map_err(|e| e.to_string())?;
-    if rv.is_empty() {
-        shmem::clear(spec.slot, spec.id).map_err(|e| e.to_string())?;
+        .map_err(|e| StreamFailure::lost(e.to_string()))?;
+    // A full listing normally starts from an empty cache, so objects deleted
+    // while disconnected do not linger. Not after a cache-full failure: the
+    // rows being cleared are the stale rows still being served, and the relist
+    // that follows would refill until it fails at the same point. Keeping them
+    // is consistent with what a DEGRADED subscription already promises --
+    // stale data, offered and announced.
+    if rv.is_empty() && !keep_cache {
+        shmem::clear(spec.slot, spec.id).map_err(|e| StreamFailure::lost(e.to_string()))?;
     }
     // A resumed stream is already "synced" for bookmark purposes: its events
     // are live changes, not a partial listing.
@@ -507,11 +584,19 @@ async fn run_stream(
                     *state = SubState::Active;
                 }
                 Ok(EventAction::Relist) => return Ok(EventAction::Relist),
-                Err(ShmemError::SlotGone) => return Err("subscription dropped".to_owned()),
-                Err(e) => return Err(format!("cache write failed: {e}")),
+                Err(ShmemError::SlotGone) => {
+                    return Err(StreamFailure::lost("subscription dropped".to_owned()))
+                }
+                Err(e) => return Err(StreamFailure::from_cache_write(&e)),
             },
             Ok(None) => return Ok(EventAction::Continue),
-            Err(s) => return Err(format!("stream error {:?}: {}", s.code(), s.message())),
+            Err(s) => {
+                return Err(StreamFailure::lost(format!(
+                    "stream error {:?}: {}",
+                    s.code(),
+                    s.message()
+                )))
+            }
         }
     }
 }
@@ -615,4 +700,55 @@ pub extern "C-unwind" fn axiom_bgworker_main(_arg: pg_sys::Datum) {
         }
     });
     log!("{WORKER_NAME}: exiting on SIGTERM");
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+
+    /// An exhausted cache is a standing condition, not a lost stream.
+    ///
+    /// The distinction drives two behaviours that matter more than the label:
+    /// the retry waits at the longest interval instead of climbing from a
+    /// second, and the next attempt does not clear the cache before relisting.
+    /// Clearing would discard the rows still being served as stale, then refill
+    /// until it hit the same wall, so the answer to a query changed every
+    /// cycle and the subscription never settled.
+    #[test]
+    fn a_full_cache_is_distinguished_from_a_lost_stream() {
+        let full = StreamFailure::from_cache_write(&ShmemError::OutOfMemory);
+        assert!(
+            full.cache_full,
+            "an exhausted cache must not be treated as transient"
+        );
+        assert!(
+            full.reason.contains("axiom.cache_size_mb"),
+            "the reason must name the setting to raise: {}",
+            full.reason
+        );
+        assert!(
+            full.reason.contains("serving what it already holds"),
+            "the reason should say the cached rows are still being served: {}",
+            full.reason
+        );
+
+        // Everything else keeps the ordinary reconnect-and-relist, because
+        // everything else plausibly clears on its own.
+        for e in [
+            ShmemError::CacheNotReady,
+            ShmemError::NotAvailable,
+            ShmemError::TooLarge("object"),
+        ] {
+            let f = StreamFailure::from_cache_write(&e);
+            assert!(
+                !f.cache_full,
+                "{e} should stay a retryable stream failure, not a standing one"
+            );
+            assert!(
+                f.reason.contains("cache write failed"),
+                "unexpected reason for {e}: {}",
+                f.reason
+            );
+        }
+    }
 }
