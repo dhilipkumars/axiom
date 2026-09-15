@@ -112,8 +112,13 @@ comment, an FDW option or a column rule therefore requires regenerating; a
 refactor that changes none of them does not.
 
 A user-visible change also wants a note under `.changes/`; see
-`.changes/README.md` for what counts and what does not. That one is enforced in
-review rather than by CI, on purpose.
+`.changes/README.md` for what counts and what does not. Whether a change needed
+one is enforced in review rather than by CI, on purpose; whether a changeset
+that exists is well-formed is enforced by `make release-check`.
+
+Releases assemble those notes into [CHANGELOG.md](CHANGELOG.md). The version
+lives in `extension/Cargo.toml` and everything else derives from it —
+[docs/RELEASING.md](docs/RELEASING.md) is the procedure.
 
 ## 1. Prerequisites
 

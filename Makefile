@@ -9,7 +9,8 @@ PG ?= pg16
 COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 
 .PHONY: all proto proto-check gateway-build gateway-test gateway-lint gateway-vuln \
-        ext-build ext-test ext-lint ext-fmt ext-audit unit lint docs-generate docs-check up down e2e-ping e2e-phase0 e2e-pods e2e-phase1 e2e-configmaps e2e-phase2 e2e-watch e2e-phase3 e2e-crd e2e-phase4 e2e-cluster e2e-phase5 e2e
+        ext-build ext-test ext-lint ext-fmt ext-audit unit lint docs-generate docs-check \
+        version changelog release-check release-notes up down e2e-ping e2e-phase0 e2e-pods e2e-phase1 e2e-configmaps e2e-phase2 e2e-watch e2e-phase3 e2e-crd e2e-phase4 e2e-cluster e2e-phase5 e2e
 
 all: lint unit
 
@@ -76,9 +77,33 @@ docs-check: docs-generate
 	git add --intent-to-add docs/generated
 	git diff --exit-code -- docs/generated
 
+## Release
+# extension/Cargo.toml declares the version; everything else derives from it.
+version:
+	@./scripts/version
+
+# What the next release's changelog section will say, without consuming the
+# changesets. `release-check` is the CI gate: a malformed changeset is
+# mechanically detectable, unlike whether a change deserved one at all
+# (.changes/README.md explains why the latter is not enforced).
+changelog:
+	@./scripts/changelog preview
+
+release-check:
+	./scripts/changelog check
+	./scripts/version check
+
+# Cutting a release. VERSION is without a leading "v"; the tag carries one.
+#   make release-notes VERSION=0.1.0
+# Commit the result, tag v$(VERSION), and publish a GitHub release from the tag
+# -- publishing is what triggers the image workflows, not the tag itself.
+release-notes:
+	@test -n "$(VERSION)" || { echo "usage: make release-notes VERSION=0.1.0" >&2; exit 2; }
+	./scripts/changelog release $(VERSION)
+
 ## Aggregates
 unit: gateway-test ext-test
-lint: gateway-lint ext-lint
+lint: gateway-lint ext-lint release-check
 
 ## Local stack / E2E
 up:

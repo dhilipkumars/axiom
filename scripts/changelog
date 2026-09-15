@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# Assembles the changesets in .changes/ into CHANGELOG.md.
+#
+#   scripts/changelog check            # validate every changeset, change nothing
+#   scripts/changelog preview          # render the pending section to stdout
+#   scripts/changelog release 0.1.0    # prepend the section, remove the changesets
+#
+# The version is not asked for by `check` or `preview`, and `release` takes it
+# without a leading "v": the tag is `v0.1.0`, the heading is `## 0.1.0`.
+#
+# README.md lives in .changes/ too, and its example block contains a literal
+# `kind:` line, so globbing the directory and trusting what comes back would
+# invent an entry on every release. It is excluded by name.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CHANGES="$ROOT/.changes"
+CHANGELOG="$ROOT/CHANGELOG.md"
+
+# Keep a Changelog's order, narrowed to the kinds .changes/README.md documents.
+# A kind outside this list is a typo, and a typo that silently dropped an entry
+# from the changelog would be discovered by its absence, which is too late.
+KINDS=(added changed fixed removed security)
+
+die() { printf 'changelog: %s\n' "$*" >&2; exit 1; }
+
+# Every changeset except the README. Empty output is not an error: a release
+# with no user-visible changes is unusual but legitimate.
+changesets() {
+  find "$CHANGES" -maxdepth 1 -name '*.md' ! -name 'README.md' -print | sort
+}
+
+# The `kind:` of one changeset, validated.
+kind_of() {
+  local f="$1" kind k
+  [[ "$(head -n 1 "$f")" == '---' ]] \
+    || die "$(basename "$f"): must start with a '---' frontmatter fence"
+  # awk, not sed: BSD sed rejects the nested-range form this needs, and this
+  # script has to run on a maintainer's macOS as well as on CI's Linux.
+  kind="$(awk 'NR==1{next} /^---$/{exit} /^kind:/{sub(/^kind:[[:space:]]*/,""); print; exit}' "$f" | tr -d '[:space:]')"
+  [[ -n "$kind" ]] || die "$(basename "$f"): no 'kind:' in the frontmatter"
+  for k in "${KINDS[@]}"; do
+    [[ "$kind" == "$k" ]] && { printf '%s' "$kind"; return; }
+  done
+  die "$(basename "$f"): kind '$kind' is not one of: ${KINDS[*]}"
+}
+
+# Everything after the closing frontmatter fence, with the blank lines that
+# surround it trimmed: the spacing between entries belongs to the renderer, not
+# to however the author happened to lay the file out.
+body_of() {
+  awk '
+    NR==1 && $0=="---" {next}
+    !seen && $0=="---" {seen=1; next}
+    !seen {next}
+    !started && $0 ~ /^[[:space:]]*$/ {next}
+    {started=1; buf[++n]=$0}
+    END {
+      while (n > 0 && buf[n] ~ /^[[:space:]]*$/) n--
+      for (i = 1; i <= n; i++) print buf[i]
+    }
+  ' "$1"
+}
+
+render() {
+  local kind f any=0
+  for kind in "${KINDS[@]}"; do
+    local matched=0
+    while IFS= read -r f; do
+      [[ -n "$f" ]] || continue
+      [[ "$(kind_of "$f")" == "$kind" ]] || continue
+      if (( matched == 0 )); then
+        # Not "${kind^}": that is bash 4, and macOS ships bash 3.2.
+        printf '### %s\n\n' \
+          "$(printf '%s' "${kind:0:1}" | tr '[:lower:]' '[:upper:]')${kind:1}"
+        matched=1 any=1
+      fi
+      body_of "$f" | sed -e 's/[[:space:]]*$//'
+      printf '\n'
+    done < <(changesets)
+  done
+  (( any == 1 )) || printf '_No user-visible changes._\n\n'
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  check)
+    n=0
+    while IFS= read -r f; do
+      [[ -n "$f" ]] || continue
+      kind_of "$f" >/dev/null
+      [[ -n "$(body_of "$f" | tr -d '[:space:]')" ]] \
+        || die "$(basename "$f"): frontmatter but no entry; an empty changeset is noise"
+      n=$((n + 1))
+    done < <(changesets)
+    printf '%d changeset(s) valid\n' "$n"
+    ;;
+  preview)
+    render
+    ;;
+  release)
+    version="${2:-}"
+    [[ -n "$version" ]] || die "usage: scripts/changelog release <version>"
+    [[ "$version" != v* ]] || die "pass the version without a leading 'v' (got '$version')"
+    "$0" check >/dev/null
+    grep -q "^## $version\b" "$CHANGELOG" 2>/dev/null \
+      && die "CHANGELOG.md already has a section for $version"
+
+    tmp="$(mktemp)"
+    trap 'rm -f "$tmp"' EXIT
+    # Prepend under the file's preamble, which ends at the first blank line
+    # after the last preamble paragraph -- simplest to key on the marker.
+    marker='<!-- releases below -->'
+    grep -q "$marker" "$CHANGELOG" || die "CHANGELOG.md is missing the '$marker' marker"
+    while IFS= read -r line; do
+      printf '%s\n' "$line"
+      if [[ "$line" == "$marker" ]]; then
+        printf '\n## %s\n\n' "$version"
+        render
+      fi
+    done < "$CHANGELOG" > "$tmp"
+    mv "$tmp" "$CHANGELOG"
+    trap - EXIT
+
+    while IFS= read -r f; do
+      [[ -n "$f" ]] || continue
+      rm -- "$f"
+    done < <(changesets)
+    printf 'CHANGELOG.md now has %s; .changes/ emptied.\n' "$version"
+    ;;
+  *)
+    die "usage: scripts/changelog {check|preview|release <version>}"
+    ;;
+esac
