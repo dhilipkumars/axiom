@@ -128,7 +128,7 @@ both also fixed at startup:
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `axiom.cache_size_mb` | `256` | Upper bound of the shared-memory cache. On reaching it, affected subscriptions go `DEGRADED` rather than evicting. |
+| `axiom.cache_size_mb` | `256` | Upper bound of the shared-memory cache. On reaching it, affected subscriptions stop taking objects rather than evicting — `DEGRADED` if they had synced, `REQUESTED` if they had not. What a scan does then is below. |
 | `axiom.notify_database` | `postgres` | Database the worker opens for `NOTIFY axiom_events`. `LISTEN` there, which is not necessarily the database you query from. |
 
 By default (`cache_mode 'on_demand'`) every scan is an RPC. A table declared
@@ -175,12 +175,16 @@ which rows it is missing, so scans of that table fall back to the gateway
 instead. Queries keep working either way.
 
 Retrying is deliberately slow — a minute between attempts rather than climbing
-from a second — because nothing about reconnecting frees space, and a full
-listing per attempt costs the gateway and the API server real work for no
-possible progress. It does keep trying: expired tombstones are reclaimed on a
-sweep, another subscription may be dropped, and raising the setting and
-restarting also frees it, so the subscription recovers on its own once there is
-room. Raise `axiom.cache_size_mb` if it does not.
+from a second — because nothing about reconnecting frees space. A subscription
+that had synced resumes from its bookmark and replays, which is cheap but
+equally futile; one that had not repeats a full listing of the collection every
+time, which is not cheap at all.
+
+It does keep trying, and a sweep reclaiming expired tombstones is the one way
+room appears without intervention. If that does not free enough, raise
+`axiom.cache_size_mb` and restart the server — a subscription slot is never
+released once taken, so waiting for another table to give its cache back is not
+something to count on.
 
 Recovery resumes from the last bookmark rather than relisting, so a gateway
 restart does not re-fetch every object. The trade is simple: caching means

@@ -41,7 +41,7 @@ use std::ffi::{c_char, c_int, c_void, CStr};
 use pgrx::prelude::*;
 use pgrx::{pg_sys, JsonB, PgList, PgMemoryContexts};
 
-use crate::cache::{decide_tier, CacheMode, Tier};
+use crate::cache::{decide_tier, CacheMode, Tier, CACHE_FULL_REASON};
 use crate::client::{self, ClientError, ErrorClass};
 use crate::import::{self, ImportColumn, ImportKind, ImportOptions};
 use crate::options::{self, Catalog, OptionsError, ServerOptions, TableOptions};
@@ -807,6 +807,27 @@ unsafe extern "C-unwind" fn begin_foreign_scan(node: *mut pg_sys::ForeignScanSta
 }
 
 /// Tries to serve a `cache_mode 'watch'` scan from the shared-memory cache.
+/// This scan's subscription's last recorded reason, or empty if there is no
+/// matching row.
+///
+/// `SubStatus::resource` is the kubectl spelling (`widgets.example.com` for a
+/// CRD, `pods` for a core kind), which is what `Resource`'s Display produces;
+/// matching on the bare plural would never find a CRD's row and the warning
+/// that quotes this would lose its reason.
+fn sub_reason(state: &ScanState, ns: &str) -> String {
+    let want = state.config.resource.to_string();
+    shmem::status()
+        .ok()
+        .and_then(|rows| {
+            rows.into_iter().find(|r| {
+                r.endpoint == state.config.server.target.endpoint
+                    && r.resource == want
+                    && r.namespace == ns
+            })
+        })
+        .map_or_else(String::new, |r| r.reason)
+}
+
 /// Returns `None` to fall through to an RPC: no subscription yet (one is
 /// requested), still syncing, or the cache infrastructure is unavailable
 /// (with a WARNING so the fallback is never silent).
@@ -832,27 +853,26 @@ fn fetch_from_cache(state: &ScanState) -> Option<VecDeque<Row>> {
     };
     let tier = decide_tier(CacheMode::Watch, Some(sub_state));
     if tier == Tier::OnDemand {
+        // A watch table that is not servable yet is usually just building its
+        // cache, which is not worth a warning on every scan of a healthy
+        // system. A cache that filled *before* it finished building is
+        // different: it will not finish on its own, and this is the only path
+        // by which the person running the query would ever learn that caching
+        // stopped. The logs say so and `axiom_watch_status()` says so, but
+        // neither is in front of them (issue #17).
+        if sub_reason(state, ns) == CACHE_FULL_REASON {
+            warning!(
+                "axiom: not caching {} ({CACHE_FULL_REASON}); serving this scan from the gateway; see axiom_watch_status()",
+                state.config.resource
+            );
+        }
         return None;
     }
     match shmem::scan(slot, id, ns, name) {
         Ok(objects) => {
             if tier == Tier::Stale {
                 // Never mask staleness (docs/DESIGN.md §5.3): say so on every scan.
-                // `SubStatus::resource` is the kubectl spelling (`widgets.example.com`
-                // for a CRD, `pods` for a core kind), which is what `Resource`'s
-                // Display produces; matching on the bare plural would never find a
-                // CRD's row and the warning would lose its reason.
-                let want = state.config.resource.to_string();
-                let reason = shmem::status()
-                    .ok()
-                    .and_then(|rows| {
-                        rows.into_iter().find(|r| {
-                            r.endpoint == state.config.server.target.endpoint
-                                && r.resource == want
-                                && r.namespace == ns
-                        })
-                    })
-                    .map_or_else(String::new, |r| r.reason);
+                let reason = sub_reason(state, ns);
                 warning!(
                     "axiom: serving STALE data for {} from the watch cache: the watch is DEGRADED ({reason}); see axiom_watch_status()",
                     state.config.resource

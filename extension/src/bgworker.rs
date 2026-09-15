@@ -26,7 +26,7 @@ use pgrx::prelude::*;
 use tonic::transport::Channel;
 
 use crate::backoff::Backoff;
-use crate::cache::{next_state, StreamEvent, SubState};
+use crate::cache::{next_state, StreamEvent, SubState, CACHE_FULL_REASON};
 use crate::config::Settings;
 use crate::ping::PingOutcome;
 use crate::proto::v1::gateway_service_client::GatewayServiceClient;
@@ -106,7 +106,7 @@ pub fn define_gucs() {
     GucRegistry::define_int_guc(
         c"axiom.cache_size_mb",
         c"Upper bound of the shared-memory watch cache, in MiB",
-        c"When reached, affected subscriptions become DEGRADED rather than evicting.",
+        c"When reached, affected subscriptions stop taking objects rather than evicting: DEGRADED if already synced, REQUESTED if still building.",
         &CACHE_SIZE_MB,
         16,
         1_048_576,
@@ -446,16 +446,23 @@ async fn stream_task(spec: Rc<SubSpec>) {
         if was_cache_full {
             // The longest interval straight away, rather than climbing to it
             // from a second. Nothing here is transient: until something frees
-            // space, every attempt reopens a stream and walks into the same
-            // wall, and doing that every second costs the gateway and the API
-            // server a full listing each time for no possible progress.
+            // space, every attempt walks into the same wall.
             //
-            // It does keep trying, though. `sweep` reclaims expired
-            // tombstones, another subscription may be dropped, and the cache
-            // GUC can be raised and the server restarted -- so recovery
-            // happens on its own, without needing anyone to restart the
-            // worker. Meanwhile a cache that had synced keeps being served
-            // stale, and one that had not is not served at all.
+            // What that costs depends on which path it is. A subscription
+            // that had synced still holds its bookmark, so it resumes and
+            // replays -- cheap, but still futile. One that filled mid-listing
+            // has no bookmark, so every attempt is a fresh paged listing of
+            // the whole collection, which is why a one-second retry is worth
+            // avoiding.
+            //
+            // It does keep trying, and `sweep` reclaiming expired tombstones
+            // is the one way room appears without intervention. Dropping a
+            // subscription is not: `in_use` is only ever set, never cleared,
+            // so a slot is never released (see #30). Otherwise the cache GUC
+            // has to be raised and the server restarted.
+            //
+            // Meanwhile a cache that had synced keeps being served stale, and
+            // one that had not is not served at all.
             tokio::time::sleep(BACKOFF_MAX).await;
         } else {
             tokio::time::sleep(backoff.on_failure()).await;
@@ -490,9 +497,7 @@ impl StreamFailure {
     fn from_cache_write(e: &ShmemError) -> Self {
         match e {
             ShmemError::OutOfMemory => Self {
-                reason: "the shared cache is full (axiom.cache_size_mb); this subscription \
-                         cannot take new objects until there is room"
-                    .to_owned(),
+                reason: CACHE_FULL_REASON.to_owned(),
                 cache_full: true,
             },
             other => Self::lost(format!("cache write failed: {other}")),
@@ -718,6 +723,16 @@ mod failure_tests {
         // Deliberately not claiming what happens to scans. A cache that
         // filled after syncing keeps being served stale; one that filled
         // mid-listing is not served at all. One reason reaches both.
+        // Not merely "contains": `fetch_from_cache` compares the stored
+        // reason against this constant to decide whether to warn that a scan
+        // fell back to the gateway. If the worker ever writes a reason that
+        // differs by a character, that warning silently stops happening, and
+        // the bookmark-less path is exactly the one where nothing else tells
+        // the person running the query (issue #17).
+        assert_eq!(
+            full.reason, CACHE_FULL_REASON,
+            "the stored reason must be the constant a scan matches on"
+        );
         assert!(
             full.reason.contains("cannot take new objects"),
             "the reason should say what the subscription has stopped doing: {}",
