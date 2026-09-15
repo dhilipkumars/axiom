@@ -109,7 +109,11 @@ mod tests {
 
     use crate::cache::TOMBSTONE_GRACE_US;
     use crate::resource::Resource;
-    use crate::shmem::{clear, lookup_or_request, scan, sweep, tombstone, upsert, ShmemError};
+    use crate::cache::{SubState, CACHE_FULL_REASON};
+    use crate::shmem::{
+        clear, lookup_or_request, reason, scan, set_state, status, sweep, tombstone, upsert,
+        ShmemError,
+    };
     use crate::transport::Target;
     use std::collections::{HashMap, HashSet};
     use std::time::Duration;
@@ -135,6 +139,52 @@ mod tests {
         fn below(&mut self, n: usize) -> usize {
             usize::try_from(self.next() % n as u64).unwrap_or(0)
         }
+    }
+
+    /// A cache-full reason must be reachable from a namespaced scan of a
+    /// cluster-wide subscription.
+    ///
+    /// This is the case that made reading the reason by `(slot, id)` necessary.
+    /// A cluster-wide subscription (empty namespace) serves every namespace, so
+    /// `SELECT ... WHERE namespace = 'payments'` resolves to its slot -- but no
+    /// `SubStatus` row carries "payments", so rebuilding the subscription's
+    /// identity from the scan's namespace finds nothing, and the warning that
+    /// tells the person running the query why caching stopped never fires.
+    ///
+    /// Its own endpoint, because the harness runs tests in parallel against one
+    /// Postgres and a cluster-wide slot would otherwise be shared.
+    #[pg_test]
+    fn a_cluster_wide_reason_is_reachable_from_a_namespaced_scan() {
+        let target = Target::parse(Some("https://reason-test:8443"), None).expect("target");
+        let resource = Resource::new("", "v1", "Pod", "pods", true).expect("resource");
+        let ttl = Duration::from_secs(5);
+
+        let (slot, id, _) = lookup_or_request(&target, ttl, &resource, "").expect("a free slot");
+        set_state(slot, id, SubState::Requested, CACHE_FULL_REASON).expect("set_state");
+
+        let (scan_slot, scan_id, _) =
+            lookup_or_request(&target, ttl, &resource, "payments").expect("the cluster-wide slot");
+        assert_eq!(
+            (scan_slot, scan_id),
+            (slot, id),
+            "a cluster-wide subscription serves any namespace"
+        );
+
+        assert_eq!(
+            reason(scan_slot, scan_id).expect("reason"),
+            CACHE_FULL_REASON,
+            "the reason must be reachable from what the lookup returned"
+        );
+
+        // The reconstruction this replaced would have looked for a row whose
+        // namespace is the scan's, and there is none.
+        let rows = status().expect("status");
+        assert!(
+            !rows
+                .iter()
+                .any(|r| r.endpoint == target.endpoint && r.namespace == "payments"),
+            "a cluster-wide subscription has no per-namespace status row"
+        );
     }
 
     /// Registers a subscription to operate on, returning its (slot, id).

@@ -403,6 +403,27 @@ pub fn status() -> Result<Vec<SubStatus>, ShmemError> {
         .collect())
 }
 
+/// A slot's last recorded reason, by the `(slot, id)` a lookup returned.
+///
+/// Addressed by slot rather than by rebuilding the subscription's identity
+/// from a `SubStatus` row. Identity is `(endpoint, CA, resource)` and a
+/// cluster-wide subscription serves every namespace, so a reconstruction that
+/// matches on the scan's namespace misses the cluster-wide slot that
+/// `lookup_or_request` actually chose, and one that ignores the CA can read a
+/// different server's row.
+///
+/// `SlotGone` if the slot has been recycled under the caller.
+pub fn reason(slot: usize, id: u32) -> Result<String, ShmemError> {
+    ensure_available()?;
+    let ctl = CONTROL.share();
+    let s = ctl
+        .subs
+        .get(slot)
+        .filter(|s| s.in_use && s.id == id)
+        .ok_or(ShmemError::SlotGone)?;
+    Ok(get(&s.reason, s.reason_len as usize))
+}
+
 /// Sets a slot's state and reason if the slot still has generation `id`.
 pub fn set_state(slot: usize, id: u32, state: SubState, reason: &str) -> Result<(), ShmemError> {
     ensure_available()?;

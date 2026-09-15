@@ -11,7 +11,10 @@
 //! Lifecycle: one static worker registered from `_PG_init` under
 //! `shared_preload_libraries`. It runs until SIGTERM. Nothing here panics on a
 //! failed RPC, a lost stream, or a full cache: failures are recorded in the
-//! subscription's state (`DEGRADED` + reason) and retried with backoff.
+//! subscription's state and reason and retried with backoff. Which state
+//! depends on whether the cache is still servable -- `DEGRADED` if the
+//! subscription had synced and holds a complete snapshot, `REQUESTED` if it
+//! failed while still building one.
 
 use std::collections::HashMap;
 use std::ffi::CString;

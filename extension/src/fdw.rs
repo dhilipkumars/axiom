@@ -807,27 +807,6 @@ unsafe extern "C-unwind" fn begin_foreign_scan(node: *mut pg_sys::ForeignScanSta
 }
 
 /// Tries to serve a `cache_mode 'watch'` scan from the shared-memory cache.
-/// This scan's subscription's last recorded reason, or empty if there is no
-/// matching row.
-///
-/// `SubStatus::resource` is the kubectl spelling (`widgets.example.com` for a
-/// CRD, `pods` for a core kind), which is what `Resource`'s Display produces;
-/// matching on the bare plural would never find a CRD's row and the warning
-/// that quotes this would lose its reason.
-fn sub_reason(state: &ScanState, ns: &str) -> String {
-    let want = state.config.resource.to_string();
-    shmem::status()
-        .ok()
-        .and_then(|rows| {
-            rows.into_iter().find(|r| {
-                r.endpoint == state.config.server.target.endpoint
-                    && r.resource == want
-                    && r.namespace == ns
-            })
-        })
-        .map_or_else(String::new, |r| r.reason)
-}
-
 /// Returns `None` to fall through to an RPC: no subscription yet (one is
 /// requested), still syncing, or the cache infrastructure is unavailable
 /// (with a WARNING so the fallback is never silent).
@@ -860,7 +839,7 @@ fn fetch_from_cache(state: &ScanState) -> Option<VecDeque<Row>> {
         // by which the person running the query would ever learn that caching
         // stopped. The logs say so and `axiom_watch_status()` says so, but
         // neither is in front of them (issue #17).
-        if sub_reason(state, ns) == CACHE_FULL_REASON {
+        if shmem::reason(slot, id).unwrap_or_default() == CACHE_FULL_REASON {
             warning!(
                 "axiom: not caching {} ({CACHE_FULL_REASON}); serving this scan from the gateway; see axiom_watch_status()",
                 state.config.resource
@@ -872,7 +851,7 @@ fn fetch_from_cache(state: &ScanState) -> Option<VecDeque<Row>> {
         Ok(objects) => {
             if tier == Tier::Stale {
                 // Never mask staleness (docs/DESIGN.md §5.3): say so on every scan.
-                let reason = sub_reason(state, ns);
+                let reason = shmem::reason(slot, id).unwrap_or_default();
                 warning!(
                     "axiom: serving STALE data for {} from the watch cache: the watch is DEGRADED ({reason}); see axiom_watch_status()",
                     state.config.resource

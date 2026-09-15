@@ -163,8 +163,11 @@ resume point, so a stream dropped mid-listing relists rather than resuming from 
 partial cache.
 `NOTIFY axiom_events` carries a JSON payload `{server, resource, namespace, name,
 type}`; the worker connects to `axiom.notify_database` to send it. Cache memory is
-bounded by `axiom.cache_size_mb`; when exhausted the affected subscription becomes
-`DEGRADED` instead of evicting (eviction policy remains an open item, DESIGN.md §8).
+bounded by `axiom.cache_size_mb`; when exhausted the affected subscription stops
+taking objects instead of evicting (eviction policy remains an open item,
+DESIGN.md §8) -- `DEGRADED` and served stale if it had already synced,
+`REQUESTED` and not served at all if it filled while still building, since a
+partial listing cannot know which rows it is missing.
 The in-process stub gateway test drives the full lifecycle without a cluster:
 warm → ACTIVE → live events → DEGRADED (stale serve) → resume with replay, no relist.
 The E2E lives in `e2e/watch_test.sh` (`make e2e-watch`, alias `make e2e-phase3`).
