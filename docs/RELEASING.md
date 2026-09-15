@@ -55,6 +55,20 @@ If the assembled notes read badly, fix the changesets and run it again; the
 command refuses to write a section that already exists, so revert the file
 first.
 
+## Development images are not releases
+
+`ghcr.io/dhilipkumars/axiom-gateway:development` and
+`ghcr.io/dhilipkumars/axiom-postgres:development-pgNN` are built **nightly from
+main**, and only when main has moved since the last run. A merge publishes
+nothing on its own.
+
+So a development tag means "main, as of last night", not "main, right now". If
+you need the current head, run the *postgres image* or *gateway image* workflow
+by hand — both accept `workflow_dispatch` — or build locally.
+
+Nothing about a development image is a release: no version tag is written, and
+`latest` is untouched. Only publishing a GitHub release moves those.
+
 ## What a release does not do yet
 
 Publish downloadable extension artifacts. Today a release publishes container

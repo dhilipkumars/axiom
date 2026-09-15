@@ -1,13 +1,15 @@
 name: gateway image
 
 on:
-  # Nightly, not per-merge -- same reasoning as the postgres image: the moving
-  # `development` tag only ever promises "roughly current", and rebuilding it
-  # several times a day bought nothing. Off the hour because GitHub's scheduler
-  # is busiest at :00.
+  # Nightly, not per-merge -- same reasoning as the postgres image: a push to
+  # main publishes nothing, and `development` means "main, as of last night"
+  # rather than "main, right now". Off the hour because GitHub's scheduler is
+  # busiest at :00.
   schedule:
     - cron: "17 3 * * *"
-  # On demand, for when a development image is wanted before tonight.
+  # On demand, for when a development image is wanted before tonight. As with
+  # the postgres image, a dispatch publishes `development` from whichever ref
+  # it was started from; see that workflow for why that is deliberate.
   workflow_dispatch:
   release:
     types: [published]

@@ -15,6 +15,10 @@ has to be preloaded, and without it `CREATE EXTENSION` fails outright rather
 than running with the cache disabled. Passing your own
 `-c shared_preload_libraries=...` still overrides the setting.
 
+A `development-pgNN` tag is also published, built nightly from main rather
+than on every merge, so it means "main, as of last night". Only a published
+release writes a version tag or moves `latest`.
+
 They are amd64 only for now, and they are for evaluating Axiom: installing it
 into a Postgres you already run needs downloadable artifacts, which a later
 release adds.

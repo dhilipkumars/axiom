@@ -1,19 +1,32 @@
 name: postgres image
 
 on:
-  # Nightly, not per-merge. At the current rate (~3 merges a day, three majors
-  # each) publishing on every push rebuilt and overwrote `development-pgNN`
-  # about ten times a day, for a moving tag whose whole promise is only ever
-  # "roughly current". The E2E suite builds these images on every run, so the
-  # build stays continuously exercised either way; what changes is how often
-  # the result is pushed.
+  # Development images are built nightly, not on every merge. A push to main
+  # publishes nothing: at ~3 merges a day across three majors that was ten
+  # builds a day to overwrite a tag whose whole promise is "roughly current".
+  # The images stay continuously exercised regardless, because the E2E suite
+  # builds them on every run.
   #
-  # Off the hour on purpose: GitHub's scheduler is busiest at :00 and delays
-  # runs that pile up there.
+  # `development-pgNN` therefore means "main, as of last night" -- not "main,
+  # right now". Anything that needs the current head should dispatch a run or
+  # build locally.
+  #
+  # Off the hour: GitHub's scheduler is busiest at :00 and delays what piles up
+  # there.
   schedule:
     - cron: "17 3 * * *"
   # On demand, for when a development image is wanted before tonight --
   # testing the install guide against a real registry, say.
+  #
+  # A dispatch builds whichever ref it was started from and still publishes
+  # the shared `development-pgNN` tags, so dispatching from a branch replaces
+  # them with unmerged source until the next nightly run restores them. That is
+  # deliberate: building an image from a branch is the reason this trigger
+  # exists, and testing a guide against a real registry before merging it needs
+  # exactly that. It is a maintainer-only action, so the cost of getting it
+  # wrong is a stale shared tag for a day, not a supply-chain problem. If these
+  # images ever become something people depend on, publish branch builds under
+  # their own tag rather than restricting the trigger.
   workflow_dispatch:
   release:
     types: [published]
