@@ -1,0 +1,89 @@
+name: postgres image
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/dhilipkumars/axiom-postgres
+
+jobs:
+  publish:
+    name: pg${{ matrix.pg }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The supported window, matching extension/Cargo.toml's features and
+        # docs/PLAN.md. A major added there has to be added here too; there is
+        # no way to derive one from the other that is simpler than saying it.
+        pg: ["16", "17", "18"]
+    steps:
+      - uses: actions/checkout@v4
+
+      # A release must carry the version it says it does. The tag is checked
+      # against extension/Cargo.toml before anything is pushed, so a mistyped
+      # tag fails here rather than becoming a published image nobody can undo.
+      - if: github.event_name == 'release'
+        run: ./scripts/version check "${{ github.event.release.tag_name }}"
+
+      - id: image
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "release" ]]; then
+            version="${{ github.event.release.tag_name }}"
+            echo "version=${version#v}" >> "$GITHUB_OUTPUT"
+            echo "is_release=true" >> "$GITHUB_OUTPUT"
+            # A prerelease publishes its own version tag but must not move
+            # the floating ones, which are what someone pulling without a
+            # version is trusting to be the current stable release.
+            echo "publish_latest=${{ github.event.release.prerelease && 'false' || 'true' }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=development" >> "$GITHUB_OUTPUT"
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+            echo "publish_latest=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          # Every tag carries its major, because three of these are published
+          # and an untagged-by-major image would be ambiguous about the one
+          # thing a reader most needs to know.
+          #
+          # ":latest" means the newest supported major. Someone who pulls it
+          # without choosing gets what a new install of Postgres would give
+          # them, which is the least surprising default; anyone who cares picks
+          # a major explicitly.
+          tags: |
+            type=raw,value=development-pg${{ matrix.pg }},enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ steps.image.outputs.version }}-pg${{ matrix.pg }},enable=${{ steps.image.outputs.is_release == 'true' }}
+            type=raw,value=latest-pg${{ matrix.pg }},enable=${{ steps.image.outputs.publish_latest == 'true' }}
+            type=raw,value=latest,enable=${{ steps.image.outputs.publish_latest == 'true' && matrix.pg == '18' }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: extension/Dockerfile
+          build-args: PG_MAJOR=${{ matrix.pg }}
+          # amd64 only. pgrx compiles against the target's Postgres headers and
+          # links its libraries, so there is no cross-compile equivalent of the
+          # gateway's CGO_ENABLED=0 build, and emulating arm64 for a Rust and
+          # pgrx build, three times over, is not worth it yet (see #36).
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

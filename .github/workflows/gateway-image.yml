@@ -20,12 +20,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # A release must carry the version it says it does. Checked before
+      # anything is pushed, so a mistyped tag fails here rather than becoming a
+      # published image nobody can unpublish.
+      - if: github.event_name == 'release'
+        run: ./scripts/version check "${{ github.event.release.tag_name }}"
+
       - id: image
         run: |
           if [[ "$GITHUB_EVENT_NAME" == "release" ]]; then
             echo "release_tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
             echo "build_version=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
-            echo "publish_latest=true" >> "$GITHUB_OUTPUT"
+            # A prerelease publishes its own tag but must not move :latest,
+            # which is the one thing someone pulling without a version is
+            # trusting to be the current stable release.
+            echo "publish_latest=${{ github.event.release.prerelease && 'false' || 'true' }}" >> "$GITHUB_OUTPUT"
           else
             echo "build_version=development" >> "$GITHUB_OUTPUT"
             echo "publish_latest=false" >> "$GITHUB_OUTPUT"

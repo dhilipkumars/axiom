@@ -32,3 +32,19 @@ FROM postgres:${PG_MAJOR}-bookworm
 ARG PG_MAJOR
 COPY --from=build /out/usr/lib/postgresql/${PG_MAJOR}/lib/axiom.so /usr/lib/postgresql/${PG_MAJOR}/lib/
 COPY --from=build /out/usr/share/postgresql/${PG_MAJOR}/extension/axiom* /usr/share/postgresql/${PG_MAJOR}/extension/
+
+# Axiom needs a background worker and shared memory, so the library has to be
+# preloaded or the extension installs and then does nothing -- the single most
+# common "installed it, nothing works" failure for an extension of this shape.
+#
+# The sample is what initdb templates postgresql.conf from, so putting it here
+# means a plain `docker run` of this image works without the person running it
+# having to know any of the above. It does not take away the choice: a
+# `-c shared_preload_libraries=...` on the command line still wins, which is
+# how the compose stack and the E2E gates set their own value.
+#
+# The majored path is a symlink to /usr/share/postgresql/postgresql.conf.sample
+# in the current base image. Appending through it writes to the real file
+# either way, which keeps this correct if that stops being a symlink.
+RUN printf "\n# Axiom's background worker and shared cache require preloading.\nshared_preload_libraries = 'axiom'\n" \
+      >> /usr/share/postgresql/${PG_MAJOR}/postgresql.conf.sample
