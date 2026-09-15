@@ -24,14 +24,22 @@ jobs:
       # A release must carry the version it says it does. Checked before
       # anything is pushed, so a mistyped tag fails here rather than becoming a
       # published image nobody can unpublish.
+      # Through env, not interpolated into the script: a `${{ }}` expression is
+      # substituted into the shell source before it runs, so a tag containing
+      # shell metacharacters would be evaluated rather than compared. Git
+      # permits most of them in a ref name.
       - if: github.event_name == 'release'
-        run: ./scripts/version check "${{ github.event.release.tag_name }}"
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: ./scripts/version check "$RELEASE_TAG"
 
       - id: image
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           if [[ "$GITHUB_EVENT_NAME" == "release" ]]; then
-            echo "release_tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
-            echo "build_version=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+            echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+            echo "build_version=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
             # A prerelease publishes its own tag but must not move :latest,
             # which is the one thing someone pulling without a version is
             # trusting to be the current stable release.

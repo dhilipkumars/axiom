@@ -10,8 +10,10 @@ the extension.
 
 The images set `shared_preload_libraries = 'axiom'` themselves, so a plain
 `docker run` gives a Postgres where `CREATE EXTENSION axiom` works and the
-background worker is already running. Passing your own
-`-c shared_preload_libraries=...` still overrides it.
+background worker is already running. That is not only a convenience: Axiom
+has to be preloaded, and without it `CREATE EXTENSION` fails outright rather
+than running with the cache disabled. Passing your own
+`-c shared_preload_libraries=...` still overrides the setting.
 
 They are amd64 only for now, and they are for evaluating Axiom: installing it
 into a Postgres you already run needs downloadable artifacts, which a later

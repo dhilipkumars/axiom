@@ -33,9 +33,12 @@ ARG PG_MAJOR
 COPY --from=build /out/usr/lib/postgresql/${PG_MAJOR}/lib/axiom.so /usr/lib/postgresql/${PG_MAJOR}/lib/
 COPY --from=build /out/usr/share/postgresql/${PG_MAJOR}/extension/axiom* /usr/share/postgresql/${PG_MAJOR}/extension/
 
-# Axiom needs a background worker and shared memory, so the library has to be
-# preloaded or the extension installs and then does nothing -- the single most
-# common "installed it, nothing works" failure for an extension of this shape.
+# Axiom cannot be loaded any other way. `_PG_init` defines two PGC_POSTMASTER
+# GUCs, and Postgres refuses to create those after startup, so loading the
+# library on demand does not degrade -- `CREATE EXTENSION axiom` dies with
+# "FATAL: cannot create PGC_POSTMASTER variables after startup", which names
+# neither Axiom nor the setting that would fix it. Measured, not assumed; #43
+# tracks making that failure explain itself.
 #
 # The sample is what initdb templates postgresql.conf from, so putting it here
 # means a plain `docker run` of this image works without the person running it
