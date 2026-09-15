@@ -1,10 +1,24 @@
 name: gateway image
 
 on:
-  push:
-    branches: [main]
+  # Nightly, not per-merge -- same reasoning as the postgres image: a push to
+  # main publishes nothing, and `development` means "main, as of last night"
+  # rather than "main, right now". Off the hour because GitHub's scheduler is
+  # busiest at :00.
+  schedule:
+    - cron: "17 3 * * *"
+  # On demand, for when a development image is wanted before tonight. As with
+  # the postgres image, a dispatch publishes `development` from whichever ref
+  # it was started from; see that workflow for why that is deliberate.
+  workflow_dispatch:
   release:
     types: [published]
+
+# Same reasoning as the postgres image: cancel a superseded development build
+# so the moving tag means the newer source, never cancel a release.
+concurrency:
+  group: gateway-image-${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'release' }}
 
 permissions:
   contents: read
@@ -16,16 +30,59 @@ env:
   IMAGE_NAME: ghcr.io/dhilipkumars/axiom-gateway
 
 jobs:
+  # See the postgres image workflow: a nightly build of a branch that has not
+  # moved republishes the same source under a new digest.
+  gate:
+    name: did main move
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" != "schedule" ]]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ -n "$(git log -1 --since='25 hours ago' --format=%H)" ]]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "main has not moved in 25h; skipping the nightly publish" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   publish:
+    needs: gate
+    if: needs.gate.outputs.build == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # A release must carry the version it says it does. Checked before
+      # anything is pushed, so a mistyped tag fails here rather than becoming a
+      # published image nobody can unpublish.
+      # Through env, not interpolated into the script: a `${{ }}` expression is
+      # substituted into the shell source before it runs, so a tag containing
+      # shell metacharacters would be evaluated rather than compared. Git
+      # permits most of them in a ref name.
+      - if: github.event_name == 'release'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: ./scripts/version check "$RELEASE_TAG"
+
       - id: image
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           if [[ "$GITHUB_EVENT_NAME" == "release" ]]; then
-            echo "release_tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
-            echo "build_version=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
-            echo "publish_latest=true" >> "$GITHUB_OUTPUT"
+            echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+            echo "build_version=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+            # A prerelease publishes its own tag but must not move :latest,
+            # which is the one thing someone pulling without a version is
+            # trusting to be the current stable release.
+            echo "publish_latest=${{ github.event.release.prerelease && 'false' || 'true' }}" >> "$GITHUB_OUTPUT"
           else
             echo "build_version=development" >> "$GITHUB_OUTPUT"
             echo "publish_latest=false" >> "$GITHUB_OUTPUT"
@@ -44,7 +101,7 @@ jobs:
           tags: |
             # Main branch publishes a moving development tag; published releases
             # additionally publish their own semver tag and move :latest.
-            type=raw,value=development,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=raw,value=development,enable=${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
             type=raw,value=${{ steps.image.outputs.release_tag }},enable=${{ github.event_name == 'release' }}
             type=raw,value=latest,enable=${{ steps.image.outputs.publish_latest == 'true' }}
       - uses: docker/build-push-action@v6

@@ -1,0 +1,198 @@
+name: postgres image
+
+on:
+  # Development images are built nightly, not on every merge. A push to main
+  # publishes nothing: at ~3 merges a day across three majors that was ten
+  # builds a day to overwrite a tag whose whole promise is "roughly current".
+  # The images stay continuously exercised regardless, because the E2E suite
+  # builds them on every run.
+  #
+  # `development-pgNN` therefore means "main, as of last night" -- not "main,
+  # right now". Anything that needs the current head should dispatch a run or
+  # build locally.
+  #
+  # Off the hour: GitHub's scheduler is busiest at :00 and delays what piles up
+  # there.
+  schedule:
+    - cron: "17 3 * * *"
+  # On demand, for when a development image is wanted before tonight --
+  # testing the install guide against a real registry, say.
+  #
+  # A dispatch builds whichever ref it was started from and still publishes
+  # the shared `development-pgNN` tags, so dispatching from a branch replaces
+  # them with unmerged source until the next nightly run restores them. That is
+  # deliberate: building an image from a branch is the reason this trigger
+  # exists, and testing a guide against a real registry before merging it needs
+  # exactly that. It is a maintainer-only action, so the cost of getting it
+  # wrong is a stale shared tag for a day, not a supply-chain problem. If these
+  # images ever become something people depend on, publish branch builds under
+  # their own tag rather than restricting the trigger.
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write
+
+# A nightly run and a dispatched one can overlap, and the tags would then be
+# written in job-completion order, leaving `development-pgNN` pointing at
+# whichever finished last rather than at the newer source. Cancelling the
+# superseded run keeps the moving tag meaning the newer of the two.
+#
+# Releases are keyed by their own tag and never cancelled: a release publish is
+# not repeatable, and two different releases must not cancel each other.
+concurrency:
+  group: postgres-image-${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'release' }}
+
+env:
+  IMAGE_NAME: ghcr.io/dhilipkumars/axiom-postgres
+
+jobs:
+  # A nightly build of a branch that has not moved republishes the same source
+  # under a new digest: registry churn, and a `development` tag that looks
+  # freshly built while meaning nothing new. This skips it.
+  #
+  # `actions/checkout` fetches one commit by default, which is all this needs:
+  # the question is whether the head of main is recent, not what came before.
+  # The window is wider than the interval so a late run cannot skip a day.
+  gate:
+    name: did main move
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" != "schedule" ]]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ -n "$(git log -1 --since='25 hours ago' --format=%H)" ]]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "main has not moved in 25h; skipping the nightly publish" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  build:
+    name: pg${{ matrix.pg }}
+    needs: gate
+    if: needs.gate.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The supported window, matching extension/Cargo.toml's features and
+        # docs/PLAN.md. A major added there has to be added here too; there is
+        # no way to derive one from the other that is simpler than saying it.
+        pg: ["16", "17", "18"]
+    steps:
+      - uses: actions/checkout@v4
+
+      # A release must carry the version it says it does. The tag is checked
+      # against extension/Cargo.toml before anything is pushed, so a mistyped
+      # tag fails here rather than becoming a published image nobody can undo.
+      #
+      # Through env, not interpolated into the script: a `${{ }}` expression is
+      # substituted into the shell source before it runs, so a tag containing
+      # shell metacharacters would be evaluated rather than compared. Git
+      # permits most of them in a ref name.
+      - if: github.event_name == 'release'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: ./scripts/version check "$RELEASE_TAG"
+
+      - id: image
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "release" ]]; then
+            echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+            echo "is_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=development" >> "$GITHUB_OUTPUT"
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          # Only immutable tags here. The floating ones are moved by `promote`,
+          # once every major has succeeded -- see that job for why.
+          #
+          # Every tag carries its major, because three of these are published
+          # and an untagged-by-major image would be ambiguous about the one
+          # thing a reader most needs to know.
+          tags: |
+            type=raw,value=development-pg${{ matrix.pg }},enable=${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=${{ steps.image.outputs.version }}-pg${{ matrix.pg }},enable=${{ steps.image.outputs.is_release == 'true' }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: extension/Dockerfile
+          build-args: PG_MAJOR=${{ matrix.pg }}
+          # amd64 only. pgrx compiles against the target's Postgres headers and
+          # links its libraries, so there is no cross-compile equivalent of the
+          # gateway's CGO_ENABLED=0 build, and emulating arm64 for a Rust and
+          # pgrx build, three times over, is not worth it yet (see #36).
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  # Moving `latest` is a separate job so that it happens once, after every
+  # major has been pushed, rather than three times as each finishes.
+  #
+  # Without this, a matrix where pg16 fails and pg17/pg18 succeed still moves
+  # `latest` and two of the three `latest-pgNN`, leaving the floating tags
+  # split across two releases and claiming a release that was never completely
+  # published. `needs` makes the promotion conditional on all of them.
+  #
+  # A prerelease publishes its version tags and stops there: the floating tags
+  # are what someone pulling without a version trusts to be the current stable
+  # release.
+  promote:
+    name: move the floating tags
+    needs: build
+    if: github.event_name == 'release' && !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # `imagetools create` repoints a tag at an existing digest without
+      # pulling or rebuilding, so the promoted tag is the identical image that
+      # was tested, not a second build of the same source.
+      #
+      # `latest` is the newest supported major: someone who pulls without
+      # choosing gets what a fresh Postgres install would give them, and anyone
+      # who cares picks a major explicitly.
+      - env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          newest=18
+          for pg in 16 17 18; do
+            docker buildx imagetools create \
+              --tag "$IMAGE_NAME:latest-pg${pg}" \
+              "$IMAGE_NAME:${version}-pg${pg}"
+          done
+          docker buildx imagetools create \
+            --tag "$IMAGE_NAME:latest" \
+            "$IMAGE_NAME:${version}-pg${newest}"
