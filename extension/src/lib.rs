@@ -108,8 +108,8 @@ mod tests {
     // beside the code they exercise.
 
     use crate::cache::TOMBSTONE_GRACE_US;
-    use crate::resource::Resource;
     use crate::cache::{SubState, CACHE_FULL_REASON};
+    use crate::resource::Resource;
     use crate::shmem::{
         clear, lookup_or_request, reason, scan, set_state, status, sweep, tombstone, upsert,
         ShmemError,
