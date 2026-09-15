@@ -420,20 +420,9 @@ async fn stream_task(spec: Rc<SubSpec>) {
         } else {
             Some(spec.bookmark.clone())
         };
-    // Set after a cache-full failure, and cleared as soon as a stream gets
-    // going again. It suppresses the clear-before-listing on the next attempt.
-    let mut cache_full = false;
     loop {
         let rv = resume.clone().unwrap_or_default();
-        let outcome = run_stream(
-            &spec,
-            &rv,
-            &mut resume,
-            &mut state,
-            &mut backoff,
-            cache_full,
-        )
-        .await;
+        let outcome = run_stream(&spec, &rv, &mut resume, &mut state, &mut backoff).await;
         let (ev, reason, was_cache_full) = match outcome {
             Ok(EventAction::Relist) => {
                 resume = None;
@@ -449,7 +438,6 @@ async fn stream_task(spec: Rc<SubSpec>) {
             Ok(_) => (StreamEvent::Lost, "stream ended".to_owned(), false),
             Err(f) => (StreamEvent::Lost, f.reason, f.cache_full),
         };
-        cache_full = was_cache_full;
         if let Err(ShmemError::SlotGone) =
             transition(&spec, &mut state, ev, resume.is_some(), &reason)
         {
@@ -466,7 +454,8 @@ async fn stream_task(spec: Rc<SubSpec>) {
             // tombstones, another subscription may be dropped, and the cache
             // GUC can be raised and the server restarted -- so recovery
             // happens on its own, without needing anyone to restart the
-            // worker.
+            // worker. Meanwhile a cache that had synced keeps being served
+            // stale, and one that had not is not served at all.
             tokio::time::sleep(BACKOFF_MAX).await;
         } else {
             tokio::time::sleep(backoff.on_failure()).await;
@@ -502,8 +491,7 @@ impl StreamFailure {
         match e {
             ShmemError::OutOfMemory => Self {
                 reason: "the shared cache is full (axiom.cache_size_mb); this subscription \
-                         cannot take new objects until there is room, and is serving what it \
-                         already holds"
+                         cannot take new objects until there is room"
                     .to_owned(),
                 cache_full: true,
             },
@@ -524,7 +512,6 @@ async fn run_stream(
     resume: &mut Option<String>,
     state: &mut SubState,
     backoff: &mut Backoff,
-    keep_cache: bool,
 ) -> Result<EventAction, StreamFailure> {
     // WhileIdle: this channel carries the watch stream, which is idle whenever
     // the cluster is quiet and has no next request to discover a dead
@@ -563,13 +550,15 @@ async fn run_stream(
     };
     transition(spec, state, StreamEvent::Opened, resume.is_some(), why)
         .map_err(|e| StreamFailure::lost(e.to_string()))?;
-    // A full listing normally starts from an empty cache, so objects deleted
-    // while disconnected do not linger. Not after a cache-full failure: the
-    // rows being cleared are the stale rows still being served, and the relist
-    // that follows would refill until it fails at the same point. Keeping them
-    // is consistent with what a DEGRADED subscription already promises --
-    // stale data, offered and announced.
-    if rv.is_empty() && !keep_cache {
+    // A full listing always starts from an empty cache, so objects deleted
+    // while disconnected do not linger. This holds even after a cache-full
+    // failure, where keeping the partial contents looks tempting: a fresh
+    // listing sends only ADDED, so an object deleted cluster-side in the
+    // meantime is never mentioned, and retained entries would survive into the
+    // ACTIVE cache that the eventual successful listing produces -- served as
+    // authoritative, forever, with nothing to correct them. The partial
+    // contents are not being served anyway (see `retention_would_not_help`).
+    if rv.is_empty() {
         shmem::clear(spec.slot, spec.id).map_err(|e| StreamFailure::lost(e.to_string()))?;
     }
     // A resumed stream is already "synced" for bookmark purposes: its events
@@ -705,15 +694,15 @@ pub extern "C-unwind" fn axiom_bgworker_main(_arg: pg_sys::Datum) {
 #[cfg(test)]
 mod failure_tests {
     use super::*;
+    use crate::cache::{cache_servable, decide_tier, CacheMode, Tier};
 
     /// An exhausted cache is a standing condition, not a lost stream.
     ///
-    /// The distinction drives two behaviours that matter more than the label:
-    /// the retry waits at the longest interval instead of climbing from a
-    /// second, and the next attempt does not clear the cache before relisting.
-    /// Clearing would discard the rows still being served as stale, then refill
-    /// until it hit the same wall, so the answer to a query changed every
-    /// cycle and the subscription never settled.
+    /// The distinction drives the behaviour that matters more than the label:
+    /// the retry waits at the longest interval instead of climbing to it from
+    /// a second. Nothing about reconnecting frees space, so a listing per
+    /// second costs the gateway and the API server real work for no possible
+    /// progress.
     #[test]
     fn a_full_cache_is_distinguished_from_a_lost_stream() {
         let full = StreamFailure::from_cache_write(&ShmemError::OutOfMemory);
@@ -726,9 +715,12 @@ mod failure_tests {
             "the reason must name the setting to raise: {}",
             full.reason
         );
+        // Deliberately not claiming what happens to scans. A cache that
+        // filled after syncing keeps being served stale; one that filled
+        // mid-listing is not served at all. One reason reaches both.
         assert!(
-            full.reason.contains("serving what it already holds"),
-            "the reason should say the cached rows are still being served: {}",
+            full.reason.contains("cannot take new objects"),
+            "the reason should say what the subscription has stopped doing: {}",
             full.reason
         );
 
@@ -750,5 +742,46 @@ mod failure_tests {
                 f.reason
             );
         }
+    }
+
+    /// Why the cache is cleared before relisting even when it is full.
+    ///
+    /// Keeping the partial contents reads like a kindness -- serve the stale
+    /// rows rather than throw them away -- but on the only path where it would
+    /// change anything, there are no stale rows to serve.
+    ///
+    /// The clear runs only before a *fresh* listing; a resume leaves the cache
+    /// alone already. And a fresh listing has no bookmark, because none is
+    /// recorded until SYNCED, so a cache-full failure during one sends the
+    /// slot to `Requested`, whose contents are not servable. Scans fall back
+    /// to the gateway. (A cache that fills later, on a live event, does have a
+    /// bookmark: it goes `Degraded` and keeps being served stale. That path
+    /// resumes and never reaches this clear.)
+    ///
+    /// Retention would therefore buy nothing and cost correctness. A fresh
+    /// listing sends only ADDED, so an object deleted cluster-side while the
+    /// cache was full is never mentioned by the listing that eventually
+    /// succeeds. A retained entry would survive into an `ACTIVE` cache and be
+    /// served as authoritative with nothing left to correct it.
+    #[test]
+    fn retention_would_not_help_because_a_filling_cache_is_not_served() {
+        // A fill has no bookmark, so losing the stream cannot leave it
+        // `Degraded` -- the one state in which a lost stream's contents stay
+        // servable.
+        let after = next_state(SubState::Resyncing, StreamEvent::Lost, false);
+        assert_eq!(
+            after,
+            SubState::Requested,
+            "a listing that fails without a bookmark must not stay servable"
+        );
+        assert!(
+            !cache_servable(after),
+            "{after:?} must not serve its partial contents"
+        );
+        assert_eq!(
+            decide_tier(CacheMode::Watch, Some(after)),
+            Tier::OnDemand,
+            "scans must fall back to the gateway, not read a partial cache"
+        );
     }
 }
