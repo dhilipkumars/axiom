@@ -48,6 +48,23 @@ jobs:
       # --strict comes from mkdocs.yml, so a warning is a failure.
       - run: mkdocs build --site-dir /tmp/site
 
+  release-plumbing:
+    name: changesets + version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Whether a change deserved a changeset is a judgement and stays in
+      # review (.changes/README.md says why). Whether an existing changeset is
+      # well-formed is mechanically detectable, so it is enforced here: a bad
+      # `kind:` would otherwise drop the entry from the changelog silently, and
+      # be noticed by its absence after the release.
+      #
+      # The version check is the same argument. The control file and the
+      # gateway must keep deriving the version rather than pinning it, and a
+      # pinned copy is only wrong the first time the version changes -- which
+      # is the release, the worst moment to find out.
+      - run: make release-check
+
   gateway-unit:
     name: gateway unit tests + lint + vuln scan
     runs-on: ubuntu-latest

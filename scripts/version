@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Prints the project version, or checks that everything agrees with it.
+#
+#   scripts/version           # print, e.g. 0.1.0
+#   scripts/version check     # verify the places that carry it agree
+#   scripts/version check v0.1.0   # ...and that a release tag matches
+#
+# extension/Cargo.toml is the source of truth. It is the only place a version
+# is declared rather than injected: `axiom.control` templates it through pgrx
+# as `@CARGO_VERSION@`, `axiom_version()` reads it as `CARGO_PKG_VERSION`, and
+# the gateway takes it as a build argument that defaults to "dev". So the check
+# is not "do three files match" but "does everything derive from the one that
+# declares it, and does the tag being released agree".
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MANIFEST="$ROOT/extension/Cargo.toml"
+
+die() { printf 'version: %s\n' "$*" >&2; exit 1; }
+
+# The [package] version, not a dependency's. Stops at the next table header.
+version="$(awk '
+  /^\[/ { in_pkg = ($0 == "[package]"); next }
+  in_pkg && /^version[[:space:]]*=/ {
+    sub(/^version[[:space:]]*=[[:space:]]*"/, ""); sub(/".*$/, ""); print; exit
+  }
+' "$MANIFEST")"
+[[ -n "$version" ]] || die "no [package] version in extension/Cargo.toml"
+
+if [[ "${1:-}" != "check" ]]; then
+  printf '%s\n' "$version"
+  exit 0
+fi
+
+# The control file must template the version rather than pin it. A literal here
+# would be a second source of truth, and it would be wrong the first time the
+# version changed and nobody remembered this file.
+grep -q "^default_version = '@CARGO_VERSION@'" "$ROOT/extension/axiom.control" \
+  || die "extension/axiom.control should template default_version as '@CARGO_VERSION@'"
+
+# The gateway's default is deliberately "dev" so an unstamped binary says so
+# rather than claiming a release it is not.
+grep -q '^var version = "dev"' "$ROOT/gateway/cmd/gateway/main.go" \
+  || die 'gateway/cmd/gateway/main.go should default version to "dev"'
+
+tag="${2:-}"
+if [[ -n "$tag" ]]; then
+  [[ "$tag" == "v$version" ]] \
+    || die "tag $tag does not match extension/Cargo.toml version $version (expected v$version)"
+fi
+
+printf 'version %s, consistent%s\n' "$version" "${tag:+ with tag $tag}"

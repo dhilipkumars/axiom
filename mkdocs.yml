@@ -70,5 +70,6 @@ nav:
       - Auth design: AUTH.md
       - Engineering rules: RULES.md
       - Phase plan: PLAN.md
+      - Releasing: RELEASING.md
 
 strict: true
