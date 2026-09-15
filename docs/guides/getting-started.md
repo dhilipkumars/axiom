@@ -254,17 +254,16 @@ SELECT table_name FROM information_schema.tables
 DROP SCHEMA probe CASCADE;
 ```
 
-If the kind is absent there, the import is not the cause. Usually it is RBAC:
-grant it, restart the gateway so it re-reads what it may access, and re-import
-into the real schema. It can also be a deliberately narrowed `-serve` list, if
-whoever deployed the gateway set one — the startup log below says which.
+If the kind is absent there, the import is not the cause: it is RBAC. Grant
+it, restart the gateway so it re-reads what it may access, and re-import into
+the real schema.
 
 A kind that has been *removed* from the cluster is the mirror case, and needs
 no intervention: resource lists expire after `-discovery-ttl`, five minutes by
 default, so a re-import a few minutes later reflects the cluster.
 
-The gateway logs at startup whether `-serve` is narrowing anything, or whether
-RBAC is the only bound:
+If the grant looks right and the kind is still missing, the gateway logs what
+it resolved at startup:
 
 ```sh
 kubectl -n axiom-system logs deploy/axiom-gateway | grep "kubernetes client configured"

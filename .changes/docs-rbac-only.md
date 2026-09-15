@@ -2,19 +2,25 @@
 kind: changed
 ---
 
-The published guides now describe one bound on what a gateway serves, not two.
-`--serve` defaults to `*.*`, so RBAC alone decides, and teaching a second
-allowlist alongside it made the first deployment look harder than it is and
-gave two places to get wrong. The flag is unchanged and still documented under
-the gateway flag reference, as narrowing for a gateway that should offer less
-than its ServiceAccount permits.
+**RBAC is now the source of truth for what a gateway exposes.** The guides
+described two bounds — an allowlist and the ServiceAccount's RBAC — and told
+you to keep them in step. Only one of them is enforced by the API server, so
+the other was a way to be confused rather than a way to be safe. The guides
+now teach RBAC alone: to change what appears in SQL, change the ClusterRole.
 
-Consequently the deployment manifest no longer sources `AXIOM_SERVE` from an
-`axiom-gateway-config` ConfigMap; it is a literal in the manifest, and nothing
-reads that ConfigMap any more. Note that applying the new manifest replaces
-the `valueFrom` that read it with the literal `*.*`, so a gateway narrowed
-through that ConfigMap starts offering everything its RBAC permits; narrow it
-with `kubectl set env` on the Deployment, or better, in RBAC.
+The `--serve` allowlist still exists and still works, as narrowing for a
+gateway that should offer less than its ServiceAccount permits, but it is no
+longer part of how Axiom is explained and is expected to be deprecated.
+
+The deployment manifest therefore no longer sources `AXIOM_SERVE` from an
+`axiom-gateway-config` ConfigMap; it is a literal that narrows nothing, and
+nothing reads that ConfigMap any more.
+
+Two operational claims were also wrong and are corrected. A kind removed from
+the cluster does **not** stay on offer until the gateway restarts — resource
+lists expire after `-discovery-ttl`, five minutes by default. Restarting is
+required after an RBAC change, whose access decisions really are cached for
+the process lifetime.
 
 The README now links the documentation site from the top, and the guides
 describe unshipped work as "on the roadmap" rather than by phase number, which
