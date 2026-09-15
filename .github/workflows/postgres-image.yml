@@ -1,10 +1,19 @@
 name: postgres image
 
 on:
-  push:
-    branches: [main]
-  # On demand, for when a development image is wanted without waiting for a
-  # merge -- testing the install guide against a real registry, say.
+  # Nightly, not per-merge. At the current rate (~3 merges a day, three majors
+  # each) publishing on every push rebuilt and overwrote `development-pgNN`
+  # about ten times a day, for a moving tag whose whole promise is only ever
+  # "roughly current". The E2E suite builds these images on every run, so the
+  # build stays continuously exercised either way; what changes is how often
+  # the result is pushed.
+  #
+  # Off the hour on purpose: GitHub's scheduler is busiest at :00 and delays
+  # runs that pile up there.
+  schedule:
+    - cron: "17 3 * * *"
+  # On demand, for when a development image is wanted before tonight --
+  # testing the install guide against a real registry, say.
   workflow_dispatch:
   release:
     types: [published]
@@ -13,11 +22,10 @@ permissions:
   contents: read
   packages: write
 
-# Two merges in quick succession start two three-way matrices, and the tags are
-# overwritten in job-completion order, so a slower older run can leave
-# `development-pgNN` pointing at an older commit than main. Cancelling the
-# older run keeps the moving tag meaning "the head of main" rather than
-# "whichever build happened to finish last".
+# A nightly run and a dispatched one can overlap, and the tags would then be
+# written in job-completion order, leaving `development-pgNN` pointing at
+# whichever finished last rather than at the newer source. Cancelling the
+# superseded run keeps the moving tag meaning the newer of the two.
 #
 # Releases are keyed by their own tag and never cancelled: a release publish is
 # not repeatable, and two different releases must not cancel each other.
@@ -29,8 +37,38 @@ env:
   IMAGE_NAME: ghcr.io/dhilipkumars/axiom-postgres
 
 jobs:
+  # A nightly build of a branch that has not moved republishes the same source
+  # under a new digest: registry churn, and a `development` tag that looks
+  # freshly built while meaning nothing new. This skips it.
+  #
+  # `actions/checkout` fetches one commit by default, which is all this needs:
+  # the question is whether the head of main is recent, not what came before.
+  # The window is wider than the interval so a late run cannot skip a day.
+  gate:
+    name: did main move
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" != "schedule" ]]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ -n "$(git log -1 --since='25 hours ago' --format=%H)" ]]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "main has not moved in 25h; skipping the nightly publish" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   build:
     name: pg${{ matrix.pg }}
+    needs: gate
+    if: needs.gate.outputs.build == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -85,7 +123,7 @@ jobs:
           # and an untagged-by-major image would be ambiguous about the one
           # thing a reader most needs to know.
           tags: |
-            type=raw,value=development-pg${{ matrix.pg }},enable=${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+            type=raw,value=development-pg${{ matrix.pg }},enable=${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
             type=raw,value=${{ steps.image.outputs.version }}-pg${{ matrix.pg }},enable=${{ steps.image.outputs.is_release == 'true' }}
 
       - uses: docker/build-push-action@v6
