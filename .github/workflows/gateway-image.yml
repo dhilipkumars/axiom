@@ -3,8 +3,17 @@ name: gateway image
 on:
   push:
     branches: [main]
+  # On demand, for when a development image is wanted without waiting for a
+  # merge.
+  workflow_dispatch:
   release:
     types: [published]
+
+# Same reasoning as the postgres image: cancel a superseded branch build so the
+# moving `development` tag means the head of main, never cancel a release.
+concurrency:
+  group: gateway-image-${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'release' }}
 
 permissions:
   contents: read
@@ -62,7 +71,7 @@ jobs:
           tags: |
             # Main branch publishes a moving development tag; published releases
             # additionally publish their own semver tag and move :latest.
-            type=raw,value=development,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=raw,value=development,enable=${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
             type=raw,value=${{ steps.image.outputs.release_tag }},enable=${{ github.event_name == 'release' }}
             type=raw,value=latest,enable=${{ steps.image.outputs.publish_latest == 'true' }}
       - uses: docker/build-push-action@v6

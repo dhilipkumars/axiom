@@ -3,12 +3,27 @@ name: postgres image
 on:
   push:
     branches: [main]
+  # On demand, for when a development image is wanted without waiting for a
+  # merge -- testing the install guide against a real registry, say.
+  workflow_dispatch:
   release:
     types: [published]
 
 permissions:
   contents: read
   packages: write
+
+# Two merges in quick succession start two three-way matrices, and the tags are
+# overwritten in job-completion order, so a slower older run can leave
+# `development-pgNN` pointing at an older commit than main. Cancelling the
+# older run keeps the moving tag meaning "the head of main" rather than
+# "whichever build happened to finish last".
+#
+# Releases are keyed by their own tag and never cancelled: a release publish is
+# not repeatable, and two different releases must not cancel each other.
+concurrency:
+  group: postgres-image-${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'release' }}
 
 env:
   IMAGE_NAME: ghcr.io/dhilipkumars/axiom-postgres
@@ -70,7 +85,7 @@ jobs:
           # and an untagged-by-major image would be ambiguous about the one
           # thing a reader most needs to know.
           tags: |
-            type=raw,value=development-pg${{ matrix.pg }},enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=raw,value=development-pg${{ matrix.pg }},enable=${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
             type=raw,value=${{ steps.image.outputs.version }}-pg${{ matrix.pg }},enable=${{ steps.image.outputs.is_release == 'true' }}
 
       - uses: docker/build-push-action@v6
