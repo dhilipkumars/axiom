@@ -99,6 +99,17 @@ pub fn decide_tier(mode: CacheMode, state: Option<SubState>) -> Tier {
     }
 }
 
+/// Recorded as a subscription's reason when a cache write fails for want of
+/// room.
+///
+/// Single-sourced because two places depend on the exact text: the worker
+/// writes it, and a scan falling back to the gateway matches on it to tell the
+/// person running the query why caching stopped. Deliberately says nothing
+/// about what happens to scans -- that differs by when the cache filled, and
+/// one reason reaches both paths.
+pub const CACHE_FULL_REASON: &str = "the shared cache is full (axiom.cache_size_mb); \
+     this subscription cannot take new objects until there is room";
+
 /// Events the worker feeds into a subscription's state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamEvent {
