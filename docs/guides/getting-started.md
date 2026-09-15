@@ -97,9 +97,6 @@ kubectl -n axiom-system create secret generic axiom-gateway-tls \
   --from-file=tls.crt=certs/gateway.crt \
   --from-file=tls.key=certs/gateway.key
 
-kubectl -n axiom-system create configmap axiom-gateway-config \
-  --from-literal=serve='pods,configmaps,widgets.example.com'
-
 kubectl apply -f deploy/k8s/gateway-deployment.yaml
 kubectl -n axiom-system rollout status deploy/axiom-gateway
 ```
@@ -123,20 +120,18 @@ kubectl -n axiom-system rollout status deploy/axiom-gateway
 [Deploying the gateway](deploying.md) covers the exposure choices and how they
 interact with the certificate.
 
-Two things bound what the gateway will serve, and both apply:
+## What the gateway can see
 
-- `-serve`, from the ConfigMap above, is the allowlist of kinds it offers.
-- The ClusterRole in `deploy/k8s/gateway-rbac.yaml` is what the API server will
-  actually permit. Discovery asks the API server which kinds this identity may
-  list, so narrowing RBAC narrows what appears in SQL.
+**RBAC decides, and nothing else needs configuring.** Discovery asks the API
+server which kinds this ServiceAccount may list, and offers exactly those. To
+change what appears in SQL, change the ClusterRole.
 
-Keep the two in step. `-serve` wider than RBAC is harmless, just ineffective;
-RBAC wider than `-serve` means privileges nothing uses.
+That is the bound worth having, because the API server enforces it. A kind you
+have not granted cannot be read even if something asks for it.
 
-The bundled ClusterRole is a **starting point, not a recommendation**. It
-grants what the end-to-end suite needs: Pods, ConfigMaps, and the suite's own
-example CRD. Serving anything else means granting it as well. To add
-Deployments, which later examples on this site use:
+The bundled ClusterRole in `deploy/k8s/gateway-rbac.yaml` is a **starting
+point, not a recommendation**. It grants Pods, ConfigMaps, and an example
+custom resource. To add Deployments, which later examples on this site use:
 
 ```sh
 kubectl patch clusterrole axiom-gateway-read --type=json -p '[{
@@ -145,12 +140,12 @@ kubectl patch clusterrole axiom-gateway-read --type=json -p '[{
             "verbs": ["get", "list", "watch"]}
 }]'
 
-kubectl -n axiom-system create configmap axiom-gateway-config \
-  --from-literal=serve='pods,configmaps,deployments.apps' \
-  --dry-run=client -o yaml | kubectl apply -f -
-
 kubectl -n axiom-system rollout restart deploy/axiom-gateway
 ```
+
+Restart the gateway after an RBAC change: it caches what it may read, so the
+new grant appears on the next start. Then re-run `IMPORT FOREIGN SCHEMA`, since
+foreign tables are catalog objects and do not follow the change on their own.
 
 Grant only the verbs you want available. A kind granted `get`, `list` and
 `watch` is readable and cacheable but not writable, and the generated table
@@ -190,8 +185,9 @@ CREATE USER MAPPING FOR CURRENT_USER SERVER prod;
 ```
 
 The user mapping carries no options today, so it takes no `OPTIONS` clause.
-Postgres rejects an empty `OPTIONS ()` with a syntax error. Phase 7 is what
-gives the mapping something to hold (see `docs/AUTH.md`).
+Postgres rejects an empty `OPTIONS ()` with a syntax error. Per-caller
+credentials are on the roadmap, and are what will eventually give the mapping
+something to hold.
 
 `ca_cert` is a path on the Postgres **server's** filesystem, read by the
 backend process, so it must be readable by the user Postgres runs as. Leaving
@@ -241,10 +237,10 @@ explains the rules.
 
 ## What to check when a kind is missing
 
-Foreign tables are catalog objects. Changing the gateway's RBAC or its `-serve`
-list changes what the gateway offers, but it does not change tables that
-already exist, and nothing announces the drift. A kind that stopped being
-served does not disappear from the catalog; its scans simply start failing.
+Foreign tables are catalog objects. Changing the gateway's RBAC changes what it
+offers, but it does not change tables that already exist, and nothing announces
+the drift. A kind that stopped being served does not disappear from the
+catalog; its scans simply start failing.
 
 There is no SQL call that lists what the gateway currently offers, so ask it
 the way the import does, by importing into a scratch schema and looking at what
@@ -258,11 +254,11 @@ SELECT table_name FROM information_schema.tables
 DROP SCHEMA probe CASCADE;
 ```
 
-If the kind is absent there, the cause is `-serve` or RBAC rather than the
-import. Fix whichever it is, restart the gateway, and re-import into the real
-schema. A kind that has been *removed* from the cluster is the mirror case: it
-stays on offer until the gateway restarts, because a group's resource list is
-fetched once and never refreshed.
+If the kind is absent there, the cause is RBAC rather than the import. Grant
+it, restart the gateway, and re-import into the real schema. A kind that has
+been *removed* from the cluster is the mirror case: it stays on offer until the
+gateway restarts, because a group's resource list is fetched once and never
+refreshed.
 
 The gateway also logs which of the two bounds is narrowing at startup:
 

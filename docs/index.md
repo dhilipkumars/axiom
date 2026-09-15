@@ -25,9 +25,9 @@ Postgres, a different cloud, a laptop. The gateway is the only component that
 needs cluster credentials, and it holds them as a ServiceAccount rather than as
 anything Postgres stores.
 
-It also means what Axiom can see is bounded twice: by the gateway's `-serve`
-list, and by the RBAC of the ServiceAccount it runs as. A `SELECT` cannot read
-anything the gateway's own identity could not read with `kubectl`.
+It also means what Axiom can see is decided by one thing: the RBAC of the
+ServiceAccount the gateway runs as. A `SELECT` cannot read anything the
+gateway's own identity could not read with `kubectl`.
 
 ## What it does today
 
@@ -55,7 +55,17 @@ The reference pages under **Reference** are generated from the code itself.
 
 ## Status
 
-Axiom is under active development and has not reached a stable release. Phases
-0 through 6 are complete; per-caller identity (Phase 7) and multi-cluster
-(Phase 8) are next. See `docs/PLAN.md` in the repository for the current plan
-and `docs/DESIGN.md` for the architecture.
+Axiom is under active development and has not reached a stable release.
+Interfaces may still change between versions.
+
+Everything described on this site works today. What it cannot do yet:
+
+- **Act as the person running the query.** The gateway uses one identity for
+  everyone, so what a `SELECT` can reach is decided by the gateway's RBAC, not
+  the caller's. Grant the gateway only what every user of that database should
+  be able to read.
+- **Span more than one cluster.** A server points at a single gateway, which
+  points at a single cluster. Querying several means several servers.
+
+Both are on the roadmap. The engineering notes behind them live in the
+repository, in `docs/DESIGN.md` and `docs/AUTH.md`.
