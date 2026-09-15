@@ -55,8 +55,9 @@ spec:
           # Arguments match gateway/cmd/gateway/main.go.
           # -kubeconfig is omitted so k8s.Config falls back to rest.InClusterConfig(),
           # picking up the projected ServiceAccount token mounted by kubelet.
-          # -serve matches docker-compose.kind.yml and bounds offered kinds to match
-          # the ClusterRole in deploy/k8s/gateway-rbac.yaml.
+          # -serve narrows nothing by default (see AXIOM_SERVE below), so the
+          # ClusterRole in deploy/k8s/gateway-rbac.yaml is what bounds the
+          # offered kinds. docker-compose.kind.yml sets its own narrower list.
           args:
             - -listen
             - :8443

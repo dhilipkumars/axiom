@@ -209,8 +209,8 @@ check ownership in $tmp"
 }
 
 # kind_deploy_gateway [SERVE]: apply the Deployment and wait for it to be ready.
-# SERVE is the --serve allowlist; gates need different values, so it is a
-# ConfigMap rather than being baked into the manifest.
+# SERVE is the --serve allowlist; gates need different values, so it is applied
+# with `kubectl set env` after the manifest rather than baked into it.
 kind_deploy_gateway() {
   local serve="${1:-pods,configmaps,widgets.example.com}"
   # Second argument: how long the gateway trusts a cached resource list.

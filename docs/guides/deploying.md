@@ -10,7 +10,8 @@ exercises. The manifests are in `deploy/k8s/`:
 
 - `gateway-rbac.yaml` — the `axiom-system` namespace, the `axiom-gateway`
   ServiceAccount, and the ClusterRole that decides what it may read and write.
-  This is the only thing that bounds what appears in SQL.
+  With the checked-in manifest this is the only thing that bounds what appears
+  in SQL, because `-serve` is left at `*.*`.
 - `gateway-deployment.yaml` — the Deployment and a `NodePort` Service.
 
 ```sh
@@ -122,9 +123,11 @@ intend to believe.
 
 ## Operational notes
 
-**Restarting** the gateway is safe at any time, and is sometimes required:
-a kind removed from the cluster stays on offer until the process restarts, and
-changes to RBAC only take effect on a fresh process.
+**Restarting** the gateway is safe at any time, and is required after an RBAC
+change: access decisions are cached for the process lifetime. A kind removed
+from the cluster needs no restart — resource lists expire after
+`-discovery-ttl`, five minutes by default, and a re-import then reflects the
+cluster.
 
 ```sh
 kubectl -n axiom-system rollout restart deploy/axiom-gateway
