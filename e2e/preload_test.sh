@@ -43,8 +43,15 @@ start_pg() {
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
   docker run -d --name "$CONTAINER" -e POSTGRES_PASSWORD=preload-test \
     "$IMAGE" "$@" >/dev/null || fail "could not start $IMAGE"
+  # -h 127.0.0.1 is load-bearing, for the reason the compose healthcheck
+  # already documents: the official entrypoint runs initialisation against a
+  # *temporary* server started with listen_addresses='', then shuts it down and
+  # starts the real one. A socket-based pg_isready (the default with no -h)
+  # answers from that temporary server, so this would return while the next
+  # statement hits "the database system is shutting down". Only the real server
+  # accepts TCP.
   for _ in $(seq 1 90); do
-    docker exec "$CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && return 0
+    docker exec "$CONTAINER" pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1 && return 0
     sleep 2
   done
   fail "postgres never became ready"
@@ -84,7 +91,11 @@ log "the session survives that error, and repeating it does not poison the sessi
 # report "previous load attempt failed" instead, which would lose the
 # explanation exactly when someone retries. It does not here, and this keeps it
 # that way.
-alive="$(docker exec -i "$CONTAINER" psql -U postgres -tA 2>&1 <<'SQL'
+# `|| true` matters here. If the connection dies -- the regression this whole
+# block exists to catch -- psql exits 2, and under `set -e` that would abort
+# the script before the assertions below, losing both the diagnosis and the
+# container logs. Let it fail here and be reported by the greps.
+alive="$(docker exec -i "$CONTAINER" psql -U postgres -tA 2>&1 <<'SQL' || true
 CREATE EXTENSION axiom;
 SELECT 'first attempt survived';
 CREATE EXTENSION axiom;

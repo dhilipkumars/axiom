@@ -601,9 +601,10 @@ whole-cluster import yields `events_core` and `events_events_k8s_io` and no
 bare `events`. Handing the bare name to one of them would make `events` mean
 whichever the rule happened to favour.
 
-**The background worker** only starts when the library is preloaded. `CREATE
-EXTENSION` alone installs the SQL objects and emits a WARNING telling you the
-worker is not running, rather than silently doing nothing.
+**The background worker and the shared cache** both require the library to be
+preloaded, and neither can be set up after startup, so `CREATE EXTENSION`
+without it fails with an error naming this setting rather than installing
+something that cannot work.
 
 ```
 # postgresql.conf
