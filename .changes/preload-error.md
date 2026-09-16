@@ -18,3 +18,7 @@ Postgres, then run CREATE EXTENSION axiom. ...
 
 Nothing changes for a correctly preloaded Postgres, which includes the
 published images — they preload Axiom themselves.
+
+The guides and README described the old behaviour — a warning, and watch tables
+falling back to an RPC per scan. Neither can happen now, so both say what
+actually does.

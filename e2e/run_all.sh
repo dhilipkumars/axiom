@@ -28,7 +28,7 @@ source "$here/lib/kind.sh"
 
 # PLAN.md order. A later gate is only meaningful if the earlier ones passed,
 # so the run stops at the first failure (docs/RULES.md §4, regression gate).
-ALL_GATES=(ping pods configmaps watch crd cluster)
+ALL_GATES=(preload ping pods configmaps watch crd cluster)
 GATES=("${@:-}")
 [[ -z "${GATES[*]}" ]] && GATES=("${ALL_GATES[@]}")
 
@@ -78,10 +78,10 @@ kind_up
 # Not conditioned on E2E_GATEWAY_MODE: sourcing lib/stack.sh above already
 # defaulted that to "compose" for this process, since each gate sets it for
 # itself before its own source. Testing it here would therefore always skip.
-# Condition on whether any selected gate needs a cluster instead -- ping is the
-# only one that does not.
+# Condition on whether any selected gate needs a cluster instead -- `ping` and
+# `preload` are the two that do not.
 for _g in "${GATES[@]}"; do
-  if [[ "$_g" != "ping" ]]; then
+  if [[ "$_g" != "ping" && "$_g" != "preload" ]]; then
     kind_load_gateway_image
     break
   fi
@@ -92,6 +92,10 @@ log "cluster ready in $(hms "$cluster_secs")"
 # Gates must reuse what this driver just created rather than redoing it. Their
 # own teardown still runs, so each gate gets a clean compose stack.
 export E2E_NO_BUILD=1
+# The preload gate starts the extension image directly rather than through
+# compose, so point it at the one this driver already built. Without this it
+# would build its own copy and the suite would pay for the extension twice.
+export E2E_PG_IMAGE=axiom-postgres
 export E2E_KIND_KEEP=1
 
 # --- run the gates ----------------------------------------------------------

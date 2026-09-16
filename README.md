@@ -632,9 +632,10 @@ to alert on: `axiom bgworker: ping ok ...` at `LOG`, `axiom bgworker: ping faile
   `docker compose -f deploy/compose/docker-compose.yml logs gateway` for
   `gateway listening` and the postgres log for `axiom bgworker: ping failed`
   lines, which name the gRPC status code.
-- **`WARNING: axiom: not loaded via shared_preload_libraries`** after `CREATE
-  EXTENSION`: expected if you did not preload the library; add it to
-  `shared_preload_libraries` and restart Postgres.
+- **`ERROR: axiom must be loaded through shared_preload_libraries`** from
+  `CREATE EXTENSION`: the library was not preloaded. Add it to
+  `shared_preload_libraries` and restart Postgres. Axiom cannot be loaded on
+  demand at all -- two of its GUCs are `PGC_POSTMASTER`.
 - **`invalid peer certificate: BadSignature`** on a stack that was working:
   the gateway is serving a stale certificate. The `certs` service is a one-shot
   that regenerates the CA and server cert on every `up`, but Compose only

@@ -98,9 +98,10 @@ and refuses `writable 'true'` on such a table.
 
 ## Caching
 
-**Caching requires the extension to be preloaded.** The cache lives in shared
-memory and is filled by a background worker, and neither exists unless Postgres
-loaded the library at startup:
+**Axiom requires the extension to be preloaded** — not just caching. The cache
+lives in shared memory and is filled by a background worker, neither of which
+can be set up after startup, so `CREATE EXTENSION axiom` fails outright without
+it:
 
 ```
 # postgresql.conf, then restart -- this cannot change at runtime
@@ -112,19 +113,17 @@ comma-separated list, so `shared_preload_libraries = 'pg_stat_statements,axiom'`
 if something is already there. Copying the line above over a non-empty setting
 silently disables whatever it replaced, at the next restart.
 
-Without the preload a `cache_mode 'watch'` table still answers, by falling back
-to an RPC per scan, and `axiom_watch_status()` returns no rows. It does say so:
-every such scan raises
+Without it, installing the extension fails and says what to do:
 
 ```
-WARNING:  axiom: cache_mode 'watch' unavailable (axiom is not in
-shared_preload_libraries; the watch cache is unavailable); serving this scan on
-demand
+ERROR:  axiom must be loaded through shared_preload_libraries
+DETAIL:  Add `shared_preload_libraries = 'axiom'` to postgresql.conf, restart
+Postgres, then run CREATE EXTENSION axiom. ...
 ```
 
-which is easy to miss in a client that hides warnings, and is the thing to look
-for when caching appears to do nothing. Two settings are worth knowing alongside it,
-both also fixed at startup:
+The published Postgres images set this themselves, so nothing above applies if
+you are using one. Two settings are worth knowing alongside it, both also fixed
+at startup:
 
 | Setting | Default | What it does |
 | --- | --- | --- |
