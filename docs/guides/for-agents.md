@@ -140,7 +140,7 @@ docker run -d --name axiom-postgres --platform linux/amd64 \
   --network kind \
   -e POSTGRES_PASSWORD=axiom \
   -v "$PWD/certs:/certs:ro" \
-  ghcr.io/dhilipkumars/axiom-postgres:development-pg17
+  ghcr.io/dhilipkumars/axiom-postgres:latest-pg17
 ```
 
 Wait for readiness — **poll, do not sleep a fixed amount**:
