@@ -67,18 +67,38 @@ grep -qi 'PGC_POSTMASTER' <<<"$out" \
   && fail "the Postgres internal leaked into the user-facing message: $out"
 echo "$out" | head -2
 
-log "the session survives that error"
+log "the session survives that error, and repeating it does not poison the session"
 # The regression that matters most. As a FATAL this killed the connection, so
 # an operator lost their session as well as their explanation. `psql` opens one
-# connection for a file of statements, so a second statement running after the
-# failed CREATE EXTENSION proves the backend is still alive.
-alive="$(docker exec -i "$CONTAINER" psql -U postgres -tA <<'SQL'
+# connection for a file of statements, so later statements running after the
+# failed CREATE EXTENSION prove the backend is still alive.
+#
+# stderr is captured deliberately. Without it this asserts only that the second
+# statement ran, which a CREATE EXTENSION that started *succeeding* would also
+# satisfy -- the test would pass while the behaviour it exists for was gone.
+# Both halves are checked: that the statement failed, and that the session
+# outlived it.
+#
+# It is attempted twice because a failed library load can be cached: Postgres
+# records the file in `file_list` and a later attempt in the same session can
+# report "previous load attempt failed" instead, which would lose the
+# explanation exactly when someone retries. It does not here, and this keeps it
+# that way.
+alive="$(docker exec -i "$CONTAINER" psql -U postgres -tA 2>&1 <<'SQL'
 CREATE EXTENSION axiom;
-SELECT 'session survived';
+SELECT 'first attempt survived';
+CREATE EXTENSION axiom;
+SELECT 'second attempt survived';
 SQL
 )"
-grep -q 'session survived' <<<"$alive" \
+grep -q 'first attempt survived' <<<"$alive" \
   || fail "the connection did not survive the error: $alive"
+grep -q 'second attempt survived' <<<"$alive" \
+  || fail "the session did not survive a second attempt: $alive"
+[[ "$(grep -c 'ERROR:  axiom must be loaded through shared_preload_libraries' <<<"$alive")" == "2" ]] \
+  || fail "both attempts must fail with the axiom error, not just the first: $alive"
+grep -q 'previous load attempt failed' <<<"$alive" \
+  && fail "the retry lost the explanation to a cached load failure: $alive"
 
 log "the extension is genuinely absent afterwards, not half-installed"
 installed="$(docker exec "$CONTAINER" psql -U postgres -tAc \
@@ -93,8 +113,17 @@ docker exec "$CONTAINER" psql -U postgres -tAc "CREATE EXTENSION axiom" >/dev/nu
   || fail "CREATE EXTENSION failed on a preloaded server"
 version="$(docker exec "$CONTAINER" psql -U postgres -tAc "SELECT axiom_version()")"
 [[ -n "$version" ]] || fail "axiom_version() returned nothing"
-workers="$(docker exec "$CONTAINER" psql -U postgres -tAc \
-  "SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'axiom gateway pinger'")"
+# Retried, not probed once: pg_isready only says the postmaster is accepting
+# connections, and a static background worker is launched separately, so an
+# immediate single probe is a flake under load. The pg_test for this does the
+# same thing for the same reason.
+workers=0
+for _ in $(seq 1 50); do
+  workers="$(docker exec "$CONTAINER" psql -U postgres -tAc \
+    "SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'axiom gateway pinger'")"
+  [[ "$workers" == "1" ]] && break
+  sleep 1
+done
 [[ "$workers" == "1" ]] || fail "expected the pinger worker to be running, got '$workers'"
 echo "axiom_version() = $version, pinger running"
 
