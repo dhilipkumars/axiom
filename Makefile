@@ -10,7 +10,7 @@ COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 
 .PHONY: all proto proto-check gateway-build gateway-test gateway-lint gateway-vuln \
         ext-build ext-test ext-lint ext-fmt ext-audit unit lint docs-generate docs-check \
-        version changelog release-check release-notes up down e2e-ping e2e-phase0 e2e-pods e2e-phase1 e2e-configmaps e2e-phase2 e2e-watch e2e-phase3 e2e-crd e2e-phase4 e2e-cluster e2e-phase5 e2e
+        version changelog release-check release-notes up down e2e-preload e2e-ping e2e-phase0 e2e-pods e2e-phase1 e2e-configmaps e2e-phase2 e2e-watch e2e-phase3 e2e-crd e2e-phase4 e2e-cluster e2e-phase5 e2e
 
 all: lint unit
 
@@ -113,6 +113,11 @@ down:
 	$(COMPOSE) down -v --remove-orphans
 
 # Tests live in e2e/*_test.sh and share the setup library in e2e/lib/.
+# `preload` needs neither a cluster nor a gateway: it only starts the extension
+# image with and without shared_preload_libraries.
+e2e-preload:
+	./e2e/preload_test.sh
+
 e2e-ping:
 	./e2e/ping_test.sh
 

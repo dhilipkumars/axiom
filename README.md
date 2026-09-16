@@ -601,9 +601,10 @@ whole-cluster import yields `events_core` and `events_events_k8s_io` and no
 bare `events`. Handing the bare name to one of them would make `events` mean
 whichever the rule happened to favour.
 
-**The background worker** only starts when the library is preloaded. `CREATE
-EXTENSION` alone installs the SQL objects and emits a WARNING telling you the
-worker is not running, rather than silently doing nothing.
+**The background worker and the shared cache** both require the library to be
+preloaded, and neither can be set up after startup, so `CREATE EXTENSION`
+without it fails with an error naming this setting rather than installing
+something that cannot work.
 
 ```
 # postgresql.conf
@@ -632,9 +633,10 @@ to alert on: `axiom bgworker: ping ok ...` at `LOG`, `axiom bgworker: ping faile
   `docker compose -f deploy/compose/docker-compose.yml logs gateway` for
   `gateway listening` and the postgres log for `axiom bgworker: ping failed`
   lines, which name the gRPC status code.
-- **`WARNING: axiom: not loaded via shared_preload_libraries`** after `CREATE
-  EXTENSION`: expected if you did not preload the library; add it to
-  `shared_preload_libraries` and restart Postgres.
+- **`ERROR: axiom must be loaded through shared_preload_libraries`** from
+  `CREATE EXTENSION`: the library was not preloaded. Add it to
+  `shared_preload_libraries` and restart Postgres. Axiom cannot be loaded on
+  demand at all -- two of its GUCs are `PGC_POSTMASTER`.
 - **`invalid peer certificate: BadSignature`** on a stack that was working:
   the gateway is serving a stale certificate. The `certs` service is a one-shot
   that regenerates the CA and server cert on every `up`, but Compose only

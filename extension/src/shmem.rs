@@ -134,10 +134,11 @@ pub enum ShmemError {
 impl fmt::Display for ShmemError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotAvailable => write!(
-                f,
-                "axiom is not in shared_preload_libraries; the watch cache is unavailable"
-            ),
+            // Deliberately does not blame shared_preload_libraries any more:
+            // `_PG_init` refuses to load without it, so a backend that got far
+            // enough to see this error was preloaded. Naming a cause that
+            // cannot apply sends the reader to check a setting that is fine.
+            Self::NotAvailable => write!(f, "the axiom shared cache is not available"),
             Self::CacheNotReady => write!(
                 f,
                 "the axiom background worker has not initialised the cache yet"
