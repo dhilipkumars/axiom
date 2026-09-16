@@ -42,6 +42,15 @@ accepts a matching platform.
 
 ## Step 1 — cluster
 
+**This procedure requires [kind](https://kind.sigs.k8s.io).** Not because
+Axiom needs it, but because Postgres reaches the gateway over kind's Docker
+network in step 4. On any other cluster the gateway has to be exposed some
+other way first, and this procedure does not cover that.
+
+It creates a cluster named `axiom` and uses that name throughout. Do not
+substitute an existing cluster with a different name unless you also change
+every later use of `axiom-control-plane`.
+
 ```sh
 kind get clusters | grep -qx axiom || kind create cluster --name axiom
 ```
