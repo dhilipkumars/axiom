@@ -36,8 +36,9 @@ All three must be installed. Record `uname -m`:
 - `arm64` or `aarch64` → the Postgres image below needs `--platform linux/amd64`; the gateway image is published for both amd64 and arm64.
 - `x86_64` → omit that flag.
 
-The flag is included on the Postgres command; the OpenSSL image and gateway image support the host architecture.
-accepts a matching platform.
+The flag is on the Postgres commands below. The OpenSSL image and the gateway
+image are multi-architecture, so they need nothing. On x86_64 you may drop the
+flag or leave it; Docker accepts a matching platform.
 
 ## Step 1 — cluster
 
