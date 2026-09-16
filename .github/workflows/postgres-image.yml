@@ -83,6 +83,10 @@ jobs:
     needs: gate
     if: needs.gate.outputs.build == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      # The tag prefix these images were pushed under, so install-check tests
+      # exactly what was just published instead of recomputing it.
+      version: ${{ steps.image.outputs.version }}
     strategy:
       fail-fast: false
       matrix:
@@ -153,6 +157,34 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
+  # What a stranger gets, checked before the floating tags say it is current.
+  #
+  # Sitting between `build` and `promote` is the whole point: the version tags
+  # are already pushed and immutable by now, but `latest` has not moved, so a
+  # published image that cannot be pulled or does not install stops here
+  # instead of becoming what everyone gets by default. A gate that ran after
+  # promotion could only report the damage.
+  #
+  # It pulls with an empty DOCKER_CONFIG, because a private package and a
+  # public one are indistinguishable over the registry API -- both answer 401
+  # -- and the runner is logged in to push. Only a credential-free pull
+  # answers the question this gate exists for.
+  install-check:
+    name: a stranger can install it
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: helm/kind-action@v1
+        with:
+          install_only: true
+      - env:
+          E2E_INSTALL_TAG: ${{ needs.build.outputs.version }}
+          # Only enforced for a release, where the tag states the version the
+          # image must report. A development image has no such promise.
+          E2E_INSTALL_VERSION: ${{ github.event_name == 'release' && needs.build.outputs.version || '' }}
+        run: ./e2e/install_test.sh
+
   # Moving `latest` is a separate job so that it happens once, after every
   # major has been pushed, rather than three times as each finishes.
   #
@@ -166,7 +198,7 @@ jobs:
   # release.
   promote:
     name: move the floating tags
-    needs: build
+    needs: [build, install-check]
     if: github.event_name == 'release' && !github.event.release.prerelease
     runs-on: ubuntu-latest
     steps:
