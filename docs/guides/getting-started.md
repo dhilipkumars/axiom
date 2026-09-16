@@ -104,9 +104,15 @@ kubectl apply -f "$RAW/gateway-deployment.yaml"
 kubectl -n axiom-system rollout status deploy/axiom-gateway
 ```
 
-That pulls `ghcr.io/dhilipkumars/axiom-gateway:development`, which is built
-nightly from `main`. Releases publish a versioned tag; see
-[Releasing](../RELEASING.md) for what each tag means.
+The manifest pulls `ghcr.io/dhilipkumars/axiom-gateway:development`, built
+nightly from `main`. For a released gateway, point it at a version instead:
+
+```sh
+kubectl -n axiom-system set image deploy/axiom-gateway \
+  gateway=ghcr.io/dhilipkumars/axiom-gateway:v0.1.0
+```
+
+[Releasing](../RELEASING.md) explains what each tag means.
 
 ## What the gateway can see
 
@@ -149,7 +155,7 @@ docker run -d --name axiom-postgres --platform linux/amd64 \
   -e POSTGRES_PASSWORD=axiom \
   -v "$PWD/certs:/certs:ro" \
   -p 55432:5432 \
-  ghcr.io/dhilipkumars/axiom-postgres:development-pg17
+  ghcr.io/dhilipkumars/axiom-postgres:latest-pg17
 ```
 
 Three things in that command matter:
@@ -169,8 +175,10 @@ The image sets `shared_preload_libraries = 'axiom'` itself. That is not a
 convenience: Axiom registers `PGC_POSTMASTER` GUCs, so without preloading
 `CREATE EXTENSION` fails outright rather than running with the cache disabled.
 
-`axiom-postgres` is published per major — `-pg16`, `-pg17`, `-pg18`. Swap the
-tag to match the Postgres you want.
+`axiom-postgres` is published per major — `latest-pg16`, `latest-pg17`,
+`latest-pg18` — each following the newest release for that major. Swap the tag
+to match the Postgres you want, or pin a version like `0.1.0-pg17` if you would
+rather choose when to move.
 
 ## 5. Install and connect
 
