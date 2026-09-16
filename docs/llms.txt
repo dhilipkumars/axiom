@@ -1,0 +1,43 @@
+# Axiom
+
+> A Postgres foreign data wrapper for Kubernetes. Query and control Kubernetes
+> resources, built-in kinds and CRDs alike, from plain SQL, across one or more
+> clusters, from a Postgres that may live entirely outside those clusters'
+> networks. A standing watch keeps a shared-memory cache live, so `SELECT`s
+> reflect cluster state within watch latency, and `INSERT`/`UPDATE`/`DELETE`
+> map to real Kubernetes writes with optimistic-concurrency conflicts surfaced
+> as SQL errors.
+
+Things worth knowing before answering questions about Axiom:
+
+- No Kubernetes client code runs inside a Postgres backend. A Go **gateway**
+  runs in each cluster, holds the credentials, and speaks gRPC over TLS.
+- What a query can reach is bounded by the **gateway's RBAC**, not the SQL
+  user's.
+- Axiom **cannot run on managed Postgres** (RDS, Cloud SQL, Aurora): it is not
+  a trusted extension and requires `shared_preload_libraries`.
+- Published Postgres images are **amd64 only** today; the gateway image is published for amd64 and arm64. On arm64, run the Postgres image under emulation.
+- It is pre-1.0. Interfaces may change between minor versions.
+
+## Setting up a working environment
+
+- [Setting up Axiom (for coding agents)](https://dhilipkumars.github.io/axiom/guides/for-agents/): step-by-step procedure with a verification and expected output for each step, failure signatures, and teardown. Start here to bring up a working environment.
+- [Getting started](https://dhilipkumars.github.io/axiom/guides/getting-started/): the same path written for a person, with the reasoning behind each step.
+
+## Using it
+
+- [Querying](https://dhilipkumars.github.io/axiom/guides/querying/): on-demand versus watch-cached tables, staleness, cache settings, `axiom_watch_status()`.
+- [Deploying the gateway](https://dhilipkumars.github.io/axiom/guides/deploying/): running the gateway in a cluster, exposure choices, RBAC, operational notes.
+
+## Reference, generated from the code
+
+- [Foreign table columns](https://dhilipkumars.github.io/axiom/generated/columns/): how a Kubernetes kind becomes a table's columns.
+- [FDW options](https://dhilipkumars.github.io/axiom/generated/fdw-options/): every accepted `CREATE SERVER` and table option.
+- [Gateway flags](https://dhilipkumars.github.io/axiom/generated/gateway-flags/): the gateway's command line.
+- [gRPC API](https://dhilipkumars.github.io/axiom/generated/api/): the wire protocol between extension and gateway.
+
+## Optional
+
+- [Architecture](https://dhilipkumars.github.io/axiom/DESIGN/): why a gateway, consistency tiers, schema mapping, multi-cluster.
+- [Auth design](https://dhilipkumars.github.io/axiom/AUTH/): per-caller identity, the threat model, the recommended flow.
+- [Releasing](https://dhilipkumars.github.io/axiom/RELEASING/): what each image tag means and how a release is cut.

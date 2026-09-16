@@ -58,6 +58,7 @@ nav:
   - Home: index.md
   - Guides:
       - Getting started: guides/getting-started.md
+      - Setting up (for coding agents): guides/for-agents.md
       - Deploying the gateway: guides/deploying.md
       - Querying: guides/querying.md
   - Reference:
