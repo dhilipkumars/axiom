@@ -33,11 +33,10 @@ uname -m
 
 All three must be installed. Record `uname -m`:
 
-- `arm64` or `aarch64` → **every `docker run` and `docker pull` below needs
-  `--platform linux/amd64`**. The published images are amd64 only.
+- `arm64` or `aarch64` → the Postgres image below needs `--platform linux/amd64`; the gateway image is published for both amd64 and arm64.
 - `x86_64` → omit that flag.
 
-The commands below include the flag. Remove it on x86_64, or leave it; Docker
+The flag is included on the Postgres command; the OpenSSL image and gateway image support the host architecture.
 accepts a matching platform.
 
 ## Step 1 — cluster
@@ -117,6 +116,7 @@ kubectl --context kind-axiom -n axiom-system create secret generic axiom-gateway
   --from-file=tls.key=certs/gateway.key
 
 kubectl --context kind-axiom apply -f "$RAW/gateway-deployment.yaml"
+kubectl --context kind-axiom -n axiom-system rollout restart deploy/axiom-gateway
 kubectl --context kind-axiom -n axiom-system rollout status deploy/axiom-gateway --timeout=180s
 ```
 
@@ -245,7 +245,7 @@ rm -rf certs
 - **There is no downloadable extension artifact yet.** Installing into an
   existing Postgres means building from source; the images are the supported
   path today.
-- **Images are amd64 only**, so on arm64 everything runs under emulation.
+- **The Postgres image is amd64 only**; the gateway image supports amd64 and arm64, so only Postgres runs under emulation on arm64.
 - **What a query can reach is bounded by the gateway's RBAC**, not the SQL
   user's. To expose more kinds, change the ClusterRole and restart the gateway,
   then re-import — foreign tables are catalog objects and do not follow the
