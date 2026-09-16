@@ -10,7 +10,7 @@ COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 
 .PHONY: all proto proto-check gateway-build gateway-test gateway-lint gateway-vuln \
         ext-build ext-test ext-lint ext-fmt ext-audit unit lint docs-generate docs-check \
-        version changelog release-check release-notes up down e2e-preload e2e-ping e2e-phase0 e2e-pods e2e-phase1 e2e-configmaps e2e-phase2 e2e-watch e2e-phase3 e2e-crd e2e-phase4 e2e-cluster e2e-phase5 e2e
+        version changelog release-check release-notes up down e2e-preload e2e-install e2e-ping e2e-phase0 e2e-pods e2e-phase1 e2e-configmaps e2e-phase2 e2e-watch e2e-phase3 e2e-crd e2e-phase4 e2e-cluster e2e-phase5 e2e
 
 all: lint unit
 
@@ -117,6 +117,12 @@ down:
 # image with and without shared_preload_libraries.
 e2e-preload:
 	./e2e/preload_test.sh
+
+# Against the *published* images rather than a local build, so it needs no
+# build but does need the registry. Not part of `make e2e`: every other gate
+# tests the working tree, this one tests what is already on ghcr.io.
+e2e-install:
+	./e2e/install_test.sh
 
 e2e-ping:
 	./e2e/ping_test.sh

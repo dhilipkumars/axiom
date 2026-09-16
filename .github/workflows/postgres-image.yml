@@ -153,6 +153,53 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
+  # What a stranger gets, checked before the floating tags say it is current.
+  #
+  # Sitting between `build` and `promote` is the whole point: the version tags
+  # are already pushed and immutable by now, but `latest` has not moved, so a
+  # published image that cannot be pulled or does not install stops here
+  # instead of becoming what everyone gets by default. A gate that ran after
+  # promotion could only report the damage.
+  #
+  # It pulls with an empty DOCKER_CONFIG, because a private package and a
+  # public one are indistinguishable over the registry API -- both answer 401
+  # -- and the runner is logged in to push. Only a credential-free pull
+  # answers the question this gate exists for.
+  install-check:
+    name: a stranger can install it
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: helm/kind-action@v1
+        with:
+          install_only: true
+      # Derived from the event, the same way `build` and `promote` derive it,
+      # rather than read from `build`'s outputs. A matrix job's outputs are
+      # last-write-wins across its legs and are not guaranteed to be set at
+      # all; an empty one here would be worse than a wrong one, because
+      # install_test.sh would fall back to `development` and skip the version
+      # assertion, so a release would be gated on last night's images.
+      - env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "release" ]]; then
+            version="${RELEASE_TAG#v}"
+            [[ -n "$version" ]] || { echo "release event with an empty tag" >&2; exit 1; }
+            export E2E_INSTALL_TAG="$version"
+            # Only enforced for a release, where the tag states the version the
+            # image must report. A development image makes no such promise.
+            export E2E_INSTALL_VERSION="$version"
+            # Test the gateway this release ships, not last night's. The
+            # gateway workflow publishes this tag on the same event, so the
+            # script waits for it rather than assuming it is already there.
+            export E2E_INSTALL_GATEWAY="ghcr.io/dhilipkumars/axiom-gateway:${RELEASE_TAG}"
+          else
+            export E2E_INSTALL_TAG=development
+          fi
+          ./e2e/install_test.sh
+
   # Moving `latest` is a separate job so that it happens once, after every
   # major has been pushed, rather than three times as each finishes.
   #
@@ -166,7 +213,7 @@ jobs:
   # release.
   promote:
     name: move the floating tags
-    needs: build
+    needs: [build, install-check]
     if: github.event_name == 'release' && !github.event.release.prerelease
     runs-on: ubuntu-latest
     steps:
