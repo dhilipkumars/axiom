@@ -14,23 +14,26 @@
 #   E2E_INSTALL_TAG      tag prefix to test (default: development)
 #   E2E_INSTALL_VERSION  expected axiom_version(); skipped if unset
 #   E2E_INSTALL_MAJORS   majors to check (default: "16 17 18")
+#   E2E_INSTALL_GATEWAY  gateway image to run (default: the development tag)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TAG="${E2E_INSTALL_TAG:-development}"
 MAJORS="${E2E_INSTALL_MAJORS:-16 17 18}"
 PG_IMAGE=ghcr.io/dhilipkumars/axiom-postgres
-# The gateway is deliberately pinned to :development rather than the release
-# tag. Both images are published by separate workflows on the same event, so
-# requiring the release gateway here would make this gate race one. What this
-# gate is for is the Postgres image; the gateway's own correctness is covered
-# by every other gate in this suite, against a build from source.
-GW_IMAGE=ghcr.io/dhilipkumars/axiom-gateway:development
+# A release must test the gateway it is releasing, not last night's. The
+# gateway publishes :development only on schedule and dispatch, so on a release
+# that tag is whatever the last nightly pushed -- and if the release changed
+# the wire protocol, testing against it would either fail for the wrong reason
+# or pass while the real pair was broken.
+#
+# The two images are published by separate workflows on the same event, so the
+# release gateway may not exist yet when this starts. That is a wait, not a
+# reason to test the wrong thing: `wait_for_image` below bounds it.
+GW_IMAGE="${E2E_INSTALL_GATEWAY:-ghcr.io/dhilipkumars/axiom-gateway:development}"
 CLUSTER=axiom-install
 NODE="${CLUSTER}-control-plane"
 CONTAINER=axiom-install-pg
-# The newest major is what :latest becomes, so the full round trip runs there.
-NEWEST="$(echo "$MAJORS" | tr ' ' '\n' | sort -n | tail -1)"
 
 PLATFORM=()
 [[ "$(uname -m)" =~ ^(arm64|aarch64)$ ]] && PLATFORM=(--platform linux/amd64)
@@ -45,27 +48,47 @@ fail() { printf '\nE2E FAILED: %s\n' "$*" >&2; exit 1; }
 DOCKER_CONFIG="$(mktemp -d)"
 export DOCKER_CONFIG
 workdir="$(mktemp -d)"
+# Only delete a cluster this script created. Adopting one and then removing it
+# would destroy a cluster someone else was using that happened to share the
+# name, which is a bad trade for saving one `kind create`.
+created_cluster=0
 cleanup() {
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-  [[ "${E2E_INSTALL_KEEP:-0}" == "1" ]] || kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
+  if [[ "$created_cluster" == "1" && "${E2E_INSTALL_KEEP:-0}" != "1" ]]; then
+    kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
+  fi
   rm -rf "$DOCKER_CONFIG" "$workdir"
 }
 trap cleanup EXIT
 
-log "pulling with no credentials (tag: $TAG)"
-for pg in $MAJORS; do
-  ref="${PG_IMAGE}:${TAG}-pg${pg}"
-  out="$(docker pull "${PLATFORM[@]}" "$ref" 2>&1)" || {
+# Bounded wait, because a sibling workflow may still be pushing it. Anything
+# other than "not found" fails immediately: a private package or a missing
+# architecture will not fix itself by waiting.
+wait_for_image() {
+  local ref="$1" waited=0 out
+  while :; do
+    out="$(docker pull "${PLATFORM[@]}" "$ref" 2>&1)" && return 0
     case "$out" in
+      *"not found"*|*"manifest unknown"*)
+        (( waited >= 600 )) && fail "$ref never appeared after ${waited}s: $out"
+        [[ "$waited" == 0 ]] && echo "  waiting for $ref to be published"
+        sleep 15; waited=$(( waited + 15 )) ;;
       *denied*|*unauthorized*)
         fail "$ref is not publicly pullable. A new GHCR package is private until someone changes it: $out" ;;
       *"no matching manifest"*)
         fail "$ref has no image for this machine's architecture: $out" ;;
       *) fail "could not pull $ref: $out" ;;
     esac
-  }
-  echo "  $ref"
+  done
+}
+
+log "pulling with no credentials (tag: $TAG)"
+for pg in $MAJORS; do
+  wait_for_image "${PG_IMAGE}:${TAG}-pg${pg}"
+  echo "  ${PG_IMAGE}:${TAG}-pg${pg}"
 done
+wait_for_image "$GW_IMAGE"
+echo "  $GW_IMAGE"
 
 # Per-major, because the extension .so is the part that is built per major and
 # is therefore the part that can be wrong for one of them.
@@ -102,19 +125,34 @@ done
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 
 # The guide tells readers to apply the manifests from raw.githubusercontent.com,
-# so a 404 there breaks it for everyone even though nothing in this repository
-# changed. Checked separately from the apply below, which uses the checkout, so
-# a GitHub outage reports as what it is instead of failing the install.
-log "the manifest URLs the guide publishes still resolve"
+# so a 404 there breaks the published instructions even though nothing in this
+# repository changed. Worth knowing about, but not worth failing a release for:
+# a 5xx or a rate limit is GitHub having a bad day, and this gate is about
+# whether our images install. A 404 is ours and is reported as a failure; any
+# other non-200 is reported as unknown and does not stop the release.
+#
+# Always against main, deliberately: main is what the published guide points
+# at, so on a branch this answers "is the instruction people are following
+# broken", not "does my branch work".
+log "the manifest URLs the published guide points at"
 RAW=https://raw.githubusercontent.com/dhilipkumars/axiom/main/deploy/k8s
 for f in gateway-rbac.yaml gateway-deployment.yaml; do
-  code="$(curl -fsSL -o /dev/null -w '%{http_code}' "$RAW/$f" || true)"
-  [[ "$code" == "200" ]] || fail "$RAW/$f returned $code; the guide's install step is broken"
+  code="$(curl -fsSL -o /dev/null -w '%{http_code}' --max-time 20 "$RAW/$f" || true)"
+  case "$code" in
+    200) echo "  $f 200" ;;
+    404) fail "$RAW/$f is gone; the guide's install step is broken for everyone" ;;
+    *)   echo "  $f returned '$code' -- could not check (not treated as a failure)" ;;
+  esac
 done
 
-log "pg${NEWEST}: the whole procedure from docs/guides/for-agents.md"
+log "one cluster and one published gateway, shared by every major"
 cd "$workdir"
-kind get clusters | grep -qx "$CLUSTER" || kind create cluster --name "$CLUSTER" >/dev/null
+if kind get clusters | grep -qx "$CLUSTER"; then
+  echo "  reusing an existing cluster named $CLUSTER; it will not be deleted"
+else
+  kind create cluster --name "$CLUSTER" >/dev/null
+  created_cluster=1
+fi
 kubectl --context "kind-$CLUSTER" wait --for=condition=Ready node --all --timeout=180s >/dev/null
 
 mkdir -p certs
@@ -142,16 +180,30 @@ sed "s|image: ghcr.io/dhilipkumars/axiom-gateway:development|image: $GW_IMAGE|" 
 kubectl --context "kind-$CLUSTER" -n axiom-system rollout status deploy/axiom-gateway --timeout=180s >/dev/null \
   || fail "the published gateway image did not become ready"
 
-docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-docker run -d --name "$CONTAINER" "${PLATFORM[@]}" --network kind \
-  -e POSTGRES_PASSWORD=install-test -v "$PWD/certs:/certs:ro" \
-  "${PG_IMAGE}:${TAG}-pg${NEWEST}" >/dev/null
-for _ in $(seq 1 90); do
-  docker exec "$CONTAINER" pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1 && break
-  sleep 2
-done
+# kube-system is the comparison set, so it has to stop moving before SQL and
+# kubectl are asked the same question. Without this a CoreDNS pod appearing
+# between the two queries fails a perfectly good image.
+kubectl --context "kind-$CLUSTER" -n kube-system wait --for=condition=Ready pod --all --timeout=180s >/dev/null \
+  || fail "kube-system never settled; the comparison below would be a coin toss"
 
-docker exec -i "$CONTAINER" psql -U postgres -v ON_ERROR_STOP=1 >/dev/null <<SQL || fail "the guide's SQL failed"
+# Every major, not just the newest. `promote` moves latest-pg16, latest-pg17
+# and latest-pg18, and the extension is compiled separately for each against
+# that major's headers -- so a scan that breaks on one and not the others is
+# exactly the failure this gate should catch.
+for pg in $MAJORS; do
+  log "pg${pg}: the whole procedure from docs/guides/for-agents.md"
+  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$CONTAINER" "${PLATFORM[@]}" --network kind \
+    -e POSTGRES_PASSWORD=install-test -v "$PWD/certs:/certs:ro" \
+    "${PG_IMAGE}:${TAG}-pg${pg}" >/dev/null
+  for _ in $(seq 1 90); do
+    docker exec "$CONTAINER" pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1 && break
+    sleep 2
+  done
+  docker exec "$CONTAINER" pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1 \
+    || fail "pg${pg}: never became ready for the round trip"
+
+  docker exec -i "$CONTAINER" psql -U postgres -v ON_ERROR_STOP=1 >/dev/null <<SQL || fail "pg${pg}: the guide's SQL failed"
 CREATE EXTENSION axiom;
 CREATE SERVER prod FOREIGN DATA WRAPPER axiom_fdw
   OPTIONS (endpoint 'https://${NODE}:30443', ca_cert '/certs/ca.crt');
@@ -160,22 +212,22 @@ CREATE SCHEMA k8s;
 IMPORT FOREIGN SCHEMA k8s FROM SERVER prod INTO k8s;
 SQL
 
-log "the success criterion: SQL agrees with kubectl"
-# The guide's own criterion. Compared against the cluster rather than asserted
-# to be non-empty, because "returns some rows" would pass on a cache that is
-# quietly serving the wrong collection.
-sql_pods="$(docker exec "$CONTAINER" psql -U postgres -tAc \
-  "SELECT name FROM k8s.pods WHERE namespace='kube-system' ORDER BY name")"
-kubectl_pods="$(kubectl --context "kind-$CLUSTER" -n kube-system get pods \
-  -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort)"
-[[ -n "$sql_pods" ]] || fail "the pods query returned nothing"
-if [[ "$sql_pods" != "$kubectl_pods" ]]; then
-  fail "SQL and kubectl disagree.
+  # The guide's own success criterion. Compared against the cluster rather than
+  # asserted non-empty, because "returns some rows" would pass on a cache
+  # quietly serving the wrong collection.
+  sql_pods="$(docker exec "$CONTAINER" psql -U postgres -tAc \
+    "SELECT name FROM k8s.pods WHERE namespace='kube-system' ORDER BY name")"
+  kubectl_pods="$(kubectl --context "kind-$CLUSTER" -n kube-system get pods \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort)"
+  [[ -n "$sql_pods" ]] || fail "pg${pg}: the pods query returned nothing"
+  if [[ "$sql_pods" != "$kubectl_pods" ]]; then
+    fail "pg${pg}: SQL and kubectl disagree.
 SQL:
 $sql_pods
 kubectl:
 $kubectl_pods"
-fi
-echo "$(wc -l <<<"$sql_pods" | tr -d ' ') pods, identical in SQL and kubectl"
+  fi
+  echo "  pg${pg}: $(wc -l <<<"$sql_pods" | tr -d ' ') pods, identical in SQL and kubectl"
+done
 
 log "INSTALL E2E PASSED"
