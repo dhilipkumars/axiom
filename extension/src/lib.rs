@@ -5,10 +5,11 @@
 //! `axiom_fdw` foreign data wrapper with read-only, on-demand scans of Pods
 //! (`fdw.rs`), backed by per-backend unary RPCs (`client.rs`).
 //!
-//! The background worker is only started when the library is listed in
-//! `shared_preload_libraries`; `CREATE EXTENSION axiom` alone installs the SQL
-//! objects and GUC definitions but cannot register a static worker (Postgres
-//! restriction), and says so loudly rather than silently doing nothing.
+//! The library must be listed in `shared_preload_libraries`. That is not a
+//! recommendation: two of the `axiom.*` GUCs are `PGC_POSTMASTER`, and
+//! Postgres refuses to create those after startup, so loading on demand cannot
+//! work at all. `_PG_init` says so before trying, because the failure Postgres
+//! would otherwise raise names neither this extension nor the setting.
 
 use pgrx::prelude::*;
 
@@ -43,25 +44,37 @@ fn axiom_version() -> &'static str {
 
 /// Postgres calls this once per process when the library is loaded.
 ///
-/// Side effects: defines the `axiom.*` GUCs (always) and registers the gateway
-/// pinger background worker (only under `shared_preload_libraries`, otherwise
-/// a WARNING is emitted explaining why the worker was not started).
+/// Refuses to load unless preloaded, then defines the `axiom.*` GUCs, maps the
+/// shared cache and registers the background worker.
 #[allow(non_snake_case)]
 #[pg_guard]
 pub extern "C-unwind" fn _PG_init() {
-    bgworker::define_gucs();
     // SAFETY: reading a plain `bool` global that Postgres sets before calling
     // `_PG_init` and never mutates concurrently with it.
     let preloading = unsafe { pg_sys::process_shared_preload_libraries_in_progress };
-    if preloading {
-        shmem::init();
-        bgworker::register();
-    } else {
-        warning!(
-            "axiom: not loaded via shared_preload_libraries; the gateway background worker \
-             will not run. Add `shared_preload_libraries = 'axiom'` to postgresql.conf and restart."
+    if !preloading {
+        // Checked *before* define_gucs, which is the whole point of this
+        // branch. `axiom.cache_size_mb` and `axiom.notify_database` are
+        // PGC_POSTMASTER, and DefineCustomVariable raises FATAL for those
+        // after startup: "cannot create PGC_POSTMASTER variables after
+        // startup". That names neither this extension nor the setting that
+        // fixes it, and FATAL takes the client's connection with it.
+        //
+        // So the same situation is reported here instead, as an ERROR, which
+        // fails the statement and leaves the session alive. The order used to
+        // be the other way round, which made this branch unreachable.
+        ereport!(
+            PgLogLevel::ERROR,
+            PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            "axiom must be loaded through shared_preload_libraries",
+            "Add `shared_preload_libraries = 'axiom'` to postgresql.conf, restart Postgres, \
+             then run CREATE EXTENSION axiom. Axiom needs a background worker and a shared \
+             memory cache, neither of which can be set up after startup."
         );
     }
+    bgworker::define_gucs();
+    shmem::init();
+    bgworker::register();
 }
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -89,6 +102,29 @@ mod tests {
             Spi::get_one::<&str>("SHOW axiom.rpc_timeout_secs"),
             Ok(Some("1"))
         );
+    }
+
+    /// Why `_PG_init` refuses to load at all without preloading.
+    ///
+    /// These two GUCs are `PGC_POSTMASTER`, and `DefineCustomVariable` raises
+    /// FATAL for that context after startup. That is what makes loading on
+    /// demand impossible rather than merely degraded, and it is the reason
+    /// `_PG_init` checks the preload flag before defining anything.
+    ///
+    /// If either ever stops being postmaster-scoped, this fails, and the hard
+    /// error in `_PG_init` is worth revisiting: it might then be honest to
+    /// load with the cache disabled instead of refusing.
+    #[pg_test]
+    fn the_postmaster_gucs_are_what_force_preloading() {
+        for guc in ["axiom.cache_size_mb", "axiom.notify_database"] {
+            assert_eq!(
+                Spi::get_one::<&str>(&format!(
+                    "SELECT context FROM pg_settings WHERE name = '{guc}'"
+                )),
+                Ok(Some("postmaster")),
+                "{guc} must stay postmaster-scoped, or _PG_init's hard error is wrong"
+            );
+        }
     }
 
     /// The test harness preloads the library, so the static worker must be
