@@ -35,6 +35,11 @@ CLUSTER=axiom-install
 NODE="${CLUSTER}-control-plane"
 CONTAINER=axiom-install-pg
 
+# Expanded as ${PLATFORM[@]+"${PLATFORM[@]}"} everywhere below, not
+# "${PLATFORM[@]}": on x86_64 this array is empty, and bash 3.2 -- which is
+# what macOS ships -- treats an empty array expansion as an unbound variable
+# under `set -u`. bash 4.4 and later do not, so the plain form works in CI and
+# fails only for a developer on an Intel Mac.
 PLATFORM=()
 [[ "$(uname -m)" =~ ^(arm64|aarch64)$ ]] && PLATFORM=(--platform linux/amd64)
 
@@ -66,13 +71,24 @@ trap cleanup EXIT
 # architecture will not fix itself by waiting.
 wait_for_image() {
   local ref="$1" waited=0 out
+  shift
+  local -a plat=("$@")
   while :; do
-    out="$(docker pull "${PLATFORM[@]}" "$ref" 2>&1)" && return 0
+    out="$(docker pull ${plat[@]+"${plat[@]}"} "$ref" 2>&1)" && return 0
     case "$out" in
       *"not found"*|*"manifest unknown"*)
         (( waited >= 600 )) && fail "$ref never appeared after ${waited}s: $out"
         [[ "$waited" == 0 ]] && echo "  waiting for $ref to be published"
         sleep 15; waited=$(( waited + 15 )) ;;
+      # The registry having a bad minute is not a broken release. Retried on
+      # the same budget, and reported as itself if it never clears.
+      *timeout*|*"connection reset"*|*"no such host"*|*"429"*|*"TLS handshake"*|*EOF*)
+        (( waited >= 600 )) && fail "$ref: the registry kept failing for ${waited}s: $out"
+        [[ "$waited" == 0 ]] && echo "  registry trouble pulling $ref, retrying"
+        sleep 15; waited=$(( waited + 15 )) ;;
+      # Deliberately fatal, and deliberately not retried: a package that is
+      # private is the failure this gate exists to catch, and waiting would
+      # turn a clear answer into a ten-minute timeout.
       *denied*|*unauthorized*)
         fail "$ref is not publicly pullable. A new GHCR package is private until someone changes it: $out" ;;
       *"no matching manifest"*)
@@ -84,9 +100,13 @@ wait_for_image() {
 
 log "pulling with no credentials (tag: $TAG)"
 for pg in $MAJORS; do
-  wait_for_image "${PG_IMAGE}:${TAG}-pg${pg}"
+  wait_for_image "${PG_IMAGE}:${TAG}-pg${pg}" ${PLATFORM[@]+"${PLATFORM[@]}"}
   echo "  ${PG_IMAGE}:${TAG}-pg${pg}"
 done
+# No platform override for the gateway: it is published multi-architecture, and
+# kind pulls whichever slice the node needs. Forcing amd64 here would check a
+# slice this machine's cluster will not run, and would hide a missing arm64
+# publish on an arm64 host.
 wait_for_image "$GW_IMAGE"
 echo "  $GW_IMAGE"
 
@@ -95,7 +115,7 @@ echo "  $GW_IMAGE"
 for pg in $MAJORS; do
   log "pg${pg}: the image installs and reports itself"
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-  docker run -d --name "$CONTAINER" "${PLATFORM[@]}" \
+  docker run -d --name "$CONTAINER" ${PLATFORM[@]+"${PLATFORM[@]}"} \
     -e POSTGRES_PASSWORD=install-test "${PG_IMAGE}:${TAG}-pg${pg}" >/dev/null
   for _ in $(seq 1 90); do
     docker exec "$CONTAINER" pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1 && break
@@ -177,6 +197,12 @@ kubectl --context "kind-$CLUSTER" -n axiom-system create secret generic axiom-ga
 # registry, so side-loading a build from source would defeat it.
 sed "s|image: ghcr.io/dhilipkumars/axiom-gateway:development|image: $GW_IMAGE|" \
   "$ROOT/deploy/k8s/gateway-deployment.yaml" | kubectl --context "kind-$CLUSTER" apply -f - >/dev/null
+# The guide restarts here for a reason this script needs even more: on a reused
+# cluster the Deployment is unchanged, so `apply` alone leaves the running pod
+# holding the certificate from the previous run while the Secret has been
+# replaced -- and the TLS handshake then fails several steps later, where the
+# cause is no longer visible.
+kubectl --context "kind-$CLUSTER" -n axiom-system rollout restart deploy/axiom-gateway >/dev/null
 kubectl --context "kind-$CLUSTER" -n axiom-system rollout status deploy/axiom-gateway --timeout=180s >/dev/null \
   || fail "the published gateway image did not become ready"
 
@@ -193,7 +219,7 @@ kubectl --context "kind-$CLUSTER" -n kube-system wait --for=condition=Ready pod 
 for pg in $MAJORS; do
   log "pg${pg}: the whole procedure from docs/guides/for-agents.md"
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-  docker run -d --name "$CONTAINER" "${PLATFORM[@]}" --network kind \
+  docker run -d --name "$CONTAINER" ${PLATFORM[@]+"${PLATFORM[@]}"} --network kind \
     -e POSTGRES_PASSWORD=install-test -v "$PWD/certs:/certs:ro" \
     "${PG_IMAGE}:${TAG}-pg${pg}" >/dev/null
   for _ in $(seq 1 90); do
@@ -203,31 +229,54 @@ for pg in $MAJORS; do
   docker exec "$CONTAINER" pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1 \
     || fail "pg${pg}: never became ready for the round trip"
 
+  # The guide's statements, guards included: it publishes them as re-runnable,
+  # so running a different, stricter version here would not be testing the
+  # thing the page tells people to do.
   docker exec -i "$CONTAINER" psql -U postgres -v ON_ERROR_STOP=1 >/dev/null <<SQL || fail "pg${pg}: the guide's SQL failed"
-CREATE EXTENSION axiom;
+CREATE EXTENSION IF NOT EXISTS axiom;
+DROP SERVER IF EXISTS prod CASCADE;
 CREATE SERVER prod FOREIGN DATA WRAPPER axiom_fdw
   OPTIONS (endpoint 'https://${NODE}:30443', ca_cert '/certs/ca.crt');
 CREATE USER MAPPING FOR CURRENT_USER SERVER prod;
-CREATE SCHEMA k8s;
+CREATE SCHEMA IF NOT EXISTS k8s;
 IMPORT FOREIGN SCHEMA k8s FROM SERVER prod INTO k8s;
 SQL
 
-  # The guide's own success criterion. Compared against the cluster rather than
-  # asserted non-empty, because "returns some rows" would pass on a cache
-  # quietly serving the wrong collection.
-  sql_pods="$(docker exec "$CONTAINER" psql -U postgres -tAc \
-    "SELECT name FROM k8s.pods WHERE namespace='kube-system' ORDER BY name")"
+  # The guide's own post-import check, before the scan.
+  tables="$(docker exec "$CONTAINER" psql -U postgres -tAc \
+    "SELECT count(*) FROM information_schema.tables WHERE table_schema='k8s'")"
+  [[ "${tables:-0}" -gt 0 ]] || fail "pg${pg}: the import created no tables"
+
+  # The guide's success criterion, all four columns of it. `name` alone would
+  # pass on an extension that had broken the promoted columns entirely:
+  # `phase` and `node` come from status.phase and spec.nodeName, which is the
+  # schema mapping this image exists to perform, and comparing only the key
+  # skips it.
+  #
+  # Both sides are sorted the same way. Postgres ORDER BY follows the
+  # database's collation and the shell's `sort` follows the caller's locale,
+  # and hyphenated pod names are exactly where those two disagree, so a healthy
+  # build would fail on some hosts and not others.
+  #
+  # kube-system is re-checked immediately before the query: the loop spans
+  # several minutes across majors, and a pod replaced in between would
+  # otherwise be read by one side and not the other.
+  kubectl --context "kind-$CLUSTER" -n kube-system wait --for=condition=Ready pod --all --timeout=180s >/dev/null \
+    || fail "pg${pg}: kube-system stopped being settled; the comparison would be a coin toss"
+  sql_pods="$(docker exec "$CONTAINER" psql -U postgres -tAF'|' -c \
+    "SELECT name, phase, node FROM k8s.pods WHERE namespace='kube-system' ORDER BY name COLLATE \"C\"")"
   kubectl_pods="$(kubectl --context "kind-$CLUSTER" -n kube-system get pods \
-    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort)"
+    -o jsonpath='{range .items[*]}{.metadata.name}|{.status.phase}|{.spec.nodeName}{"\n"}{end}' \
+    | LC_ALL=C sort)"
   [[ -n "$sql_pods" ]] || fail "pg${pg}: the pods query returned nothing"
   if [[ "$sql_pods" != "$kubectl_pods" ]]; then
-    fail "pg${pg}: SQL and kubectl disagree.
+    fail "pg${pg}: SQL and kubectl disagree on name|phase|node.
 SQL:
 $sql_pods
 kubectl:
 $kubectl_pods"
   fi
-  echo "  pg${pg}: $(wc -l <<<"$sql_pods" | tr -d ' ') pods, identical in SQL and kubectl"
+  echo "  pg${pg}: $(wc -l <<<"$sql_pods" | tr -d ' ') pods, name/phase/node identical in SQL and kubectl"
 done
 
 log "INSTALL E2E PASSED"
