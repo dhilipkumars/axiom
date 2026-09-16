@@ -16,15 +16,30 @@ that is a bug worth reporting.
 
 ## 1. A cluster
 
-Any cluster works. If you do not have one:
+**This walkthrough is written for [kind](https://kind.sigs.k8s.io).** Not
+because Axiom needs it — the gateway runs on any cluster — but because of how
+Postgres reaches the gateway here. Every kind cluster attaches to one Docker
+network called `kind`, so running Postgres on that network lets it dial the
+node container directly, and no port mapping or ingress is needed. On another
+cluster you have to expose the gateway some other way first;
+[Deploying the gateway](deploying.md) covers the choices, and step 5 is where
+the endpoint changes.
+
+Create one, or reuse a cluster you already have:
 
 ```sh
-kind create cluster --name axiom
+CLUSTER=axiom
+kind get clusters | grep -qx "$CLUSTER" || kind create cluster --name "$CLUSTER"
+
+NODE="${CLUSTER}-control-plane"
+kubectl config use-context "kind-${CLUSTER}"
+kubectl wait --for=condition=Ready node --all --timeout=180s
 ```
 
-Note the node's container name, `axiom-control-plane`. Postgres dials the
-gateway through it, which is why this guide never needs a port mapping: both
-containers sit on the `kind` Docker network and talk directly.
+`$NODE` is the cluster's node container, and the rest of this guide uses it:
+it goes in the certificate, and it is the host Postgres dials. **Keep these
+two variables set for the whole walkthrough** — a new shell means setting them
+again.
 
 ## 2. A TLS keypair
 
@@ -39,7 +54,7 @@ docker run --rm -v "$PWD/certs:/certs" -w /certs \
       -days 365 -subj '/CN=axiom-dev-ca' -keyout ca.key -out ca.crt
     openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
       -subj '/CN=gateway' -keyout gateway.key -out gateway.csr
-    printf 'subjectAltName=DNS:axiom-control-plane,DNS:axiom-gateway.axiom-system.svc,DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n' > san.cnf
+    printf 'subjectAltName=DNS:$NODE,DNS:axiom-gateway.axiom-system.svc,DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n' > san.cnf
     openssl x509 -req -in gateway.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
       -days 365 -extfile san.cnf -out gateway.crt
     rm -f gateway.csr san.cnf ca.srl ca.key
@@ -57,10 +72,18 @@ certificates it produces are rejected in three ways that name nothing useful:
 | signs with SHA-1 by default | `UnsupportedSignatureAlgorithmContext` from the extension |
 | CA key with explicit parameters | `UnsupportedSignatureAlgorithmForPublicKeyContext` |
 
+`$NODE` is expanded by your shell before the container sees it, so the
+certificate names your cluster's node. Check it if you changed `CLUSTER`:
+
+```sh
+docker run --rm -v "$PWD/certs:/certs:ro" alpine/openssl:3.3.3 \
+  x509 -in /certs/gateway.crt -noout -ext subjectAltName
+```
+
 If you generate the keypair another way, the requirements are **named-curve EC
 or RSA keys, and SHA-256 signatures**. The subject alternative names must cover
-the name Postgres dials — `axiom-control-plane` here. rustls verifies the SAN
-against that name, and a miss is a handshake failure, not a warning.
+the name Postgres dials. rustls verifies the SAN against that name, and a miss
+is a handshake failure, not a warning.
 
 ## 3. The gateway, in the cluster
 
@@ -132,8 +155,9 @@ docker run -d --name axiom-postgres --platform linux/amd64 \
 Three things in that command matter:
 
 - **`--network kind`** puts Postgres on the same Docker network as the cluster
-  node, so it can reach the gateway's `NodePort` at `axiom-control-plane:30443`
-  without any port mapping on the cluster.
+  node, so it can reach the gateway's `NodePort` at `$NODE:30443` without any
+  port mapping on the cluster. Every kind cluster uses this one network,
+  whatever the cluster is called.
 - **`-v "$PWD/certs:/certs:ro"`** because `ca_cert` below is a path on the
   *Postgres server's* filesystem, read by the backend process. Inside this
   container that is `/certs/ca.crt`.
@@ -150,22 +174,31 @@ tag to match the Postgres you want.
 
 ## 5. Install and connect
 
-```sh
-docker exec -it axiom-postgres psql -U postgres
-```
+The endpoint has to name your cluster's node, so run this from the shell that
+has `$NODE` set rather than typing it into `psql` — the heredoc is unquoted, so
+the shell substitutes it before Postgres sees it:
 
-```sql
+```sh
+docker exec -i axiom-postgres psql -U postgres -v ON_ERROR_STOP=1 <<SQL
 CREATE EXTENSION axiom;
 SELECT axiom_version();
 
 CREATE SERVER prod
   FOREIGN DATA WRAPPER axiom_fdw
   OPTIONS (
-    endpoint 'https://axiom-control-plane:30443',
+    endpoint 'https://${NODE}:30443',
     ca_cert  '/certs/ca.crt'
   );
 
 CREATE USER MAPPING FOR CURRENT_USER SERVER prod;
+SQL
+```
+
+If you would rather work interactively from here on, the rest of this guide is
+plain SQL with nothing to substitute:
+
+```sh
+docker exec -it axiom-postgres psql -U postgres
 ```
 
 The user mapping carries no options today, so it takes no `OPTIONS` clause;
@@ -231,7 +264,7 @@ Postgres at all: it is not a trusted extension and needs
 
 ```sh
 docker rm -f axiom-postgres
-kind delete cluster --name axiom
+kind delete cluster --name "$CLUSTER"
 rm -rf certs
 ```
 
