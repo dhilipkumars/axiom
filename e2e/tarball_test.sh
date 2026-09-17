@@ -53,10 +53,15 @@ for pg in $MAJORS; do
   # Exactly what INSTALL.md tells a reader to do, so the instructions are what
   # is under test and not a paraphrase of them.
   docker cp "$tarball" "$CONTAINER:/tmp/axiom.tar.gz" >/dev/null
+  # INSTALL.md's own commands, through pg_config, rather than a paraphrase:
+  # the instructions are what is under test. A path that pg_config disagrees
+  # with is the failure this is looking for.
   docker exec "$CONTAINER" sh -c '
     set -e
-    cd /tmp && tar -xzf axiom.tar.gz
-    cp -r axiom-*/usr/. /usr/' || fail "pg${pg}: unpacking failed"
+    cd /tmp && tar -xzf axiom.tar.gz && cd axiom-*/
+    cp usr/lib/postgresql/*/lib/axiom.so       "$(pg_config --pkglibdir)/"
+    cp usr/share/postgresql/*/extension/axiom* "$(pg_config --sharedir)/extension/"
+  ' || fail "pg${pg}: installing per INSTALL.md failed"
 
   log "pg${pg}: without the preload it refuses, naming the setting"
   out="$(docker exec "$CONTAINER" psql -U postgres -c 'CREATE EXTENSION axiom;' 2>&1 || true)"
@@ -93,9 +98,36 @@ for pg in $MAJORS; do
   docker exec "$CONTAINER" psql -U postgres -tAc 'SELECT count(*) FROM axiom_watch_status()' >/dev/null \
     || fail "pg${pg}: axiom_watch_status() failed, so shared memory was not mapped"
 
-  # A tarball for the wrong major must not silently half-work.
   server="$(docker exec "$CONTAINER" psql -U postgres -tAc 'SHOW server_version_num')"
   [[ "$server" == "${pg}"* ]] || fail "pg${pg}: server reports $server"
+
+  # A tarball built for a different major must fail loudly, not half-work.
+  # Asserted by actually doing it: the .so from another major is dropped in
+  # and the library must refuse to load. Without this the claim rests on
+  # nobody having tried it.
+  other=""
+  for cand in $MAJORS; do [[ "$cand" != "$pg" ]] && { other="$cand"; break; }; done
+  if [[ -n "$other" ]]; then
+    other_tar="$ROOT/dist/axiom-${VERSION}-pg${other}-linux-${ARCH}.tar.gz"
+    if [[ -f "$other_tar" ]]; then
+      docker cp "$other_tar" "$CONTAINER:/tmp/other.tar.gz" >/dev/null
+      docker exec "$CONTAINER" sh -c '
+        set -e
+        cd /tmp && rm -rf wrong && mkdir wrong && tar -xzf other.tar.gz -C wrong
+        cp wrong/axiom-*/usr/lib/postgresql/*/lib/axiom.so "$(pg_config --pkglibdir)/axiom.so"
+      ' || fail "pg${pg}: could not stage the pg${other} library"
+      # Success is the only failure. Asserted on the exit status rather than on
+      # the message, because the ways this goes wrong differ: an undefined
+      # symbol is a clean ERROR, while a deeper ABI mismatch takes the backend
+      # down and psql reports a lost connection. Both are rejections; only a
+      # clean load means the wrong library was accepted.
+      if docker exec "$CONTAINER" psql -U postgres -v ON_ERROR_STOP=1 \
+           -tAc "LOAD 'axiom'" >/dev/null 2>&1; then
+        fail "pg${pg}: a pg${other} library loaded without complaint"
+      fi
+      echo "  pg${pg}: a pg${other} library is rejected, not half-loaded"
+    fi
+  fi
   echo "  pg${pg}: installed into stock postgres:${pg}, axiom ${got}, worker running"
 done
 

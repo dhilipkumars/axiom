@@ -160,8 +160,6 @@ jobs:
     name: pg${{ matrix.pg }} manifest
     needs: build
     runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.image.outputs.version }}
     strategy:
       fail-fast: false
       matrix:
@@ -190,11 +188,22 @@ jobs:
             version=development
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Asserted, not assumed. `imagetools create` defaults to
+          # --prefer-index, so handing it one digest produces a perfectly
+          # valid single-architecture manifest list and tags it -- which looks
+          # exactly like the missing-arm64 bug this whole change exists to
+          # fix. An unmatched glob would also pass the literal "*" through as
+          # a reference.
+          shopt -s nullglob
           refs=()
-          for f in /tmp/digests/*; do
-            name="$(basename "$f")"
+          for arch in amd64 arm64; do
+            found=(/tmp/digests/"$arch"-*)
+            (( ${#found[@]} == 1 )) \
+              || { echo "expected exactly one $arch digest, found ${#found[@]}" >&2; exit 1; }
+            name="$(basename "${found[0]}")"
             refs+=("$IMAGE_NAME@sha256:${name#*-}")
           done
+          (( ${#refs[@]} == 2 )) || { echo "need both architectures" >&2; exit 1; }
           docker buildx imagetools create \
             --tag "$IMAGE_NAME:${version}-pg${{ matrix.pg }}" "${refs[@]}"
 
@@ -207,7 +216,7 @@ jobs:
   # moving download would be worse than none.
   artifacts:
     name: pg${{ matrix.pg }} ${{ matrix.arch }} tarball
-    needs: gate
+    needs: [merge, install-check]
     if: github.event_name == 'release' && needs.gate.outputs.build == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -227,13 +236,42 @@ jobs:
         run: ./scripts/version check "$RELEASE_TAG"
       - uses: docker/setup-buildx-action@v3
       - run: ./scripts/package-extension "${{ matrix.pg }}" "${{ matrix.arch }}"
-      # Uploaded per job rather than by a later one: a release asset that
-      # exists is better than a matrix that half-succeeded and published
-      # nothing, and `gh release upload` is idempotent with --clobber.
+      # Handed to `publish` rather than uploaded here. Six jobs calling
+      # `gh release upload` on one release race on the asset API, and a
+      # half-uploaded set is worse than none: someone downloads the tarball
+      # for their major and finds no checksum beside it.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball-${{ matrix.pg }}-${{ matrix.arch }}
+          path: dist/*
+          retention-days: 1
+
+  # One job, one upload, after every tarball exists. So the release either has
+  # the complete set or none of it.
+  publish-artifacts:
+    name: attach tarballs to the release
+    needs: artifacts
+    if: github.event_name == 'release'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tarball-*
+          merge-multiple: true
+          path: dist
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$RELEASE_TAG" dist/* --clobber
+        run: |
+          set -euo pipefail
+          # Six majors-and-architectures, each with a tarball and a checksum.
+          # Counted rather than trusted: download-artifact merging fewer than
+          # expected would otherwise publish a quietly incomplete release.
+          count="$(find dist -name '*.tar.gz' | wc -l)"
+          [[ "$count" -eq 6 ]] || { echo "expected 6 tarballs, found $count" >&2; exit 1; }
+          gh release upload "$RELEASE_TAG" dist/* --clobber
 
   # What a stranger gets, checked before the floating tags say it is current.
   #

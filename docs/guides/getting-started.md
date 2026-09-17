@@ -279,8 +279,9 @@ the paths a Debian-packaged Postgres uses. Unpack them over your installation:
 sudo cp -r axiom-$V-pg$PG-linux-$ARCH/usr/. /usr/
 ```
 
-If your Postgres does not use those paths — a source build, or Homebrew — place
-the two pieces where `pg_config` says they belong:
+If your Postgres does not use those paths — a source build, or a non-Debian
+package — place the two pieces where `pg_config` says they belong. This is
+still Linux only; see the limits below.
 
 ```sh
 sudo cp axiom-$V-pg$PG-linux-$ARCH/usr/lib/postgresql/$PG/lib/axiom.so \

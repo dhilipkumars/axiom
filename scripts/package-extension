@@ -5,10 +5,14 @@
 #   scripts/package-extension 17               # -> dist/axiom-<version>-pg17-linux-<arch>.tar.gz
 #   scripts/package-extension 17 arm64         # cross-arch, via emulation
 #
-# The tree comes from extension/Dockerfile's `artifact` stage, which is the
-# same build the published image copies from -- so packaging and imaging are
-# one compile, and the files in the tarball are byte-identical to the ones in
-# the image. Nothing is built twice and nothing can drift between them.
+# The tree comes from extension/Dockerfile's `artifact` stage, which exports
+# exactly what the image stage copies in -- so a tarball and an image of one
+# version are built from the same source by the same recipe, and neither can
+# gain a file the other lacks.
+#
+# They are not the same *compile*: in CI these are separate jobs on separate
+# runners with no shared cache, so each builds its own. Do not describe the
+# binaries as byte-identical.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -40,7 +44,15 @@ DOCKER_BUILDKIT=1 docker build \
 # --pkglibdir` and `--sharedir` resolve to on a Debian-packaged Postgres, which
 # is what the install instructions unpack over.
 so="${STAGE}/${NAME}/usr/lib/postgresql/${PG_MAJOR}/lib/axiom.so"
+ext="${STAGE}/${NAME}/usr/share/postgresql/${PG_MAJOR}/extension"
 [[ -f "$so" ]] || { echo "package-extension: no axiom.so in the exported tree" >&2; exit 1; }
+# All three, not just the library: CREATE EXTENSION reads the control file to
+# find the SQL script, so a tarball with only the .so installs nothing and
+# fails for whoever downloads it rather than here.
+[[ -f "$ext/axiom.control" ]] \
+  || { echo "package-extension: no axiom.control in the exported tree" >&2; exit 1; }
+compgen -G "$ext/axiom--*.sql" >/dev/null \
+  || { echo "package-extension: no axiom--*.sql in the exported tree" >&2; exit 1; }
 
 # Fail rather than ship a tarball for the wrong machine. `--platform` is
 # advisory if the builder cannot honour it, and an amd64 .so inside a file
@@ -55,14 +67,16 @@ cp "$ROOT/LICENSE" "${STAGE}/${NAME}/LICENSE" 2>/dev/null || true
 cat > "${STAGE}/${NAME}/INSTALL.md" <<EOF
 # Axiom ${VERSION} for PostgreSQL ${PG_MAJOR} (linux/${ARCH})
 
-Unpack over the Postgres installation, then enable the extension.
+Place the files where this Postgres looks for them. \`pg_config\` is the
+authority, so ask it rather than guessing a layout:
 
-    sudo cp -r usr/. "\$(pg_config --prefix 2>/dev/null || echo /usr)"/
-
-If \`pg_config\` disagrees with that layout, place the two files directly:
-
-    sudo cp usr/lib/postgresql/${PG_MAJOR}/lib/axiom.so   "\$(pg_config --pkglibdir)/"
+    sudo cp usr/lib/postgresql/${PG_MAJOR}/lib/axiom.so       "\$(pg_config --pkglibdir)/"
     sudo cp usr/share/postgresql/${PG_MAJOR}/extension/axiom* "\$(pg_config --sharedir)/extension/"
+
+On a Debian or Ubuntu package these resolve to the paths already in this
+tarball, so unpacking the tree over / does the same thing:
+
+    sudo cp -r usr/. /usr/
 
 Axiom **must** be preloaded. It registers PGC_POSTMASTER settings, so
 \`CREATE EXTENSION\` fails outright without this rather than running degraded:

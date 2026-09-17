@@ -16,8 +16,9 @@ sudo cp -r axiom-$V-pg$PG-linux-$ARCH/usr/. /usr/
 ```
 
 Each tarball carries a `.sha256` beside it and an `INSTALL.md`, and the files
-come from the same build the published image is made from, so a tarball and an
-image of one version contain byte-identical binaries.
+are exported from the same Dockerfile stage the published image is built from,
+so a tarball and an image of one version are made from the same source by the
+same recipe.
 
 They are built on Debian bookworm (glibc 2.36) and will not load on an older
 glibc such as bullseye or RHEL 8 — the failure is at load time, so Postgres
