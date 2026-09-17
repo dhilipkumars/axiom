@@ -53,16 +53,35 @@ jobs:
             echo "main has not moved in 25h; skipping the nightly publish" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-  publish:
+  # Built on the runner that matches the architecture, not under emulation.
+  #
+  # QEMU took about ten minutes to produce an arm64 Go binary (#28). Native
+  # arm64 runners are free for public repositories, so each architecture is
+  # compiled on its own machine in parallel, and `merge` below joins them.
+  #
+  # Each job pushes by *digest* rather than by tag: two jobs pushing the same
+  # tag would race, with the loser's architecture silently dropped from the
+  # published image. Nothing is tagged until both digests exist.
+  build:
+    name: ${{ matrix.arch }}
     needs: gate
     if: needs.gate.outputs.build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
 
       # A release must carry the version it says it does. Checked before
       # anything is pushed, so a mistyped tag fails here rather than becoming a
       # published image nobody can unpublish.
+      #
       # Through env, not interpolated into the script: a `${{ }}` expression is
       # substituted into the shell source before it runs, so a tag containing
       # shell metacharacters would be evaluated rather than compared. Git
@@ -77,39 +96,76 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           if [[ "$GITHUB_EVENT_NAME" == "release" ]]; then
-            echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
             echo "build_version=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-            # A prerelease publishes its own tag but must not move :latest,
-            # which is the one thing someone pulling without a version is
-            # trusting to be the current stable release.
-            echo "publish_latest=${{ github.event.release.prerelease && 'false' || 'true' }}" >> "$GITHUB_OUTPUT"
           else
             echo "build_version=development" >> "$GITHUB_OUTPUT"
-            echo "publish_latest=false" >> "$GITHUB_OUTPUT"
           fi
-      - uses: docker/setup-qemu-action@v3
+
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          tags: |
-            # Main branch publishes a moving development tag; published releases
-            # additionally publish their own semver tag and move :latest.
-            type=raw,value=development,enable=${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-            type=raw,value=${{ steps.image.outputs.release_tag }},enable=${{ github.event_name == 'release' }}
-            type=raw,value=latest,enable=${{ steps.image.outputs.publish_latest == 'true' }}
-      - uses: docker/build-push-action@v6
+
+      - id: push
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: gateway/Dockerfile
           build-args: VERSION=${{ steps.image.outputs.build_version }}
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+
+      # The digest is how `merge` finds this build. A file per architecture,
+      # so the two jobs cannot collide on one artifact name.
+      - run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${{ matrix.arch }}-${{ steps.push.outputs.digest }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gateway-digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+  # Joins the per-architecture digests into one manifest list and puts the tags
+  # on it. This is the only step that tags anything, so a published tag always
+  # has both architectures or does not exist.
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gateway-digest-*
+          merge-multiple: true
+          path: /tmp/digests
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          IS_PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          set -euo pipefail
+          tags=()
+          if [[ "$GITHUB_EVENT_NAME" == "release" ]]; then
+            [[ -n "$RELEASE_TAG" ]] || { echo "release event with an empty tag" >&2; exit 1; }
+            tags+=(--tag "$IMAGE_NAME:$RELEASE_TAG")
+            # A prerelease publishes its own tag but must not move :latest,
+            # which is what someone pulling without a version is trusting to be
+            # the current stable release.
+            [[ "$IS_PRERELEASE" == "true" ]] || tags+=(--tag "$IMAGE_NAME:latest")
+          else
+            tags+=(--tag "$IMAGE_NAME:development")
+          fi
+          # The filenames carry "<arch>-sha256:...", so strip the prefix.
+          refs=()
+          for f in /tmp/digests/*; do
+            name="$(basename "$f")"
+            refs+=("$IMAGE_NAME@${name#*-}")
+          done
+          docker buildx imagetools create "${tags[@]}" "${refs[@]}"
