@@ -260,7 +260,10 @@ explains the rules.
 ## Installing into a Postgres you already run
 
 The guide above runs Postgres in a container. If you already have one, install
-the extension into it instead — no toolchain, no rebuild.
+the extension into it instead, using a release tarball — no toolchain, no
+rebuild. **Until a release carries those tarballs, building from source is
+still the only route into an existing Postgres**; the repository's README
+covers it.
 
 Releases publish a tarball per Postgres major and architecture. **v0.1.0 does
 not have them**: it predates the change, so take `V` from a later release on
@@ -298,7 +301,7 @@ Then preload it and restart. **This is not optional**: Axiom registers
 `PGC_POSTMASTER` settings, so without it `CREATE EXTENSION` fails outright
 rather than running with the cache disabled.
 
-```sh
+```ini
 # postgresql.conf — append to any existing list rather than replacing it
 shared_preload_libraries = 'axiom'
 ```
@@ -308,9 +311,22 @@ CREATE EXTENSION axiom;
 SELECT axiom_version();
 ```
 
-From here the rest of this guide applies unchanged, starting at
-[Install and connect](#5-install-and-connect) — you still need a gateway, and
-the server and user mapping are the same.
+From here you still need a gateway, and the server and user mapping work the
+same way — but **do not copy step 5 verbatim**. It is written for the Postgres
+container this guide starts, and three of its details are specific to that:
+
+| Step 5 says | On your own Postgres |
+|---|---|
+| `docker exec -it axiom-postgres psql` | your usual `psql` |
+| `ca_cert '/certs/ca.crt'` | wherever the CA sits **on the database server's filesystem**, readable by the user Postgres runs as |
+| `endpoint 'https://axiom-control-plane:30443'` | an address your host can actually reach |
+
+That last one is the real work, and it is not a documentation detail: the
+guide's endpoint is a container name on kind's Docker network, which nothing
+outside Docker resolves. A Postgres elsewhere needs the gateway exposed to it —
+a NodePort on a routable node address, a LoadBalancer, or an ingress.
+[Deploying the gateway](deploying.md) covers those choices and how each
+interacts with the certificate's SANs.
 
 ### What the tarballs do and do not cover
 

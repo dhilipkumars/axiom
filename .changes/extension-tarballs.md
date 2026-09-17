@@ -2,18 +2,23 @@
 kind: added
 ---
 
-Every release now publishes the extension as a downloadable tarball, one per
-supported Postgres major and architecture — `linux/amd64` and `linux/arm64`.
-Installing Axiom into a Postgres you already run no longer needs a Rust
-toolchain or a checkout:
+Releases from this one onward publish the extension as a downloadable
+tarball, one per supported Postgres major and architecture — `linux/amd64`
+and `linux/arm64`. Installing Axiom into a Postgres you already run no longer
+needs a Rust toolchain or a checkout. Substituting this release's version for
+`$V`:
 
 ```sh
-V=0.1.0; PG=17; ARCH=$(uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/)
+PG=17; ARCH=$(uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/)
 BASE=https://github.com/dhilipkumars/axiom/releases/download/v$V
 curl -fsSLO "$BASE/axiom-$V-pg$PG-linux-$ARCH.tar.gz"
+curl -fsSLO "$BASE/axiom-$V-pg$PG-linux-$ARCH.tar.gz.sha256"
+sha256sum -c "axiom-$V-pg$PG-linux-$ARCH.tar.gz.sha256"
 tar -xzf "axiom-$V-pg$PG-linux-$ARCH.tar.gz"
 sudo cp -r axiom-$V-pg$PG-linux-$ARCH/usr/. /usr/
 ```
+
+(v0.1.0 predates this and has no tarballs.)
 
 Each tarball carries a `.sha256` beside it and an `INSTALL.md`, and the files
 are exported from the same Dockerfile stage the published image is built from,
