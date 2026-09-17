@@ -32,10 +32,20 @@ fail() {
 cleanup() { [[ "${E2E_TARBALL_KEEP:-0}" == "1" ]] || docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
+# Every tarball up front, not lazily inside the loop. The wrong-major check
+# needs another major's tarball to exist, and building them on demand meant the
+# first major never had one -- so that check silently did not run for it.
 for pg in $MAJORS; do
   tarball="$ROOT/dist/axiom-${VERSION}-pg${pg}-linux-${ARCH}.tar.gz"
-  [[ -f "$tarball" ]] || "$ROOT/scripts/package-extension" "$pg" "$ARCH" >/dev/null \
-    || fail "pg${pg}: could not build the tarball"
+  if [[ ! -f "$tarball" ]]; then
+    log "packaging pg${pg} (${ARCH})"
+    "$ROOT/scripts/package-extension" "$pg" "$ARCH" >/dev/null \
+      || fail "pg${pg}: could not build the tarball"
+  fi
+done
+
+for pg in $MAJORS; do
+  tarball="$ROOT/dist/axiom-${VERSION}-pg${pg}-linux-${ARCH}.tar.gz"
 
   log "pg${pg}: unpacking the tarball into a stock postgres:${pg}"
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
@@ -102,32 +112,45 @@ for pg in $MAJORS; do
   [[ "$server" == "${pg}"* ]] || fail "pg${pg}: server reports $server"
 
   # A tarball built for a different major must fail loudly, not half-work.
-  # Asserted by actually doing it: the .so from another major is dropped in
-  # and the library must refuse to load. Without this the claim rests on
-  # nobody having tried it.
+  #
+  # Tested by restarting with the wrong library preloaded, which is the real
+  # contract: the postmaster loads it at startup and must refuse to come up.
+  #
+  # An earlier version used `LOAD 'axiom'` in a running server, and it passed
+  # for the wrong reason. The server is preloaded by this point, so a fresh
+  # backend running LOAD hits `_PG_init`'s own guard -- "axiom must be loaded
+  # through shared_preload_libraries" -- and fails regardless of which major
+  # the library was built for. It proved the preload error, not a mismatch.
   other=""
   for cand in $MAJORS; do [[ "$cand" != "$pg" ]] && { other="$cand"; break; }; done
-  if [[ -n "$other" ]]; then
+  if [[ -z "$other" ]]; then
+    echo "  pg${pg}: only one major selected, skipping the wrong-major check"
+  else
     other_tar="$ROOT/dist/axiom-${VERSION}-pg${other}-linux-${ARCH}.tar.gz"
-    if [[ -f "$other_tar" ]]; then
-      docker cp "$other_tar" "$CONTAINER:/tmp/other.tar.gz" >/dev/null
-      docker exec "$CONTAINER" sh -c '
-        set -e
-        cd /tmp && rm -rf wrong && mkdir wrong && tar -xzf other.tar.gz -C wrong
-        cp wrong/axiom-*/usr/lib/postgresql/*/lib/axiom.so "$(pg_config --pkglibdir)/axiom.so"
-      ' || fail "pg${pg}: could not stage the pg${other} library"
-      # Success is the only failure. Asserted on the exit status rather than on
-      # the message, because the ways this goes wrong differ: an undefined
-      # symbol is a clean ERROR, while a deeper ABI mismatch takes the backend
-      # down and psql reports a lost connection. Both are rejections; only a
-      # clean load means the wrong library was accepted.
-      if docker exec "$CONTAINER" psql -U postgres -v ON_ERROR_STOP=1 \
-           -tAc "LOAD 'axiom'" >/dev/null 2>&1; then
-        fail "pg${pg}: a pg${other} library loaded without complaint"
-      fi
-      echo "  pg${pg}: a pg${other} library is rejected, not half-loaded"
-    fi
+    [[ -f "$other_tar" ]] || fail "pg${pg}: no pg${other} tarball to test the mismatch with"
+    docker cp "$other_tar" "$CONTAINER:/tmp/other.tar.gz" >/dev/null
+    docker exec "$CONTAINER" sh -c '
+      set -e
+      cd /tmp && rm -rf wrong && mkdir wrong && tar -xzf other.tar.gz -C wrong
+      cp wrong/axiom-*/usr/lib/postgresql/*/lib/axiom.so "$(pg_config --pkglibdir)/axiom.so"
+    ' || fail "pg${pg}: could not stage the pg${other} library"
+    docker restart "$CONTAINER" >/dev/null 2>&1 || true
+    # Short budget on purpose: the expected outcome is that it never becomes
+    # ready, so this is the time spent proving a negative.
+    up=no
+    for _ in $(seq 1 15); do
+      docker exec "$CONTAINER" pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1 \
+        && { up=yes; break; }
+      sleep 2
+    done
+    [[ "$up" == "no" ]] \
+      || fail "pg${pg}: started with a pg${other} library preloaded, which should be impossible"
+    # And for the right reason: the library, not some unrelated crash.
+    docker logs "$CONTAINER" 2>&1 | tail -40 | grep -qi 'axiom.so\|incompatible\|undefined symbol\|could not load' \
+      || fail "pg${pg}: refused to start, but the log does not blame the library: $(docker logs "$CONTAINER" 2>&1 | tail -5)"
+    echo "  pg${pg}: a pg${other} library preloaded stops the postmaster starting"
   fi
+
   echo "  pg${pg}: installed into stock postgres:${pg}, axiom ${got}, worker running"
 done
 

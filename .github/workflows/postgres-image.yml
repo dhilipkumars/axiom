@@ -216,7 +216,11 @@ jobs:
   # moving download would be worse than none.
   artifacts:
     name: pg${{ matrix.pg }} ${{ matrix.arch }} tarball
-    needs: [merge, install-check]
+    # gate is in `needs` because the condition reads its output: the `needs`
+    # context only exposes jobs listed there, so referencing one that is absent
+    # makes the expression undefined and skips this job on every release --
+    # silently, because a skipped job is not a failed one.
+    needs: [gate, merge, install-check]
     if: github.event_name == 'release' && needs.gate.outputs.build == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -263,6 +267,9 @@ jobs:
           path: dist
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # gh finds the repository from git remotes, and this job has no
+          # checkout -- nothing here needs the source, only the artifacts.
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
@@ -271,6 +278,10 @@ jobs:
           # expected would otherwise publish a quietly incomplete release.
           count="$(find dist -name '*.tar.gz' | wc -l)"
           [[ "$count" -eq 6 ]] || { echo "expected 6 tarballs, found $count" >&2; exit 1; }
+          # Verified, not just counted. A checksum that does not match what is
+          # uploaded beside it is worse than none, because it is the thing
+          # people use to decide the download is intact.
+          ( cd dist && sha256sum -c ./*.sha256 )
           gh release upload "$RELEASE_TAG" dist/* --clobber
 
   # What a stranger gets, checked before the floating tags say it is current.

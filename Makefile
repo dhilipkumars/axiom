@@ -124,9 +124,12 @@ e2e-preload:
 # The downloadable artifact, and proof it installs into a stock Postgres --
 # which is the thing the images cannot demonstrate, since they ship it already
 # installed and already preloaded.
+# PG_MAJOR, not PG: PG is a cargo feature name ("pg16") used by the build
+# targets, while this wants a bare major. Defaulting to PG would pass "pg16"
+# and fail deep inside docker looking for postgres:pg16-bookworm.
 package:
-	@test -n "$(PG)" || { echo "usage: make package PG=17 [ARCH=arm64]" >&2; exit 2; }
-	./scripts/package-extension $(PG) $(ARCH)
+	@test -n "$(PG_MAJOR)" || { echo "usage: make package PG_MAJOR=17 [ARCH=arm64]" >&2; exit 2; }
+	./scripts/package-extension $(PG_MAJOR) $(ARCH)
 
 e2e-tarball:
 	./e2e/tarball_test.sh
