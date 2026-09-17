@@ -101,6 +101,11 @@ mkdir -p "$OUT"
 # file on extraction -- so an artifact packaged on a maintainer's Mac looks
 # broken to everyone who unpacks it on Linux, which is everyone.
 COPYFILE_DISABLE=1 tar --no-xattrs -czf "${OUT}/${NAME}.tar.gz" -C "$STAGE" "$NAME"
-( cd "$OUT" && shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256" )
+# sha256sum where it exists, shasum where it does not. The artifact is for
+# Linux, where sha256sum is standard and shasum often absent; this script also
+# runs on a maintainer's macOS, which is the other way round.
+( cd "$OUT" \
+  && { sha256sum "${NAME}.tar.gz" 2>/dev/null \
+       || shasum -a 256 "${NAME}.tar.gz"; } > "${NAME}.tar.gz.sha256" )
 echo "==> ${OUT}/${NAME}.tar.gz"
 tar -tzf "${OUT}/${NAME}.tar.gz" | sed 's/^/    /'

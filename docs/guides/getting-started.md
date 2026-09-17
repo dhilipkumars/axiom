@@ -268,7 +268,7 @@ V=0.1.0; PG=17; ARCH=$(uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/)
 BASE=https://github.com/dhilipkumars/axiom/releases/download/v$V
 curl -fsSLO "$BASE/axiom-$V-pg$PG-linux-$ARCH.tar.gz"
 curl -fsSLO "$BASE/axiom-$V-pg$PG-linux-$ARCH.tar.gz.sha256"
-shasum -a 256 -c "axiom-$V-pg$PG-linux-$ARCH.tar.gz.sha256"
+sha256sum -c "axiom-$V-pg$PG-linux-$ARCH.tar.gz.sha256"   # macOS: shasum -a 256 -c
 tar -xzf "axiom-$V-pg$PG-linux-$ARCH.tar.gz"
 ```
 

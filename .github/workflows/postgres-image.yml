@@ -208,9 +208,10 @@ jobs:
             --tag "$IMAGE_NAME:${version}-pg${{ matrix.pg }}" "${refs[@]}"
 
   # The downloadable artifacts, for people who already run Postgres and so
-  # cannot use the images (#36). Same matrix and same runners as the images,
-  # and the same build stage, so a tarball and an image of one version contain
-  # byte-identical files rather than two compiles that might differ.
+  # cannot use the images (#36). Same matrix, same runners and the same
+  # Dockerfile stage as the images, so a tarball and an image of one version
+  # come from the same source by the same recipe -- not the same compile,
+  # since these are separate jobs on separate runners.
   #
   # Release only: there is nowhere to attach a development tarball, and a
   # moving download would be worse than none.

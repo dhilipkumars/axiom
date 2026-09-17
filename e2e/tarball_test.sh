@@ -36,12 +36,13 @@ trap cleanup EXIT
 # needs another major's tarball to exist, and building them on demand meant the
 # first major never had one -- so that check silently did not run for it.
 for pg in $MAJORS; do
-  tarball="$ROOT/dist/axiom-${VERSION}-pg${pg}-linux-${ARCH}.tar.gz"
-  if [[ ! -f "$tarball" ]]; then
-    log "packaging pg${pg} (${ARCH})"
-    "$ROOT/scripts/package-extension" "$pg" "$ARCH" >/dev/null \
-      || fail "pg${pg}: could not build the tarball"
-  fi
+  # Always repackaged, never reused. A tarball left in dist/ from before a
+  # source edit would make this pass against code that is no longer there, and
+  # the version only changes at release, so the filename cannot show it.
+  # Docker's layer cache makes the rebuild cheap when nothing changed.
+  log "packaging pg${pg} (${ARCH})"
+  "$ROOT/scripts/package-extension" "$pg" "$ARCH" >/dev/null \
+    || fail "pg${pg}: could not build the tarball"
 done
 
 for pg in $MAJORS; do
@@ -110,6 +111,10 @@ for pg in $MAJORS; do
 
   server="$(docker exec "$CONTAINER" psql -U postgres -tAc 'SHOW server_version_num')"
   [[ "$server" == "${pg}"* ]] || fail "pg${pg}: server reports $server"
+  # Reported here, while it is still true. The wrong-major block below stops
+  # this container on purpose, so anything printed after it claiming a running
+  # worker would be describing a corpse.
+  echo "  pg${pg}: installed into stock postgres:${pg}, axiom ${got}, worker running"
 
   # A tarball built for a different major must fail loudly, not half-work.
   #
@@ -135,23 +140,29 @@ for pg in $MAJORS; do
       cp wrong/axiom-*/usr/lib/postgresql/*/lib/axiom.so "$(pg_config --pkglibdir)/axiom.so"
     ' || fail "pg${pg}: could not stage the pg${other} library"
     docker restart "$CONTAINER" >/dev/null 2>&1 || true
-    # Short budget on purpose: the expected outcome is that it never becomes
-    # ready, so this is the time spent proving a negative.
-    up=no
+    # Postgres refuses the library during startup and the container exits, so
+    # watch for that rather than polling readiness for a fixed time. Waiting
+    # out a timeout to prove a negative spent 30s per major for nothing.
+    up=unknown
     for _ in $(seq 1 15); do
+      state="$(docker inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null || echo gone)"
+      [[ "$state" == "exited" || "$state" == "gone" ]] && { up=no; break; }
       docker exec "$CONTAINER" pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1 \
         && { up=yes; break; }
       sleep 2
     done
     [[ "$up" == "no" ]] \
-      || fail "pg${pg}: started with a pg${other} library preloaded, which should be impossible"
-    # And for the right reason: the library, not some unrelated crash.
-    docker logs "$CONTAINER" 2>&1 | tail -40 | grep -qi 'axiom.so\|incompatible\|undefined symbol\|could not load' \
-      || fail "pg${pg}: refused to start, but the log does not blame the library: $(docker logs "$CONTAINER" 2>&1 | tail -5)"
+      || fail "pg${pg}: started with a pg${other} library preloaded, which should be impossible (state: ${up})"
+    # For the right reason. Deliberately not matching the bare filename: a
+    # permission or mount error also names axiom.so, and would then pass as an
+    # ABI rejection. Only the messages Postgres uses when a library it loaded
+    # is the wrong one count.
+    logs="$(docker logs "$CONTAINER" 2>&1 | tail -40)"
+    grep -qiE 'incompatible library|undefined symbol|could not load library' <<<"$logs" \
+      || fail "pg${pg}: refused to start, but not for an incompatible library: $(tail -5 <<<"$logs")"
     echo "  pg${pg}: a pg${other} library preloaded stops the postmaster starting"
   fi
 
-  echo "  pg${pg}: installed into stock postgres:${pg}, axiom ${got}, worker running"
 done
 
 log "TARBALL E2E PASSED"
