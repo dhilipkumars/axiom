@@ -56,7 +56,10 @@ most tool-using agents do — a `cd` in one step is gone by the next, and
 `./certs` would then resolve to wherever that shell happened to start. That is
 exactly the mistake this step exists to prevent.
 
-`~` is expanded by your shell, so these work from any working directory.
+Two forms appear below and they are not interchangeable. `~` expands only at
+the start of a word, so it works for `docker -v ~/axiom-quickstart/...` but
+**not** after an `=` sign: `--from-file=tls.crt=~/...` is passed through
+literally and the file is not found. Those use `"$HOME/..."` instead.
 
 ## Step 1 — cluster
 
@@ -148,8 +151,8 @@ kubectl --context kind-axiom apply -f "$RAW/gateway-rbac.yaml"
 
 kubectl --context kind-axiom -n axiom-system delete secret axiom-gateway-tls --ignore-not-found
 kubectl --context kind-axiom -n axiom-system create secret generic axiom-gateway-tls \
-  --from-file=tls.crt=certs/gateway.crt \
-  --from-file=tls.key=certs/gateway.key
+  --from-file=tls.crt="$HOME/axiom-quickstart/certs/gateway.crt" \
+  --from-file=tls.key="$HOME/axiom-quickstart/certs/gateway.key"
 
 kubectl --context kind-axiom apply -f "$RAW/gateway-deployment.yaml"
 kubectl --context kind-axiom -n axiom-system rollout restart deploy/axiom-gateway
@@ -291,7 +294,7 @@ asked to keep it:
 ```sh
 docker rm -f axiom-postgres
 kind delete cluster --name axiom
-rm -rf ~/axiom-quickstart/certs
+rm -rf ~/axiom-quickstart
 ```
 
 ## Constraints worth knowing before you suggest things

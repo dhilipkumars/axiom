@@ -30,7 +30,20 @@ PG_IMAGE=ghcr.io/dhilipkumars/axiom-postgres
 # The two images are published by separate workflows on the same event, so the
 # release gateway may not exist yet when this starts. That is a wait, not a
 # reason to test the wrong thing: `wait_for_image` below bounds it.
-GW_IMAGE="${E2E_INSTALL_GATEWAY:-ghcr.io/dhilipkumars/axiom-gateway:latest}"
+#
+# Derived from TAG rather than fixed, so the two halves always belong to the
+# same thing: a development Postgres is tested against the development
+# gateway, and a release against that release. Pinning this to :latest while
+# TAG defaulted to development meant every nightly run tested exactly the
+# mismatched pair this gate is supposed to rule out.
+if [[ -n "${E2E_INSTALL_GATEWAY:-}" ]]; then
+  GW_IMAGE="$E2E_INSTALL_GATEWAY"
+elif [[ "$TAG" == "development" ]]; then
+  GW_IMAGE=ghcr.io/dhilipkumars/axiom-gateway:development
+else
+  # Release tags carry the leading v the Postgres tags do not.
+  GW_IMAGE="ghcr.io/dhilipkumars/axiom-gateway:v${TAG}"
+fi
 CLUSTER=axiom-install
 NODE="${CLUSTER}-control-plane"
 CONTAINER=axiom-install-pg
@@ -195,8 +208,15 @@ kubectl --context "kind-$CLUSTER" -n axiom-system create secret generic axiom-ga
   --from-file=tls.crt=certs/gateway.crt --from-file=tls.key=certs/gateway.key >/dev/null
 # The published gateway, not a local build: this gate is about what is on the
 # registry, so side-loading a build from source would defeat it.
-sed "s|image: ghcr.io/dhilipkumars/axiom-gateway:.*|image: $GW_IMAGE|" \
-  "$ROOT/deploy/k8s/gateway-deployment.yaml" | kubectl --context "kind-$CLUSTER" apply -f - >/dev/null
+# Checked, not assumed. An unguarded substitution is what let the pull-policy
+# bug deploy the wrong image silently for weeks; this one would quietly test
+# whatever the manifest happens to name.
+patched="$(sed "s|image: ghcr.io/dhilipkumars/axiom-gateway:.*|image: $GW_IMAGE|" \
+  "$ROOT/deploy/k8s/gateway-deployment.yaml")"
+grep -q "image: $GW_IMAGE" <<<"$patched" \
+  || fail "could not point the manifest at $GW_IMAGE; the gate would have tested \
+whatever image the manifest names"
+kubectl --context "kind-$CLUSTER" apply -f - <<<"$patched" >/dev/null
 # The guide restarts here for a reason this script needs even more: on a reused
 # cluster the Deployment is unchanged, so `apply` alone leaves the running pod
 # holding the certificate from the previous run while the Secret has been

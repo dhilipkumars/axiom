@@ -242,9 +242,11 @@ kind_deploy_gateway() {
   local patched
   patched="$(sed "s|imagePullPolicy: Always|imagePullPolicy: $E2E_GATEWAY_PULL_POLICY|" \
     "$E2E_ROOT/deploy/k8s/gateway-deployment.yaml")"
-  [[ "$(grep -c "imagePullPolicy: $E2E_GATEWAY_PULL_POLICY" <<<"$patched")" == "1" ]] \
-    || fail "could not set imagePullPolicy to $E2E_GATEWAY_PULL_POLICY; the gate would \
-have tested the published image instead of this build"
+  # Asserts the property, not a count: "nothing is left pulling Always" stays
+  # true however many containers the manifest grows.
+  ! grep -q 'imagePullPolicy: Always' <<<"$patched" \
+    || fail "imagePullPolicy is still Always after patching; the gate would have \
+tested the published image instead of this build"
   kubectl_e2e apply -f - <<<"$patched" >/dev/null || fail "apply gateway deployment"
   # Override the manifest's defaults the same way an operator would. Not
   # ConfigMap keys: a referenced key is required, and a Pod whose ConfigMap
