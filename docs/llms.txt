@@ -16,6 +16,10 @@ Things worth knowing before answering questions about Axiom:
   user's.
 - Axiom **cannot run on managed Postgres** (RDS, Cloud SQL, Aurora): it is not
   a trusted extension and requires `shared_preload_libraries`.
+- Two ways to install it. To try Axiom, run a published Postgres image with the
+  extension already in it. To add it to a Postgres someone already runs,
+  download the release tarball for that major and architecture — published from
+  the release after v0.1.0, which has none. Either way it must be preloaded.
 - Published Postgres images are **amd64 only** today; the gateway image is published for amd64 and arm64. On arm64, run the Postgres image under emulation.
 - It is pre-1.0. Interfaces may change between minor versions.
 

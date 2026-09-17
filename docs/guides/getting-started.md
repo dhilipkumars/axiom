@@ -260,11 +260,15 @@ explains the rules.
 ## Installing into a Postgres you already run
 
 The guide above runs Postgres in a container. If you already have one, install
-the extension into it instead — no toolchain, no rebuild. Every release
-publishes a tarball per major and architecture:
+the extension into it instead — no toolchain, no rebuild.
+
+Releases publish a tarball per Postgres major and architecture. **v0.1.0 does
+not have them**: it predates the change, so take `V` from a later release on
+the [releases page](https://github.com/dhilipkumars/axiom/releases) rather than
+the version below, which is only an example of the shape.
 
 ```sh
-V=0.1.0; PG=17; ARCH=$(uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/)
+V=0.2.0; PG=17; ARCH=$(uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/)
 BASE=https://github.com/dhilipkumars/axiom/releases/download/v$V
 curl -fsSLO "$BASE/axiom-$V-pg$PG-linux-$ARCH.tar.gz"
 curl -fsSLO "$BASE/axiom-$V-pg$PG-linux-$ARCH.tar.gz.sha256"
