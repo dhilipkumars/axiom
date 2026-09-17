@@ -145,12 +145,17 @@ SELECT count(*) FROM k8s_configmaps WHERE namespace = '$NS' AND name = 'after-id
 SQL
 )"
 grep -q 'cannot reach gateway' <<<"$idle_out" \
-  && fail "the first statement after the idle window failed: $idle_out"
+  && fail "a statement after the idle window could not reach the gateway: $idle_out"
 # The write is the half that matters most: reads could be papered over by
 # retrying, a write cannot, so this is what proves the connection was rebuilt
 # rather than the failure swallowed.
 kubectl_e2e -n "$NS" get configmap after-idle >/dev/null 2>&1 \
   || fail "INSERT after the idle window did not reach the cluster: $idle_out"
+# And the read-back, asserted rather than assumed. Without this the final
+# SELECT is decoration: it could return 0, or fail for a reason that does not
+# mention the gateway, and nothing above would notice.
+[[ "$(tail -n1 <<<"$idle_out")" == "1" ]] \
+  || fail "reading back the row written after the idle window did not return 1: $idle_out"
 echo "wrote and read back across a 45s idle gap"
 kubectl_e2e -n "$NS" delete configmap after-idle >/dev/null 2>&1 || true
 
