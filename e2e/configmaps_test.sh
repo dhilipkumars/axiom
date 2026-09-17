@@ -115,4 +115,43 @@ log "RBAC: gateway identity may write configmaps but nothing else"
 [[ "$(kubectl_e2e --as="$SA" auth can-i create pods -n "$NS" 2>/dev/null)" == "no" ]] || fail "SA can create pods"
 [[ "$(kubectl_e2e --as="$SA" auth can-i get secrets -n "$NS" 2>/dev/null)" == "no" ]] || fail "SA can read secrets"
 
+# Regression gate for issue #51, which shipped in v0.1.0.
+#
+# The gateway pings a peer idle for 30s and drops it 10s later. A backend
+# cannot answer -- unary channels are WhileActive on a current_thread runtime,
+# so between queries nothing polls the connection -- so the gateway is
+# guaranteed to close a connection a backend leaves idle for 40s, and the next
+# statement used to be the one that found out. Inside a transaction that lost
+# the work.
+#
+# Only an E2E can catch this: it needs a real gateway running its real
+# keepalive timers. A unit test can assert the constant, and one does, but the
+# constant being right is not the same as the connection surviving.
+#
+# The sleep is why this costs 45s and cannot be shortened: the gateway's timers
+# are compiled in, not flags, so there is no way to make it decide sooner.
+#
+# One psql invocation on purpose. `psql_axiom` opens a connection per call, and
+# a fresh connection has no cached channel, so running these as separate calls
+# would pass on a broken build -- there would be nothing stale to meet.
+log "a session idle past the gateway's keepalive window still works (issue #51)"
+idle_out="$(compose exec -T "$E2E_SVC_POSTGRES" psql -v ON_ERROR_STOP=1 \
+  -U "$E2E_PG_USER" -d "$E2E_PG_DB" -At <<SQL 2>&1 || true
+SELECT count(*) FROM k8s_configmaps WHERE namespace = '$NS';
+SELECT pg_sleep(45);
+INSERT INTO k8s_configmaps (namespace, name, data)
+  VALUES ('$NS', 'after-idle', '{"k":"v"}');
+SELECT count(*) FROM k8s_configmaps WHERE namespace = '$NS' AND name = 'after-idle';
+SQL
+)"
+grep -q 'cannot reach gateway' <<<"$idle_out" \
+  && fail "the first statement after the idle window failed: $idle_out"
+# The write is the half that matters most: reads could be papered over by
+# retrying, a write cannot, so this is what proves the connection was rebuilt
+# rather than the failure swallowed.
+kubectl_e2e -n "$NS" get configmap after-idle >/dev/null 2>&1 \
+  || fail "INSERT after the idle window did not reach the cluster: $idle_out"
+echo "wrote and read back across a 45s idle gap"
+kubectl_e2e -n "$NS" delete configmap after-idle >/dev/null 2>&1 || true
+
 log "CONFIGMAPS E2E PASSED"
