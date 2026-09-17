@@ -9,7 +9,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tonic::transport::Channel;
 
@@ -26,7 +26,8 @@ use crate::transport::{build_channel, ChannelError, Target};
 
 thread_local! {
     static RUNTIME: RefCell<Option<tokio::runtime::Runtime>> = const { RefCell::new(None) };
-    static CHANNELS: RefCell<HashMap<(Target, Duration), Channel>> = RefCell::new(HashMap::new());
+    static CHANNELS: RefCell<HashMap<(Target, Duration), (Channel, Instant)>> =
+        RefCell::new(HashMap::new());
 }
 
 /// Why a gateway call failed, from the FDW's point of view.
@@ -162,7 +163,34 @@ fn forget_channel(server: &ServerOptions) {
     });
 }
 
-/// Returns a channel for `server`, reusing one already open in this backend.
+/// How long a cached channel may sit unused before it is rebuilt rather than
+/// reused.
+///
+/// The gateway pings an idle peer after 30 seconds and drops it 10 seconds
+/// later (`gateway/internal/server/keepalive.go`). A backend cannot answer
+/// that ping: unary channels are built `WhileActive`, and the per-backend
+/// runtime is `current_thread`, so between queries nothing polls the
+/// connection. The gateway is therefore guaranteed to close any connection a
+/// backend leaves idle for 40 seconds -- and enabling `keep_alive_while_idle`
+/// would not change that, because there is still no thread running to send the
+/// keepalive.
+///
+/// So the cache does not offer a connection old enough to be in question. 25
+/// seconds leaves five seconds of margin before the gateway even starts
+/// asking, and the cost of being wrong is one TLS handshake on a query that
+/// was about to happen anyway -- against a failed query, and inside a
+/// transaction a failed transaction (issue #51).
+///
+/// This is an age check, not a liveness check, and the difference is worth
+/// being honest about: a connection that dies *within* the window -- the
+/// gateway pod restarting, or a middlebox reaping idle flows faster than this
+/// -- is still met by a failing statement. What it removes is the failure that
+/// was guaranteed rather than incidental, because the gateway's own keepalive
+/// was closing connections no backend could ever answer for.
+const MAX_IDLE: Duration = Duration::from_secs(25);
+
+/// Returns a channel for `server`, reusing one already open in this backend
+/// unless it has been idle long enough for the gateway to have closed it.
 fn channel_for(
     rt: &tokio::runtime::Runtime,
     server: &ServerOptions,
@@ -170,16 +198,35 @@ fn channel_for(
     let key = (server.target.clone(), server.rpc_timeout);
     CHANNELS.with(|cell| {
         let mut map = cell.borrow_mut();
-        if let Some(ch) = map.get(&key) {
-            return Ok(ch.clone());
+        if let Some((ch, last_used)) = map.get(&key) {
+            if last_used.elapsed() < MAX_IDLE {
+                return Ok(ch.clone());
+            }
+            // Old enough that the gateway may already have dropped it. Build a
+            // new one rather than find out by failing someone's query.
+            map.remove(&key);
         }
         let ch = {
             let _guard = rt.enter();
             build_channel(&server.target, server.rpc_timeout).map_err(ClientError::Channel)?
         };
-        map.insert(key, ch.clone());
+        map.insert(key, (ch.clone(), Instant::now()));
         Ok(ch)
     })
+}
+
+/// Restarts the idle clock for `server`'s channel.
+///
+/// Called when a call finishes, not when it starts: a long call keeps the
+/// connection busy, and the gateway's idle timer runs from the last thing it
+/// saw. Timing from the start would rebuild a channel that had just been used.
+fn touch_channel(server: &ServerOptions) {
+    let key = (server.target.clone(), server.rpc_timeout);
+    CHANNELS.with(|cell| {
+        if let Some(entry) = cell.borrow_mut().get_mut(&key) {
+            entry.1 = Instant::now();
+        }
+    });
 }
 
 /// Builds the wire GVK for a resolved resource. The gateway resolves this to
@@ -220,10 +267,11 @@ where
         // A connection-class failure may mean the channel itself is no longer
         // usable -- most often a rotated certificate, which no amount of
         // retrying on the same channel will recover from.
-        if let Err(e) = &out {
-            if e.class() == ErrorClass::Connection {
-                forget_channel(server);
-            }
+        match &out {
+            Err(e) if e.class() == ErrorClass::Connection => forget_channel(server),
+            // The gateway's idle timer runs from the last message it saw, so
+            // this one restarts the clock here too.
+            _ => touch_channel(server),
         }
         out
     })?
@@ -448,6 +496,25 @@ mod tests {
                  or a rotated certificate would keep failing until the backend restarts"
             );
         }
+    }
+
+    /// `MAX_IDLE` must stay long enough that ordinary gaps between queries do
+    /// not pay for a TLS handshake they did not need.
+    ///
+    /// The other half of this contract -- that it expires *before* the gateway
+    /// starts probing an idle peer -- cannot honestly be checked from here.
+    /// The gateway's timers live in Go, and restating them as Rust literals
+    /// would only make this test agree with itself. It is checked against the
+    /// real values by the Go test
+    /// `TestExtensionRebuildsBeforeThisServerClosesAnIdleConnection`
+    /// in `gateway/internal/server/keepalive_test.go`, which reads `MAX_IDLE`
+    /// out of this file.
+    #[test]
+    fn max_idle_is_not_so_short_that_it_rebuilds_on_routine_pauses() {
+        assert!(
+            MAX_IDLE >= Duration::from_secs(10),
+            "MAX_IDLE ({MAX_IDLE:?}) would rebuild the channel between ordinary queries"
+        );
     }
 
     #[test]
