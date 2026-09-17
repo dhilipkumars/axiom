@@ -141,9 +141,13 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
 
-      - run: |
+      # The "sha256:" prefix is stripped because upload-artifact refuses a
+      # colon in a filename; `merge` puts it back when building the reference.
+      - env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
           mkdir -p /tmp/digests
-          touch "/tmp/digests/${{ matrix.arch }}-${{ steps.push.outputs.digest }}"
+          touch "/tmp/digests/${{ matrix.arch }}-${DIGEST#sha256:}"
       - uses: actions/upload-artifact@v4
         with:
           name: pg-digest-${{ matrix.pg }}-${{ matrix.arch }}
@@ -189,7 +193,7 @@ jobs:
           refs=()
           for f in /tmp/digests/*; do
             name="$(basename "$f")"
-            refs+=("$IMAGE_NAME@${name#*-}")
+            refs+=("$IMAGE_NAME@sha256:${name#*-}")
           done
           docker buildx imagetools create \
             --tag "$IMAGE_NAME:${version}-pg${{ matrix.pg }}" "${refs[@]}"

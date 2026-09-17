@@ -119,9 +119,13 @@ jobs:
 
       # The digest is how `merge` finds this build. A file per architecture,
       # so the two jobs cannot collide on one artifact name.
-      - run: |
+      # The "sha256:" prefix is stripped because upload-artifact refuses a
+      # colon in a filename; `merge` puts it back when building the reference.
+      - env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
           mkdir -p /tmp/digests
-          touch "/tmp/digests/${{ matrix.arch }}-${{ steps.push.outputs.digest }}"
+          touch "/tmp/digests/${{ matrix.arch }}-${DIGEST#sha256:}"
       - uses: actions/upload-artifact@v4
         with:
           name: gateway-digest-${{ matrix.arch }}
@@ -166,6 +170,6 @@ jobs:
           refs=()
           for f in /tmp/digests/*; do
             name="$(basename "$f")"
-            refs+=("$IMAGE_NAME@${name#*-}")
+            refs+=("$IMAGE_NAME@sha256:${name#*-}")
           done
           docker buildx imagetools create "${tags[@]}" "${refs[@]}"
