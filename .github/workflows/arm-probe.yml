@@ -1,0 +1,16 @@
+# Throwaway. Establishes whether this repository can use GitHub's free native
+# arm64 runners, which decides whether the extension artifacts in #36 can be
+# built natively or have to be emulated. Deleted once answered.
+name: arm probe
+on: workflow_dispatch
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - run: |
+          echo "runner=${{ matrix.runner }} arch=$(uname -m) nproc=$(nproc)"
+          echo "runner=${{ matrix.runner }} arch=$(uname -m) nproc=$(nproc)" >> "$GITHUB_STEP_SUMMARY"
