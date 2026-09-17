@@ -78,11 +78,20 @@ jobs:
             echo "main has not moved in 25h; skipping the nightly publish" >> "$GITHUB_STEP_SUMMARY"
           fi
 
+  # One job per (major, architecture), each on a runner of that architecture.
+  #
+  # Native, not emulated: the extension is a Rust/pgrx build compiled against
+  # that major's Postgres headers, so QEMU would be paid six times over. Free
+  # arm64 runners make each one a normal compile.
+  #
+  # Pushed by *digest*, never by tag. Two architectures pushing one tag race,
+  # and the loser is silently dropped from the published image; `merge` below
+  # is the only step that tags anything.
   build:
-    name: pg${{ matrix.pg }}
+    name: pg${{ matrix.pg }} ${{ matrix.arch }}
     needs: gate
     if: needs.gate.outputs.build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -90,6 +99,16 @@ jobs:
         # docs/PLAN.md. A major added there has to be added here too; there is
         # no way to derive one from the other that is simpler than saying it.
         pg: ["16", "17", "18"]
+        arch: [amd64, arm64]
+        # `include` here augments the six pg x arch combinations rather than
+        # adding jobs: an entry whose keys match an existing combination adds
+        # its remaining fields to it. So each of the six gains the runner for
+        # its architecture.
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
 
@@ -106,18 +125,6 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: ./scripts/version check "$RELEASE_TAG"
 
-      - id: image
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: |
-          if [[ "$GITHUB_EVENT_NAME" == "release" ]]; then
-            echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
-            echo "is_release=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=development" >> "$GITHUB_OUTPUT"
-            echo "is_release=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -125,33 +132,71 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          # Only immutable tags here. The floating ones are moved by `promote`,
-          # once every major has succeeded -- see that job for why.
-          #
-          # Every tag carries its major, because three of these are published
-          # and an untagged-by-major image would be ambiguous about the one
-          # thing a reader most needs to know.
-          tags: |
-            type=raw,value=development-pg${{ matrix.pg }},enable=${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-            type=raw,value=${{ steps.image.outputs.version }}-pg${{ matrix.pg }},enable=${{ steps.image.outputs.is_release == 'true' }}
-
-      - uses: docker/build-push-action@v6
+      - id: push
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: extension/Dockerfile
           build-args: PG_MAJOR=${{ matrix.pg }}
-          # amd64 only. pgrx compiles against the target's Postgres headers and
-          # links its libraries, so there is no cross-compile equivalent of the
-          # gateway's CGO_ENABLED=0 build, and emulating arm64 for a Rust and
-          # pgrx build, three times over, is not worth it yet (see #36).
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+
+      # The "sha256:" prefix is stripped because upload-artifact refuses a
+      # colon in a filename; `merge` puts it back when building the reference.
+      - env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${{ matrix.arch }}-${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pg-digest-${{ matrix.pg }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+  # One manifest list per major, built from that major's two digests. The only
+  # step that tags, so a published tag always has both architectures.
+  merge:
+    name: pg${{ matrix.pg }} manifest
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.image.outputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ["16", "17", "18"]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pg-digest-${{ matrix.pg }}-*
+          merge-multiple: true
+          path: /tmp/digests
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: image
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "release" ]]; then
+            version="${RELEASE_TAG#v}"
+            [[ -n "$version" ]] || { echo "release event with an empty tag" >&2; exit 1; }
+          else
+            version=development
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          refs=()
+          for f in /tmp/digests/*; do
+            name="$(basename "$f")"
+            refs+=("$IMAGE_NAME@sha256:${name#*-}")
+          done
+          docker buildx imagetools create \
+            --tag "$IMAGE_NAME:${version}-pg${{ matrix.pg }}" "${refs[@]}"
 
   # What a stranger gets, checked before the floating tags say it is current.
   #
@@ -167,7 +212,7 @@ jobs:
   # answers the question this gate exists for.
   install-check:
     name: a stranger can install it
-    needs: build
+    needs: merge
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -213,7 +258,7 @@ jobs:
   # release.
   promote:
     name: move the floating tags
-    needs: [build, install-check]
+    needs: [merge, install-check]
     if: github.event_name == 'release' && !github.event.release.prerelease
     runs-on: ubuntu-latest
     steps:
