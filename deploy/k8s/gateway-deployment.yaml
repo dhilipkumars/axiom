@@ -44,12 +44,24 @@ spec:
           type: RuntimeDefault
       containers:
         - name: gateway
-          image: ghcr.io/dhilipkumars/axiom-gateway:development
+          # The newest release. This manifest is what the guides tell people to
+          # apply, so it must not install a nightly build: pairing a released
+          # Postgres image with a development gateway is a combination no
+          # release describes and nobody tested. Pin a version
+          # (:v0.1.0) to choose when to move.
+          #
+          # The E2E suite does not rewrite this field. It side-loads its own
+          # build into kind *under this exact reference*
+          # (E2E_GATEWAY_DEPLOY_IMAGE in e2e/lib/kind.sh), so the two must
+          # match: if they drift, the Pod pulls whatever the registry serves
+          # and the gates pass against the wrong binary.
+          image: ghcr.io/dhilipkumars/axiom-gateway:latest
           # Default to the published GHCR image for this repository. A fork that
           # publishes under a different owner needs to patch only this field.
-          # This tag moves on every push to main, so kubelet must re-resolve it
-          # on every start. The E2E gates deliberately override the policy to
-          # IfNotPresent after apply so a side-loaded local build still wins
+          # This tag moves when a release is published, so kubelet must
+          # re-resolve it rather than trust a cached layer. The E2E gates
+          # rewrite the policy to IfNotPresent before apply so a side-loaded
+          # local build still wins
           # there.
           imagePullPolicy: Always
           # Arguments match gateway/cmd/gateway/main.go.

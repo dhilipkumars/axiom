@@ -40,6 +40,27 @@ The flag is on the Postgres commands below. The OpenSSL image and the gateway
 image are multi-architecture, so they need nothing. On x86_64 you may drop the
 flag or leave it; Docker accepts a matching platform.
 
+## Step 0 — somewhere to work
+
+This procedure writes a TLS **private key** to disk. It must not land in a git
+checkout, where it would be untracked and one `git add -A` away from being
+committed.
+
+```sh
+mkdir -p ~/axiom-quickstart
+```
+
+**Every path below is absolute, deliberately.** Do not rewrite them as relative
+paths after a `cd`: if you run each command in its own shell — which is what
+most tool-using agents do — a `cd` in one step is gone by the next, and
+`./certs` would then resolve to wherever that shell happened to start. That is
+exactly the mistake this step exists to prevent.
+
+Two forms appear below and they are not interchangeable. `~` expands only at
+the start of a word, so it works for `docker -v ~/axiom-quickstart/...` but
+**not** after an `=` sign: `--from-file=tls.crt=~/...` is passed through
+literally and the file is not found. Those use `"$HOME/..."` instead.
+
 ## Step 1 — cluster
 
 **This procedure requires [kind](https://kind.sigs.k8s.io).** Not because
@@ -51,9 +72,26 @@ It creates a cluster named `axiom` and uses that name throughout. Do not
 substitute an existing cluster with a different name unless you also change
 every later use of `axiom-control-plane`.
 
+**Stop if a cluster of that name already exists.** Step 3 replaces
+`axiom-gateway-tls` and restarts `axiom-gateway` in whatever cluster this
+resolves to, so adopting someone's existing `axiom` cluster would rewrite the
+TLS material of a running deployment — and steps 3 to 6 would then pass while
+having broken it. Deleting it is the caller's decision, not yours:
+
 ```sh
-kind get clusters | grep -qx axiom || kind create cluster --name axiom
+if kind get clusters | grep -qx axiom; then
+  echo "a kind cluster named 'axiom' already exists; stopping." >&2
+  echo "This procedure would replace its gateway TLS secret and restart its" >&2
+  echo "gateway, which may not be disposable. Ask which cluster to use." >&2
+  exit 1
+fi
+kind create cluster --name axiom
 ```
+
+**Do not resolve this by deleting the cluster.** It may be someone's working
+environment — the report that prompted this check was run on exactly that. Ask.
+And do not continue to step 2: the later steps would succeed against that
+cluster while having broken it.
 
 Verify. The node is `NotReady` for a while after creation, so wait for it
 rather than reading `get nodes` once:
@@ -73,8 +111,8 @@ container** — macOS ships LibreSSL, whose output the gateway rejects for three
 different reasons.
 
 ```sh
-mkdir -p certs
-docker run --rm -v "$PWD/certs:/certs" -w /certs \
+mkdir -p ~/axiom-quickstart/certs
+docker run --rm -v ~/axiom-quickstart/certs:/certs -w /certs \
   --entrypoint /bin/sh alpine/openssl:3.3.3 -c "
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
       -days 365 -subj '/CN=axiom-dev-ca' -keyout ca.key -out ca.crt
@@ -91,8 +129,8 @@ docker run --rm -v "$PWD/certs:/certs" -w /certs \
 Verify:
 
 ```sh
-ls certs/
-docker run --rm -v "$PWD/certs:/certs:ro" alpine/openssl:3.3.3 \
+ls ~/axiom-quickstart/certs/
+docker run --rm -v ~/axiom-quickstart/certs:/certs:ro alpine/openssl:3.3.3 \
   x509 -in /certs/gateway.crt -noout -ext subjectAltName
 ```
 
@@ -113,8 +151,8 @@ kubectl --context kind-axiom apply -f "$RAW/gateway-rbac.yaml"
 
 kubectl --context kind-axiom -n axiom-system delete secret axiom-gateway-tls --ignore-not-found
 kubectl --context kind-axiom -n axiom-system create secret generic axiom-gateway-tls \
-  --from-file=tls.crt=certs/gateway.crt \
-  --from-file=tls.key=certs/gateway.key
+  --from-file=tls.crt="$HOME/axiom-quickstart/certs/gateway.crt" \
+  --from-file=tls.key="$HOME/axiom-quickstart/certs/gateway.key"
 
 kubectl --context kind-axiom apply -f "$RAW/gateway-deployment.yaml"
 kubectl --context kind-axiom -n axiom-system rollout restart deploy/axiom-gateway
@@ -124,7 +162,18 @@ kubectl --context kind-axiom -n axiom-system rollout status deploy/axiom-gateway
 The `delete secret --ignore-not-found` before `create` is what makes this step
 re-runnable; `create secret` alone fails on a second attempt.
 
-Verify: `rollout status` exits 0 and prints
+Verify the rollout, and the port step 5 depends on:
+
+```sh
+kubectl --context kind-axiom -n axiom-system get svc axiom-gateway \
+  -o jsonpath='{.spec.ports[0].port}:{.spec.ports[0].nodePort}{"\n"}'
+```
+
+Expect `8443:30443`. Step 5 dials `axiom-control-plane:30443`, so if this
+prints anything else, fix the endpoint there rather than meeting it as an
+opaque TLS error two steps later.
+
+`rollout status` exits 0 and prints
 `deployment "axiom-gateway" successfully rolled out`. If it times out:
 
 ```sh
@@ -139,7 +188,7 @@ docker rm -f axiom-postgres 2>/dev/null || true
 docker run -d --name axiom-postgres --platform linux/amd64 \
   --network kind \
   -e POSTGRES_PASSWORD=axiom \
-  -v "$PWD/certs:/certs:ro" \
+  -v ~/axiom-quickstart/certs:/certs:ro \
   ghcr.io/dhilipkumars/axiom-postgres:latest-pg17
 ```
 
@@ -192,7 +241,17 @@ docker exec axiom-postgres psql -U postgres -tAc \
   "SELECT count(*) FROM information_schema.tables WHERE table_schema='k8s'"
 ```
 
-Expect a number greater than 0.
+On a cluster created by step 1, expect **exactly 2** — `k8s.pods` and
+`k8s.configmaps`.
+
+Two things decide that, and only together. The bundled ClusterRole
+`axiom-gateway` grants three kinds: pods, configmaps, and an example
+`widgets` custom resource. A stock kind cluster has no widgets CRD, so only
+two of the three resolve. **If you are on a cluster that does have that CRD
+installed, expect 3** — that is correct, not a failure.
+
+To get more kinds, grant them in the ClusterRole and restart the gateway — it
+caches what it may access — then import again.
 
 ## Step 6 — success criterion
 
@@ -235,7 +294,7 @@ asked to keep it:
 ```sh
 docker rm -f axiom-postgres
 kind delete cluster --name axiom
-rm -rf certs
+rm -rf ~/axiom-quickstart
 ```
 
 ## Constraints worth knowing before you suggest things

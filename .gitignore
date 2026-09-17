@@ -15,3 +15,8 @@ gateway/bin/
 *.csr
 *.srl
 e2e/.kind/
+
+# TLS material, if a quickstart is ever run from this directory. A private key
+# must never be committed. Anchored: unanchored, this would also swallow new
+# files under deploy/compose/certs/, which is tracked source.
+/certs/
