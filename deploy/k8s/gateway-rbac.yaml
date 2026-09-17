@@ -5,10 +5,14 @@
 # and OpenAPI endpoints that schema discovery reads. Nothing is granted ahead
 # of need.
 #
-# This must stay in step with the gateway's --serve allowlist: --serve bounds
-# what the gateway offers, this bounds what it can actually reach. Widening one
-# without the other either hides a kind or leaves an offer the API server will
-# refuse.
+# This is what bounds Axiom: the gateway offers what this permits, and the API
+# server enforces it. To change what appears in SQL, change this file and
+# restart the gateway -- it caches what it may access -- then re-import, since
+# foreign tables are catalog objects and do not follow the change themselves.
+#
+# The role is named for the identity it belongs to, not for what it grants. It
+# is not read-only: ConfigMaps and the example CRD are writable, because
+# INSERT, UPDATE and DELETE on a foreign table are real Kubernetes writes.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -23,7 +27,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: axiom-gateway-read
+  name: axiom-gateway
 rules:
   - apiGroups: [""]
     resources: ["pods"]
@@ -48,11 +52,11 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: axiom-gateway-read
+  name: axiom-gateway
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: axiom-gateway-read
+  name: axiom-gateway
 subjects:
   - kind: ServiceAccount
     name: axiom-gateway

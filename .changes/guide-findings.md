@@ -14,3 +14,16 @@ having broken something else. It now says where to run from, so a TLS private
 key does not land in whatever directory you happened to be in, checks that the
 gateway's NodePort is the one the next step dials, and says the import produces
 exactly two tables and which grant decides that.
+
+**The ClusterRole and ClusterRoleBinding are renamed** from
+`axiom-gateway-read` to `axiom-gateway`, matching the ServiceAccount. The name
+claimed read-only and never was: ConfigMaps and the example CRD are writable,
+because `INSERT`, `UPDATE` and `DELETE` on a foreign table are real Kubernetes
+writes. If you applied the previous manifest, the old objects are left behind
+and keep granting the same access to the same ServiceAccount — remove them once
+the new ones are in place:
+
+```sh
+kubectl delete clusterrolebinding axiom-gateway-read
+kubectl delete clusterrole axiom-gateway-read
+```

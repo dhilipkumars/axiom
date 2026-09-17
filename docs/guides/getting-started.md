@@ -128,7 +128,7 @@ point, not a recommendation**. It grants Pods, ConfigMaps, and an example
 custom resource. To add Deployments, which later examples on this site use:
 
 ```sh
-kubectl patch clusterrole axiom-gateway-read --type=json -p '[{
+kubectl patch clusterrole axiom-gateway --type=json -p '[{
   "op": "add", "path": "/rules/-",
   "value": {"apiGroups": ["apps"], "resources": ["deployments"],
             "verbs": ["get", "list", "watch"]}

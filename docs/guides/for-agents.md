@@ -231,7 +231,7 @@ docker exec axiom-postgres psql -U postgres -tAc \
 Expect **exactly 2** — `k8s.pods` and `k8s.configmaps`.
 
 That number is set by RBAC, not by the import: the bundled ClusterRole
-`axiom-gateway-read` grants pods, configmaps and an example `widgets` custom
+`axiom-gateway` grants pods, configmaps and an example `widgets` custom
 resource, and a stock kind cluster has no widgets CRD. To get more kinds, grant
 them in that ClusterRole and restart the gateway — it caches what it may
 access — then import again.
