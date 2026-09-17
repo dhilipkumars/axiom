@@ -198,6 +198,43 @@ jobs:
           docker buildx imagetools create \
             --tag "$IMAGE_NAME:${version}-pg${{ matrix.pg }}" "${refs[@]}"
 
+  # The downloadable artifacts, for people who already run Postgres and so
+  # cannot use the images (#36). Same matrix and same runners as the images,
+  # and the same build stage, so a tarball and an image of one version contain
+  # byte-identical files rather than two compiles that might differ.
+  #
+  # Release only: there is nowhere to attach a development tarball, and a
+  # moving download would be worse than none.
+  artifacts:
+    name: pg${{ matrix.pg }} ${{ matrix.arch }} tarball
+    needs: gate
+    if: github.event_name == 'release' && needs.gate.outputs.build == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ["16", "17", "18"]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: ./scripts/version check "$RELEASE_TAG"
+      - uses: docker/setup-buildx-action@v3
+      - run: ./scripts/package-extension "${{ matrix.pg }}" "${{ matrix.arch }}"
+      # Uploaded per job rather than by a later one: a release asset that
+      # exists is better than a matrix that half-succeeded and published
+      # nothing, and `gh release upload` is idempotent with --clobber.
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" dist/* --clobber
+
   # What a stranger gets, checked before the floating tags say it is current.
   #
   # Sitting between `build` and `promote` is the whole point: the version tags

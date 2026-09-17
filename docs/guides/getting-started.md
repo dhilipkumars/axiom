@@ -259,14 +259,68 @@ explains the rules.
 
 ## Installing into a Postgres you already run
 
-This guide runs Postgres in a container because that is what can be done today
-without a toolchain. Installing Axiom into an existing Postgres currently means
-building the extension from source — see the repository's README.
+The guide above runs Postgres in a container. If you already have one, install
+the extension into it instead — no toolchain, no rebuild. Every release
+publishes a tarball per major and architecture:
 
-Downloadable extension artifacts, so that no longer needs a Rust toolchain, are
-the next thing on the roadmap. Note that Axiom cannot be installed on managed
-Postgres at all: it is not a trusted extension and needs
-`shared_preload_libraries`, neither of which RDS, Cloud SQL or Aurora permit.
+```sh
+V=0.1.0; PG=17; ARCH=$(uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/)
+BASE=https://github.com/dhilipkumars/axiom/releases/download/v$V
+curl -fsSLO "$BASE/axiom-$V-pg$PG-linux-$ARCH.tar.gz"
+curl -fsSLO "$BASE/axiom-$V-pg$PG-linux-$ARCH.tar.gz.sha256"
+shasum -a 256 -c "axiom-$V-pg$PG-linux-$ARCH.tar.gz.sha256"
+tar -xzf "axiom-$V-pg$PG-linux-$ARCH.tar.gz"
+```
+
+The tarball holds `axiom.so` and the extension's control and SQL files, under
+the paths a Debian-packaged Postgres uses. Unpack them over your installation:
+
+```sh
+sudo cp -r axiom-$V-pg$PG-linux-$ARCH/usr/. /usr/
+```
+
+If your Postgres does not use those paths — a source build, or Homebrew — place
+the two pieces where `pg_config` says they belong:
+
+```sh
+sudo cp axiom-$V-pg$PG-linux-$ARCH/usr/lib/postgresql/$PG/lib/axiom.so \
+  "$(pg_config --pkglibdir)/"
+sudo cp axiom-$V-pg$PG-linux-$ARCH/usr/share/postgresql/$PG/extension/axiom* \
+  "$(pg_config --sharedir)/extension/"
+```
+
+Then preload it and restart. **This is not optional**: Axiom registers
+`PGC_POSTMASTER` settings, so without it `CREATE EXTENSION` fails outright
+rather than running with the cache disabled.
+
+```sh
+# postgresql.conf — append to any existing list rather than replacing it
+shared_preload_libraries = 'axiom'
+```
+
+```sql
+CREATE EXTENSION axiom;
+SELECT axiom_version();
+```
+
+From here the rest of this guide applies unchanged, starting at
+[Install and connect](#5-install-and-connect) — you still need a gateway, and
+the server and user mapping are the same.
+
+### What the tarballs do and do not cover
+
+- **Built on Debian bookworm (glibc 2.36).** They will not load on an older
+  glibc — Debian bullseye or RHEL 8, for instance. The failure is at load time,
+  so Postgres refuses to start with the preload set; there is no silent
+  half-working state.
+- **Linux, amd64 and arm64.** macOS and Windows are not published; building
+  from source works, and the repository's README covers it.
+- **Match the major exactly.** A `pg17` tarball is compiled against
+  PostgreSQL 17's headers. Installing it beside a different major does not
+  work and is not made to fail gracefully.
+- **Managed Postgres cannot use these at all.** Axiom is not a trusted
+  extension and needs `shared_preload_libraries`, so RDS, Cloud SQL and Aurora
+  are out regardless of how the files are delivered.
 
 ## Tearing it down
 
