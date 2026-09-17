@@ -2,7 +2,9 @@
 # arm64 runners, which decides whether the extension artifacts in #36 can be
 # built natively or have to be emulated. Deleted once answered.
 name: arm probe
-on: workflow_dispatch
+on:
+  push:
+    branches: [extension-artifacts]
 jobs:
   probe:
     strategy:
