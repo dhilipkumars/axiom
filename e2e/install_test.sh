@@ -30,7 +30,7 @@ PG_IMAGE=ghcr.io/dhilipkumars/axiom-postgres
 # The two images are published by separate workflows on the same event, so the
 # release gateway may not exist yet when this starts. That is a wait, not a
 # reason to test the wrong thing: `wait_for_image` below bounds it.
-GW_IMAGE="${E2E_INSTALL_GATEWAY:-ghcr.io/dhilipkumars/axiom-gateway:development}"
+GW_IMAGE="${E2E_INSTALL_GATEWAY:-ghcr.io/dhilipkumars/axiom-gateway:latest}"
 CLUSTER=axiom-install
 NODE="${CLUSTER}-control-plane"
 CONTAINER=axiom-install-pg

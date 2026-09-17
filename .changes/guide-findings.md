@@ -27,3 +27,13 @@ the new ones are in place:
 kubectl delete clusterrolebinding axiom-gateway-read
 kubectl delete clusterrole axiom-gateway-read
 ```
+
+**Check it for your own grants first.** If you added kinds by patching
+`axiom-gateway-read` — which is what the previous guide told you to do —
+those rules are only in that object. Copy them into `axiom-gateway` before
+deleting it, or the gateway silently goes back to offering pods, configmaps
+and the example CRD:
+
+```sh
+kubectl get clusterrole axiom-gateway-read -o yaml
+```

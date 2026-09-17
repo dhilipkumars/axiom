@@ -42,15 +42,21 @@ flag or leave it; Docker accepts a matching platform.
 
 ## Step 0 — somewhere to work
 
-Everything below writes into the current directory, including a TLS **private
-key**. Do not run this from a git checkout: `certs/` is untracked there, and
-one `git add -A` away from a committed key.
+This procedure writes a TLS **private key** to disk. It must not land in a git
+checkout, where it would be untracked and one `git add -A` away from being
+committed.
 
 ```sh
-mkdir -p ~/axiom-quickstart && cd ~/axiom-quickstart
+mkdir -p ~/axiom-quickstart
 ```
 
-Stay in that directory for every step. A new shell means `cd` back to it.
+**Every path below is absolute, deliberately.** Do not rewrite them as relative
+paths after a `cd`: if you run each command in its own shell — which is what
+most tool-using agents do — a `cd` in one step is gone by the next, and
+`./certs` would then resolve to wherever that shell happened to start. That is
+exactly the mistake this step exists to prevent.
+
+`~` is expanded by your shell, so these work from any working directory.
 
 ## Step 1 — cluster
 
@@ -71,14 +77,18 @@ having broken it. Deleting it is the caller's decision, not yours:
 
 ```sh
 if kind get clusters | grep -qx axiom; then
-  echo "a kind cluster named 'axiom' already exists."
-  echo "This procedure would replace its gateway TLS secret and restart its"
-  echo "gateway. Delete it with 'kind delete cluster --name axiom' if it is"
-  echo "disposable, or ask which cluster to use. Stopping."
+  echo "a kind cluster named 'axiom' already exists; stopping." >&2
+  echo "This procedure would replace its gateway TLS secret and restart its" >&2
+  echo "gateway, which may not be disposable. Ask which cluster to use." >&2
   exit 1
 fi
 kind create cluster --name axiom
 ```
+
+**Do not resolve this by deleting the cluster.** It may be someone's working
+environment — the report that prompted this check was run on exactly that. Ask.
+And do not continue to step 2: the later steps would succeed against that
+cluster while having broken it.
 
 Verify. The node is `NotReady` for a while after creation, so wait for it
 rather than reading `get nodes` once:
@@ -98,8 +108,8 @@ container** — macOS ships LibreSSL, whose output the gateway rejects for three
 different reasons.
 
 ```sh
-mkdir -p certs
-docker run --rm -v "$PWD/certs:/certs" -w /certs \
+mkdir -p ~/axiom-quickstart/certs
+docker run --rm -v ~/axiom-quickstart/certs:/certs -w /certs \
   --entrypoint /bin/sh alpine/openssl:3.3.3 -c "
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
       -days 365 -subj '/CN=axiom-dev-ca' -keyout ca.key -out ca.crt
@@ -116,8 +126,8 @@ docker run --rm -v "$PWD/certs:/certs" -w /certs \
 Verify:
 
 ```sh
-ls certs/
-docker run --rm -v "$PWD/certs:/certs:ro" alpine/openssl:3.3.3 \
+ls ~/axiom-quickstart/certs/
+docker run --rm -v ~/axiom-quickstart/certs:/certs:ro alpine/openssl:3.3.3 \
   x509 -in /certs/gateway.crt -noout -ext subjectAltName
 ```
 
@@ -175,7 +185,7 @@ docker rm -f axiom-postgres 2>/dev/null || true
 docker run -d --name axiom-postgres --platform linux/amd64 \
   --network kind \
   -e POSTGRES_PASSWORD=axiom \
-  -v "$PWD/certs:/certs:ro" \
+  -v ~/axiom-quickstart/certs:/certs:ro \
   ghcr.io/dhilipkumars/axiom-postgres:latest-pg17
 ```
 
@@ -228,13 +238,17 @@ docker exec axiom-postgres psql -U postgres -tAc \
   "SELECT count(*) FROM information_schema.tables WHERE table_schema='k8s'"
 ```
 
-Expect **exactly 2** — `k8s.pods` and `k8s.configmaps`.
+On a cluster created by step 1, expect **exactly 2** — `k8s.pods` and
+`k8s.configmaps`.
 
-That number is set by RBAC, not by the import: the bundled ClusterRole
-`axiom-gateway` grants pods, configmaps and an example `widgets` custom
-resource, and a stock kind cluster has no widgets CRD. To get more kinds, grant
-them in that ClusterRole and restart the gateway — it caches what it may
-access — then import again.
+Two things decide that, and only together. The bundled ClusterRole
+`axiom-gateway` grants three kinds: pods, configmaps, and an example
+`widgets` custom resource. A stock kind cluster has no widgets CRD, so only
+two of the three resolve. **If you are on a cluster that does have that CRD
+installed, expect 3** — that is correct, not a failure.
+
+To get more kinds, grant them in the ClusterRole and restart the gateway — it
+caches what it may access — then import again.
 
 ## Step 6 — success criterion
 
@@ -277,7 +291,7 @@ asked to keep it:
 ```sh
 docker rm -f axiom-postgres
 kind delete cluster --name axiom
-rm -rf certs
+rm -rf ~/axiom-quickstart/certs
 ```
 
 ## Constraints worth knowing before you suggest things

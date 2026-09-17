@@ -227,13 +227,25 @@ kind_deploy_gateway() {
   kubectl_e2e apply -f "$E2E_ROOT/deploy/k8s/gateway-rbac.yaml" >/dev/null || fail "apply RBAC"
   kind_gateway_tls_secret
   log "deploying the gateway in-cluster (serve=$serve, discovery-ttl=$discovery_ttl)"
-  # The checked-in manifest uses Always because :development is a moving tag.
-  # E2E needs the opposite: a cache-preferring policy so the side-loaded local
-  # build wins without a registry pull. Patch the manifest *before* apply so
-  # the first Pod is created with the override already in place.
-  sed "0,/imagePullPolicy: Always/s//imagePullPolicy: $E2E_GATEWAY_PULL_POLICY/" \
-    "$E2E_ROOT/deploy/k8s/gateway-deployment.yaml" | kubectl_e2e apply -f - >/dev/null \
-    || fail "apply gateway deployment"
+  # The checked-in manifest pulls a released tag Always, which is right for an
+  # operator and exactly wrong here: this suite tests the working tree, so the
+  # Pod must run the image `kind load` just side-loaded, not whatever the
+  # registry is serving. Patch the manifest *before* apply, so the first Pod is
+  # created with the override already in place.
+  #
+  # A plain substitution, not GNU sed's `0,/re/` range. BSD sed -- which is
+  # what macOS ships -- ignores address 0 silently and exits 0, so the policy
+  # stayed Always and every local run tested the *published* gateway while
+  # reporting success. There is one occurrence, so the range bought nothing
+  # even on GNU. The count below is the guard: a substitution that stops
+  # matching must fail loudly rather than quietly testing the wrong binary.
+  local patched
+  patched="$(sed "s|imagePullPolicy: Always|imagePullPolicy: $E2E_GATEWAY_PULL_POLICY|" \
+    "$E2E_ROOT/deploy/k8s/gateway-deployment.yaml")"
+  [[ "$(grep -c "imagePullPolicy: $E2E_GATEWAY_PULL_POLICY" <<<"$patched")" == "1" ]] \
+    || fail "could not set imagePullPolicy to $E2E_GATEWAY_PULL_POLICY; the gate would \
+have tested the published image instead of this build"
+  kubectl_e2e apply -f - <<<"$patched" >/dev/null || fail "apply gateway deployment"
   # Override the manifest's defaults the same way an operator would. Not
   # ConfigMap keys: a referenced key is required, and a Pod whose ConfigMap
   # lacks it never starts (deploy/k8s/gateway-deployment.yaml says why).
