@@ -167,10 +167,17 @@ const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// backend (see `channel_for` in client.rs). Pinging those while idle would
 /// mean every backend that ever ran one FDW query holds a connection open and
 /// sends a PING every 30 seconds for as long as the session lasts, scaling
-/// with backend count rather than with work. It does not need to: a unary call
-/// on a dead connection fails immediately and the channel is evicted on a
-/// connection-class error, so the loss is discovered by the next request,
-/// which is the only thing that cares.
+/// with backend count rather than with work. And it would not help: the
+/// per-backend runtime is `current_thread`, so between queries nothing polls
+/// the connection and no keepalive would be sent however this is configured.
+///
+/// This comment used to argue that the loss is simply "discovered by the next
+/// request, which is the only thing that cares". Issue #51 falsified that. The
+/// gateway does not neglect an idle connection, it deliberately closes one
+/// whose peer stops answering, so the next request did not discover the loss
+/// so much as become it -- and inside a transaction it took the transaction
+/// with it. `client.rs` now retires a cached channel on age before offering
+/// it, which is where that problem is solved; see `MAX_IDLE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Keepalive {
     /// Ping only while a request or stream is in flight.

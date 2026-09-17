@@ -180,6 +180,13 @@ fn forget_channel(server: &ServerOptions) {
 /// asking, and the cost of being wrong is one TLS handshake on a query that
 /// was about to happen anyway -- against a failed query, and inside a
 /// transaction a failed transaction (issue #51).
+///
+/// This is an age check, not a liveness check, and the difference is worth
+/// being honest about: a connection that dies *within* the window -- the
+/// gateway pod restarting, or a middlebox reaping idle flows faster than this
+/// -- is still met by a failing statement. What it removes is the failure that
+/// was guaranteed rather than incidental, because the gateway's own keepalive
+/// was closing connections no backend could ever answer for.
 const MAX_IDLE: Duration = Duration::from_secs(25);
 
 /// Returns a channel for `server`, reusing one already open in this backend
@@ -491,32 +498,22 @@ mod tests {
         }
     }
 
-    /// The gateway closes a connection a backend has left idle for 40s, and
-    /// the backend cannot answer the ping that precedes it. So the cache must
-    /// not hand back a channel that old: doing so cost a user's query, and
-    /// inside a transaction their transaction (issue #51).
+    /// `MAX_IDLE` must stay long enough that ordinary gaps between queries do
+    /// not pay for a TLS handshake they did not need.
     ///
-    /// `MAX_IDLE` is the whole fix, so it is pinned against the gateway's
-    /// timers rather than left as a number someone can drift.
+    /// The other half of this contract -- that it expires *before* the gateway
+    /// starts probing an idle peer -- cannot honestly be checked from here.
+    /// The gateway's timers live in Go, and restating them as Rust literals
+    /// would only make this test agree with itself. It is checked against the
+    /// real values by the Go test
+    /// `TestExtensionRebuildsBeforeThisServerClosesAnIdleConnection`
+    /// in `gateway/internal/server/keepalive_test.go`, which reads `MAX_IDLE`
+    /// out of this file.
     #[test]
-    fn a_channel_is_not_reused_once_the_gateway_may_have_closed_it() {
-        // gateway/internal/server/keepalive.go: Time 30s, then Timeout 10s.
-        let gateway_ping_after = Duration::from_secs(30);
-        let gateway_closes_at = gateway_ping_after + Duration::from_secs(10);
-
-        assert!(
-            MAX_IDLE < gateway_ping_after,
-            "MAX_IDLE ({MAX_IDLE:?}) must expire before the gateway even starts asking              ({gateway_ping_after:?}), or a query can still meet a connection being closed"
-        );
-        assert!(
-            MAX_IDLE < gateway_closes_at,
-            "MAX_IDLE ({MAX_IDLE:?}) must be under the {gateway_closes_at:?} the gateway              takes to drop an unanswered peer"
-        );
-        // Not so short that an ordinary gap between two queries pays for a TLS
-        // handshake it did not need.
+    fn max_idle_is_not_so_short_that_it_rebuilds_on_routine_pauses() {
         assert!(
             MAX_IDLE >= Duration::from_secs(10),
-            "MAX_IDLE ({MAX_IDLE:?}) is short enough to rebuild on routine pauses"
+            "MAX_IDLE ({MAX_IDLE:?}) would rebuild the channel between ordinary queries"
         );
     }
 
