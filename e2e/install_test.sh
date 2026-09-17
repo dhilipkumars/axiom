@@ -195,7 +195,7 @@ kubectl --context "kind-$CLUSTER" -n axiom-system create secret generic axiom-ga
   --from-file=tls.crt=certs/gateway.crt --from-file=tls.key=certs/gateway.key >/dev/null
 # The published gateway, not a local build: this gate is about what is on the
 # registry, so side-loading a build from source would defeat it.
-sed "s|image: ghcr.io/dhilipkumars/axiom-gateway:development|image: $GW_IMAGE|" \
+sed "s|image: ghcr.io/dhilipkumars/axiom-gateway:.*|image: $GW_IMAGE|" \
   "$ROOT/deploy/k8s/gateway-deployment.yaml" | kubectl --context "kind-$CLUSTER" apply -f - >/dev/null
 # The guide restarts here for a reason this script needs even more: on a reused
 # cluster the Deployment is unchanged, so `apply` alone leaves the running pod

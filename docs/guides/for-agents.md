@@ -40,6 +40,18 @@ The flag is on the Postgres commands below. The OpenSSL image and the gateway
 image are multi-architecture, so they need nothing. On x86_64 you may drop the
 flag or leave it; Docker accepts a matching platform.
 
+## Step 0 — somewhere to work
+
+Everything below writes into the current directory, including a TLS **private
+key**. Do not run this from a git checkout: `certs/` is untracked there, and
+one `git add -A` away from a committed key.
+
+```sh
+mkdir -p ~/axiom-quickstart && cd ~/axiom-quickstart
+```
+
+Stay in that directory for every step. A new shell means `cd` back to it.
+
 ## Step 1 — cluster
 
 **This procedure requires [kind](https://kind.sigs.k8s.io).** Not because
@@ -51,8 +63,21 @@ It creates a cluster named `axiom` and uses that name throughout. Do not
 substitute an existing cluster with a different name unless you also change
 every later use of `axiom-control-plane`.
 
+**Stop if a cluster of that name already exists.** Step 3 replaces
+`axiom-gateway-tls` and restarts `axiom-gateway` in whatever cluster this
+resolves to, so adopting someone's existing `axiom` cluster would rewrite the
+TLS material of a running deployment — and steps 3 to 6 would then pass while
+having broken it. Deleting it is the caller's decision, not yours:
+
 ```sh
-kind get clusters | grep -qx axiom || kind create cluster --name axiom
+if kind get clusters | grep -qx axiom; then
+  echo "a kind cluster named 'axiom' already exists."
+  echo "This procedure would replace its gateway TLS secret and restart its"
+  echo "gateway. Delete it with 'kind delete cluster --name axiom' if it is"
+  echo "disposable, or ask which cluster to use. Stopping."
+  exit 1
+fi
+kind create cluster --name axiom
 ```
 
 Verify. The node is `NotReady` for a while after creation, so wait for it
@@ -124,7 +149,18 @@ kubectl --context kind-axiom -n axiom-system rollout status deploy/axiom-gateway
 The `delete secret --ignore-not-found` before `create` is what makes this step
 re-runnable; `create secret` alone fails on a second attempt.
 
-Verify: `rollout status` exits 0 and prints
+Verify the rollout, and the port step 5 depends on:
+
+```sh
+kubectl --context kind-axiom -n axiom-system get svc axiom-gateway \
+  -o jsonpath='{.spec.ports[0].port}:{.spec.ports[0].nodePort}{"\n"}'
+```
+
+Expect `8443:30443`. Step 5 dials `axiom-control-plane:30443`, so if this
+prints anything else, fix the endpoint there rather than meeting it as an
+opaque TLS error two steps later.
+
+`rollout status` exits 0 and prints
 `deployment "axiom-gateway" successfully rolled out`. If it times out:
 
 ```sh
@@ -192,7 +228,13 @@ docker exec axiom-postgres psql -U postgres -tAc \
   "SELECT count(*) FROM information_schema.tables WHERE table_schema='k8s'"
 ```
 
-Expect a number greater than 0.
+Expect **exactly 2** — `k8s.pods` and `k8s.configmaps`.
+
+That number is set by RBAC, not by the import: the bundled ClusterRole
+`axiom-gateway-read` grants pods, configmaps and an example `widgets` custom
+resource, and a stock kind cluster has no widgets CRD. To get more kinds, grant
+them in that ClusterRole and restart the gateway — it caches what it may
+access — then import again.
 
 ## Step 6 — success criterion
 

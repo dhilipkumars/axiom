@@ -104,8 +104,8 @@ kubectl apply -f "$RAW/gateway-deployment.yaml"
 kubectl -n axiom-system rollout status deploy/axiom-gateway
 ```
 
-The manifest pulls `ghcr.io/dhilipkumars/axiom-gateway:development`, built
-nightly from `main`. For a released gateway, point it at a version instead:
+The manifest pulls `ghcr.io/dhilipkumars/axiom-gateway:latest`, which follows
+releases. To pin a version instead:
 
 ```sh
 kubectl -n axiom-system set image deploy/axiom-gateway \
