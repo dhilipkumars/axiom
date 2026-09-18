@@ -67,6 +67,11 @@ cp "$ROOT/LICENSE" "${STAGE}/${NAME}/LICENSE" 2>/dev/null || true
 cat > "${STAGE}/${NAME}/INSTALL.md" <<EOF
 # Axiom ${VERSION} for PostgreSQL ${PG_MAJOR} (linux/${ARCH})
 
+Run everything below from the directory this file is in -- the paths are
+relative to it:
+
+    cd ${NAME}
+
 Place the files where this Postgres looks for them. \`pg_config\` is the
 authority, so ask it rather than guessing a layout:
 
@@ -89,8 +94,31 @@ Then, in the database you want to query from:
     CREATE EXTENSION axiom;
     SELECT axiom_version();
 
+## This is a foreign data wrapper, so there is one more step
+
+\`CREATE EXTENSION\` installs the machinery but no tables. Axiom reads
+Kubernetes through a **gateway** running in the cluster, and until you point
+this Postgres at one there is nothing to query:
+
+    CREATE SERVER prod FOREIGN DATA WRAPPER axiom_fdw
+      OPTIONS (endpoint 'https://your-gateway:8443', ca_cert '/path/on/this/host/ca.crt');
+    CREATE USER MAPPING FOR CURRENT_USER SERVER prod;
+    CREATE SCHEMA k8s;
+    IMPORT FOREIGN SCHEMA k8s FROM SERVER prod INTO k8s;
+
+    SELECT name, namespace, phase FROM k8s.pods;
+
+\`endpoint\` has to be an address this database server can reach, and
+\`ca_cert\` a path on this server's filesystem, readable by the user Postgres
+runs as. Deploying the gateway and exposing it are covered here:
+
+    https://dhilipkumars.github.io/axiom/guides/deploying/
+
+## Limits
+
 Built against PostgreSQL ${PG_MAJOR} on Debian bookworm (glibc 2.36). It will
-not load on an older glibc, such as Debian bullseye or RHEL 8.
+not load on an older glibc, such as Debian bullseye or RHEL 8. A tarball for a
+different major will not load at all -- match it to your server.
 
 https://dhilipkumars.github.io/axiom/
 EOF

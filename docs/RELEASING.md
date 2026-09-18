@@ -69,8 +69,13 @@ by hand — both accept `workflow_dispatch` — or build locally.
 Nothing about a development image is a release: no version tag is written, and
 `latest` is untouched. Only publishing a GitHub release moves those.
 
-## What a release does not do yet
+## What a release publishes
 
-Publish downloadable extension artifacts. Today a release publishes container
-images, which serve evaluation rather than installation into an existing
-Postgres — see the tracking issue for v0.1.0 and the artifact issue it defers.
+- **Container images**, per supported Postgres major, multi-architecture:
+  `axiom-postgres:<version>-pgNN` and `axiom-gateway:<version>`, with the
+  floating tags moved once the install check has passed against them.
+- **Extension tarballs**, one per major and architecture, attached to the
+  GitHub release with a `.sha256` beside each. These are for installing into a
+  Postgres someone already runs; the images are for trying Axiom.
+
+v0.1.0 predates the tarballs and has only images.

@@ -261,9 +261,20 @@ explains the rules.
 
 The guide above runs Postgres in a container. If you already have one, install
 the extension into it instead, using a release tarball — no toolchain, no
-rebuild. **Until a release carries those tarballs, building from source is
-still the only route into an existing Postgres**; the repository's README
-covers it.
+rebuild.
+
+**Until a release carries those tarballs, building from source is the only
+route into an existing Postgres.** That needs a Rust toolchain and
+`cargo-pgrx` matching the `pg_config` of the server you are installing into:
+
+```sh
+cargo install cargo-pgrx --version 0.19.2 --locked
+cargo pgrx init --pg17 "$(which pg_config)"
+cd extension && cargo pgrx install --release --no-default-features --features pg17
+```
+
+The feature must match that major — `pg16`, `pg17` or `pg18` — or the build
+fails in a way that does not name the cause.
 
 Releases publish a tarball per Postgres major and architecture. **v0.1.0 does
 not have them**: it predates the change, so take `V` from a later release on
