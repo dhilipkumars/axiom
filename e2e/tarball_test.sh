@@ -41,7 +41,10 @@ for pg in $MAJORS; do
   # the version only changes at release, so the filename cannot show it.
   # Docker's layer cache makes the rebuild cheap when nothing changed.
   log "packaging pg${pg} (${ARCH})"
-  "$ROOT/scripts/package-extension" "$pg" "$ARCH" >/dev/null \
+  # Tarball only. This gate does not test the .deb or .rpm -- e2e/package_test.sh
+  # does -- and building them here would report a packaging failure under a job
+  # named for tarballs.
+  AXIOM_NO_NATIVE_PACKAGES=1 "$ROOT/scripts/package-extension" "$pg" "$ARCH" >/dev/null \
     || fail "pg${pg}: could not build the tarball"
 done
 

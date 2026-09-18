@@ -182,8 +182,9 @@ ${DESC_LONG}
 - Packaged from the ${VERSION} release artifacts.
 EOF
 
+RPM_STAGE="$STAGE/rpmout"; mkdir -p "$RPM_STAGE"
 docker run --rm --platform "linux/${ARCH}" \
-  -v "$RPM_TOP":/top -v "$OUT":/out \
+  -v "$RPM_TOP":/top -v "$RPM_STAGE":/staged \
   rockylinux:9 bash -c "
     set -e
     dnf install -y -q rpm-build >/dev/null 2>&1
@@ -198,8 +199,16 @@ docker run --rm --platform "linux/${ARCH}" \
       --define '_rpmdir /tmp/top/RPMS' \
       --buildroot /tmp/top/BUILDROOT \
       /tmp/top/SPECS/axiom.spec >/dev/null
-    cp /tmp/top/RPMS/${RPM_ARCH}/*.rpm /out/
+    cp /tmp/top/RPMS/${RPM_ARCH}/*.rpm /staged/
   "
-RPM_NAME="$(cd "$OUT" && ls -1 axiom_${PG_MAJOR}-${VERSION}-1*.${RPM_ARCH}.rpm | tail -1)"
+# Named from a directory this run created and nothing else writes to, so the
+# name is this build's output. Globbing dist/ and taking `tail -1` would pick
+# up a package left by an earlier run whenever one sorted later -- a different
+# dist tag is enough -- and then checksum and report that one instead.
+found=("$RPM_STAGE"/*.rpm)
+[[ ${#found[@]} -eq 1 && -f "${found[0]}" ]] \
+  || { echo "package-native: expected exactly one rpm, got ${#found[@]}" >&2; exit 1; }
+RPM_NAME="$(basename "${found[0]}")"
+mv "${found[0]}" "$OUT/$RPM_NAME"
 checksum "${OUT}/${RPM_NAME}"
 echo "    ${OUT}/${RPM_NAME}"

@@ -161,5 +161,12 @@ Nothing about a development image is a release: no version tag is written, and
   the glibc floor read off the binary, so an unsupported system is refused at
   install time instead of at the next postmaster start.
 
-v0.1.0 predates the tarballs and has only images. The packages arrive after
-v0.1.1, which has tarballs but no `.deb` or `.rpm` from its own workflow run.
+v0.1.0 predates the tarballs and has only images.
+
+**v0.1.1 carries packages, but its own workflow did not build them.** They were
+cut from that release's published tarballs after the fact and uploaded by hand,
+so the bytes match — the library inside each package is byte-identical to the
+one in the tarball — but re-running v0.1.1's workflow would not reproduce them.
+From v0.1.2 the workflow produces all three formats itself. Do not repeat the
+manual step; if a release is missing artifacts, fix the workflow and cut
+another patch.

@@ -289,9 +289,10 @@ The Debian package installs under `/usr/lib/postgresql/$PG`, the RPM under
 `/usr/pgsql-$PG`, each matching what that distribution's Postgres expects.
 Neither owns those directories, so neither conflicts with the server package.
 
-Then set `shared_preload_libraries` and restart — the package cannot do that
-for you, and Axiom will not load without it. Continue at
-[Install and connect](#5-install-and-connect).
+A package cannot set `shared_preload_libraries` for you, and Axiom will not
+load without it. Continue at [Preload, then connect](#preload-then-connect) —
+not at step 5, which is written for the container this guide starts and uses
+`docker exec` and a CA path inside it.
 
 ### A tarball, anywhere else
 
@@ -327,7 +328,35 @@ sudo cp axiom-$V-pg$PG-linux-$ARCH/usr/share/postgresql/$PG/extension/axiom* \
   "$(pg_config --sharedir)/extension/"
 ```
 
-Then preload it and restart. **This is not optional**: Axiom registers
+### Building from source, as a last resort
+
+Only if no artifact matches your platform. This needs a Rust toolchain and
+`cargo-pgrx` matching the `pg_config` of the server you are installing into,
+and it is the one part of this guide that needs a checkout:
+
+```sh
+git clone https://github.com/dhilipkumars/axiom.git
+cd axiom
+cargo install cargo-pgrx --version 0.19.2 --locked
+cargo pgrx init --pg17 "$(which pg_config)"
+cd extension && cargo pgrx install --release --no-default-features --features pg17
+```
+
+`cargo pgrx install` writes into the directories `pg_config` reports, so it
+needs permission to do that — run it as a user who has it, or with `sudo -E`
+so the toolchain stays on `PATH`.
+
+**Three places name the major and all must agree**: `--pg17` on
+`cargo pgrx init`, `--features pg17`, and the `pg_config` you point at. Change
+one for a different major and change all three, or the build fails in a way
+that does not name the cause.
+
+### Preload, then connect
+
+However you placed the files — package, tarball or source build — the
+remaining steps are the same.
+
+Preload the library and restart. **This is not optional**: Axiom registers
 `PGC_POSTMASTER` settings, so without it `CREATE EXTENSION` fails outright
 rather than running with the cache disabled.
 
@@ -382,29 +411,6 @@ That is the whole path. [Import a schema](#6-import-a-schema) and
 [Query](#7-query), earlier on this page, go into what the import does and how
 the columns are chosen — they are the same SQL, so read them for the detail
 rather than for another set of steps.
-
-### Building from source, as a last resort
-
-Only if no artifact matches your platform. This needs a Rust toolchain and
-`cargo-pgrx` matching the `pg_config` of the server you are installing into,
-and it is the one part of this guide that needs a checkout:
-
-```sh
-git clone https://github.com/dhilipkumars/axiom.git
-cd axiom
-cargo install cargo-pgrx --version 0.19.2 --locked
-cargo pgrx init --pg17 "$(which pg_config)"
-cd extension && cargo pgrx install --release --no-default-features --features pg17
-```
-
-`cargo pgrx install` writes into the directories `pg_config` reports, so it
-needs permission to do that — run it as a user who has it, or with `sudo -E`
-so the toolchain stays on `PATH`.
-
-**Three places name the major and all must agree**: `--pg17` on
-`cargo pgrx init`, `--features pg17`, and the `pg_config` you point at. Change
-one for a different major and change all three, or the build fails in a way
-that does not name the cause.
 
 ### What the artifacts do and do not cover
 

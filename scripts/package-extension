@@ -171,6 +171,17 @@ tar -tzf "${OUT}/${NAME}.tar.gz" | sed 's/^/    /'
 # package-native also does the RHEL relocation, which is a copy: the .so has no
 # RPATH and the control file resolves $libdir at runtime, so the layout is the
 # packager's choice and needs no separate compile.
+#
+# AXIOM_NO_NATIVE_PACKAGES=1 skips them. The tarball gate sets it: it needs the
+# tree and the tarball and tests neither package, so building them there only
+# spends a couple of minutes per major and -- worse -- reports a packaging
+# failure as a tarball failure, in a job whose name says nothing about
+# packages.
+if [[ "${AXIOM_NO_NATIVE_PACKAGES:-0}" == "1" ]]; then
+  echo "==> skipping .deb/.rpm (AXIOM_NO_NATIVE_PACKAGES=1)"
+  exit 0
+fi
+
 "$ROOT/scripts/package-native" \
   --tree "${STAGE}/${NAME}" \
   --pg "$PG_MAJOR" \

@@ -20,6 +20,24 @@ floor="$(docker run --rm -v "$(cd "$(dirname "$SO")" && pwd)/$(basename "$SO")":
   'command -v readelf >/dev/null 2>&1 || { apt-get -qq update >/dev/null 2>&1; apt-get -qq install -y binutils >/dev/null 2>&1; }
    readelf -V /x.so | grep -o "GLIBC_[0-9.]*" | sed "s/GLIBC_//" | sort -uV | tail -1' \
   2>/dev/null | tr -d '[:space:]')"
-[[ "$floor" =~ ^2\.[0-9]+$ ]] \
+# Three components are legal -- GLIBC_2.2.5 and GLIBC_2.3.4 both appear in a
+# normal x86_64 binary. They are never the maximum in practice, but rejecting
+# the shape would abort on a binary that referenced nothing newer.
+[[ "$floor" =~ ^2\.[0-9]+(\.[0-9]+)?$ ]] \
   || { echo "glibc-floor: could not read a glibc version from $SO (got '$floor')" >&2; exit 1; }
+
+# Symbol versions are not the only thing that can raise the floor. A binary
+# linked with DT_RELR needs glibc 2.36 to load no matter how old its symbol
+# references are, so reporting the symbol maximum for one would be an
+# under-report -- the dangerous direction, since it produces a package that
+# installs on a system where it cannot load. Refuse to guess.
+if docker run --rm -v "$(cd "$(dirname "$SO")" && pwd)/$(basename "$SO")":/x.so:ro \
+     debian:bookworm-slim bash -c \
+     'command -v readelf >/dev/null 2>&1 || { apt-get -qq update >/dev/null 2>&1; apt-get -qq install -y binutils >/dev/null 2>&1; }
+      readelf -d /x.so | grep -qi RELR' 2>/dev/null; then
+  echo "glibc-floor: $SO uses DT_RELR, which needs glibc 2.36 regardless of its" >&2
+  echo "  symbol versions. The symbol maximum ($floor) would be an under-report." >&2
+  exit 1
+fi
+
 printf '%s\n' "$floor"

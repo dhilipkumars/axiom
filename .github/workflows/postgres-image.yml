@@ -290,6 +290,13 @@ jobs:
           # uploaded beside it is worse than none, because it is the thing
           # people use to decide the download is intact.
           ( cd dist && sha256sum -c ./*.sha256 )
+          # ...and the inverse, which `sha256sum -c` cannot tell you: it checks
+          # the checksums that exist against their targets, so a checksum that
+          # was never written passes silently and the artifact ships unverified.
+          for f in dist/*; do
+            case "$f" in *.sha256) continue ;; esac
+            [[ -f "$f.sha256" ]] || { echo "no checksum beside $(basename "$f")" >&2; exit 1; }
+          done
           gh release upload "$RELEASE_TAG" dist/* --clobber
 
   # What a stranger gets, checked before the floating tags say it is current.

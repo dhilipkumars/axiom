@@ -58,10 +58,16 @@ for pg in $MAJORS; do
   log "pg${pg}: the declared glibc floor matches the binary"
   declared="$(docker run --rm -v "$deb":/p.deb:ro debian:bookworm-slim \
     dpkg -I /p.deb 2>/dev/null | sed -n 's/.*libc6 (>= \([0-9.]*\)).*/\1/p')"
+  # Extracted with objdump, deliberately not the readelf pipeline
+  # scripts/glibc-floor uses. Checking a value against itself proves only that
+  # the same code ran twice, so a flaw in that heuristic would make the
+  # generator and this assertion agree on the same wrong number.
   actual="$(docker run --rm -v "$DIST":/d:ro debian:bookworm-slim bash -c '
       apt-get -qq update >/dev/null 2>&1 && apt-get -qq install -y binutils dpkg-dev >/dev/null 2>&1
       cd /tmp && dpkg-deb -x /d/'"$(basename "$deb")"' x
-      readelf -V "$(find x -name axiom.so)" | grep -o "GLIBC_[0-9.]*" | sed "s/GLIBC_//" | sort -uV | tail -1')"
+      objdump -p "$(find x -name axiom.so)" \
+        | awk "/GLIBC_/ { for (i=1;i<=NF;i++) if (\$i ~ /^GLIBC_/) { sub(/^GLIBC_/,\"\",\$i); print \$i } }" \
+        | sort -uV | tail -1')"
   [[ -n "$declared" ]] || fail "pg${pg}: the .deb declares no libc6 floor at all"
   [[ "$declared" == "$actual" ]] \
     || fail "pg${pg}: .deb declares libc6 >= $declared but the binary needs $actual"
@@ -99,15 +105,44 @@ $out"
 
   # The half that actually justifies shipping a package. bullseye is glibc
   # 2.31, below the floor, so apt must refuse and place nothing.
+  #
+  # PGDG's bullseye repository is added first, and that is the whole point of
+  # the check rather than a detail. Without it `postgresql-${pg}` does not
+  # exist on bullseye either, apt refuses for two reasons at once, and the
+  # test would pass even if the libc6 constraint were absent -- proving only
+  # that bullseye has no modern Postgres, which is not what is being claimed.
+  # With the server package installable, glibc is the *only* thing left to
+  # refuse, so a pass means the constraint carried the refusal on its own.
   log "pg${pg}: the .deb refuses on a glibc below its floor"
   out="$(docker run --rm -v "$DIST":/d:ro debian:bullseye-slim bash -c '
+    set -e
     apt-get -qq update >/dev/null 2>&1
+    apt-get -qq install -y curl ca-certificates gnupg >/dev/null 2>&1
+    install -d /usr/share/postgresql-common/pgdg
+    curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+      https://www.postgresql.org/media/keys/ACCC4CF8.asc
+    echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bullseye-pgdg main" \
+      > /etc/apt/sources.list.d/pgdg.list
+    apt-get -qq update >/dev/null 2>&1
+    # If the server package is not actually installable the rest proves
+    # nothing, so say so rather than passing.
+    apt-cache policy postgresql-'"$pg"' | grep -qE "Candidate: [0-9]" && echo SERVER-AVAILABLE
     apt-get install -y /d/'"$(basename "$deb")"' >/tmp/o 2>&1 || true
-    grep -qi "libc6" /tmp/o && echo CITED-LIBC6
+    grep -qF "libc6 (>= '"$declared"')" /tmp/o && echo CITED-THE-FLOOR
+    grep -q "postgresql-'"$pg"' but it is not installable" /tmp/o && echo ALSO-BLOCKED-BY-SERVER
     test ! -f /usr/lib/postgresql/'"$pg"'/lib/axiom.so && echo PLACED-NOTHING
   ' 2>&1)"
-  grep -q CITED-LIBC6 <<<"$out" \
-    || fail "pg${pg}: apt did not refuse on bullseye citing libc6 -- the dependency is not load-bearing:
+  grep -q SERVER-AVAILABLE <<<"$out" \
+    || fail "pg${pg}: postgresql-${pg} is not installable on bullseye, so this check cannot
+attribute the refusal to glibc. Fix the PGDG setup rather than trusting the result:
+$out"
+  grep -q ALSO-BLOCKED-BY-SERVER <<<"$out" \
+    && fail "pg${pg}: apt refused partly because postgresql-${pg} was missing, so the
+glibc constraint was not shown to be what refused:
+$out"
+  grep -q CITED-THE-FLOOR <<<"$out" \
+    || fail "pg${pg}: apt did not refuse citing 'libc6 (>= ${declared})' -- with the server
+package available, that means the floor is not load-bearing:
 $out"
   grep -q PLACED-NOTHING <<<"$out" || fail "pg${pg}: a refused install still placed axiom.so"
   echo "    refused, citing libc6, and placed nothing"
@@ -153,14 +188,31 @@ $out"
   echo "    version ${VERSION} under PGDG postgresql${pg}-server"
 
   # EL8 is glibc 2.28, below the floor. dnf must refuse.
+  #
+  # PGDG's EL8 repository is enabled first for the same reason as bullseye
+  # above: without it postgresql${pg}-server is missing too, dnf refuses for
+  # two reasons, and the check would pass with no glibc requirement at all.
   log "pg${pg}: the .rpm refuses on EL8"
   out="$(docker run --rm -v "$DIST":/d:ro rockylinux:8 bash -c '
+    dnf install -y -q https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-'"$RPM_ARCH"'/pgdg-redhat-repo-latest.noarch.rpm >/dev/null 2>&1
+    dnf -qy module disable postgresql >/dev/null 2>&1 || true
+    dnf list --available postgresql'"$pg"'-server >/dev/null 2>&1 && echo SERVER-AVAILABLE
     dnf install -y /d/'"$base"' >/tmp/o 2>&1 || true
     grep -qi "nothing provides libc.so.6(GLIBC" /tmp/o && echo CITED-GLIBC
+    grep -qi "nothing provides postgresql'"$pg"'-server" /tmp/o && echo ALSO-BLOCKED-BY-SERVER
     rpm -q axiom_'"$pg"' >/dev/null 2>&1 || echo NOT-INSTALLED
   ' 2>&1)"
+  grep -q SERVER-AVAILABLE <<<"$out" \
+    || fail "pg${pg}: postgresql${pg}-server is not available on EL8, so this check cannot
+attribute the refusal to glibc. Fix the PGDG setup rather than trusting the result:
+$out"
+  grep -q ALSO-BLOCKED-BY-SERVER <<<"$out" \
+    && fail "pg${pg}: dnf refused partly because postgresql${pg}-server was missing, so the
+generated glibc requirement was not shown to be what refused:
+$out"
   grep -q CITED-GLIBC <<<"$out" \
-    || fail "pg${pg}: dnf did not refuse on EL8 citing glibc -- the generated requirement is not load-bearing:
+    || fail "pg${pg}: dnf did not refuse on EL8 citing glibc -- with the server package
+available, that means the generated requirement is not load-bearing:
 $out"
   grep -q NOT-INSTALLED <<<"$out" || fail "pg${pg}: a refused install still registered the package"
   echo "    refused, citing glibc, and installed nothing"
