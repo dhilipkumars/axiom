@@ -15,7 +15,7 @@
 set -euo pipefail
 SO="${1:?usage: glibc-floor <path to .so>}"
 [[ -f "$SO" ]] || { echo "glibc-floor: no such file: $SO" >&2; exit 1; }
-floor="$(docker run --rm --platform linux/amd64 -v "$(cd "$(dirname "$SO")" && pwd)/$(basename "$SO")":/x.so:ro \
+floor="$(docker run --rm -v "$(cd "$(dirname "$SO")" && pwd)/$(basename "$SO")":/x.so:ro \
   debian:bookworm-slim bash -c \
   'command -v readelf >/dev/null 2>&1 || { apt-get -qq update >/dev/null 2>&1; apt-get -qq install -y binutils >/dev/null 2>&1; }
    readelf -V /x.so | grep -o "GLIBC_[0-9.]*" | sed "s/GLIBC_//" | sort -uV | tail -1' \

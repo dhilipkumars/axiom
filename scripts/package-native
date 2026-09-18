@@ -129,7 +129,7 @@ $(sed 's/^$/./; s/^/ /' <<<"$DESC_LONG")
 EOF
 
 DEB_NAME="postgresql-${PG_MAJOR}-axiom_${VERSION}-1_${DEB_ARCH}.deb"
-docker run --rm --platform linux/amd64 \
+docker run --rm \
   -v "$DEB_ROOT":/pkg:ro -v "$OUT":/out \
   debian:bookworm-slim bash -c "
     set -e
@@ -182,17 +182,21 @@ ${DESC_LONG}
 - Packaged from the ${VERSION} release artifacts.
 EOF
 
-docker run --rm --platform linux/amd64 \
+docker run --rm --platform "linux/${ARCH}" \
   -v "$RPM_TOP":/top -v "$OUT":/out \
   rockylinux:9 bash -c "
     set -e
     dnf install -y -q rpm-build >/dev/null 2>&1
+    # Assert rather than assume the emulation took. A container that silently
+    # ran as the host architecture would build an rpm whose auto-generated
+    # dependencies describe the wrong libc, and nothing downstream would say so.
+    [[ \"\$(rpm --eval %_arch)\" == '${RPM_ARCH}' ]] \
+      || { echo \"package-native: rpm builder is \$(rpm --eval %_arch), not ${RPM_ARCH}\" >&2; exit 1; }
     cp -r /top /tmp/top
     rpmbuild -bb \
       --define '_topdir /tmp/top' \
       --define '_rpmdir /tmp/top/RPMS' \
       --buildroot /tmp/top/BUILDROOT \
-      --target ${RPM_ARCH} \
       /tmp/top/SPECS/axiom.spec >/dev/null
     cp /tmp/top/RPMS/${RPM_ARCH}/*.rpm /out/
   "
