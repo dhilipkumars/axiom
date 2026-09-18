@@ -19,7 +19,11 @@
 #
 #   E2E_PACKAGE_MAJORS      majors to check (default: "16 17 18")
 #   E2E_PACKAGE_RPM_MAJOR   major to run the RPM checks for (default: 17)
-#   E2E_PACKAGE_KEEP=1      leave containers up on failure
+#   E2E_PACKAGE_RPM=0       skip the RPM half, which needs PGDG's yum repos
+#
+# Every container here runs with --rm and none is named, so there is nothing to
+# leave behind and no cleanup trap to write. The artifacts in dist/ are build
+# output and are meant to survive a failure, so they can be inspected.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
