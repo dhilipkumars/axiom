@@ -129,13 +129,16 @@ $out"
     apt-cache policy postgresql-'"$pg"' | grep -qE "Candidate: [0-9]" && echo SERVER-AVAILABLE
     apt-get install -y /d/'"$(basename "$deb")"' >/tmp/o 2>&1 || true
     grep -qF "libc6 (>= '"$declared"')" /tmp/o && echo CITED-THE-FLOOR
-    grep -q "postgresql-'"$pg"' but it is not installable" /tmp/o && echo ALSO-BLOCKED-BY-SERVER
+    grep -qF "Depends: postgresql-'"$pg"' " /tmp/o && echo ALSO-BLOCKED-BY-SERVER
     test ! -f /usr/lib/postgresql/'"$pg"'/lib/axiom.so && echo PLACED-NOTHING
   ' 2>&1)"
   grep -q SERVER-AVAILABLE <<<"$out" \
     || fail "pg${pg}: postgresql-${pg} is not installable on bullseye, so this check cannot
 attribute the refusal to glibc. Fix the PGDG setup rather than trusting the result:
 $out"
+  # The container matches "Depends: postgresql-N " with a trailing space, which
+  # this package's own name -- postgresql-N-axiom, on the left of every line in
+  # the same block -- cannot satisfy.
   grep -q ALSO-BLOCKED-BY-SERVER <<<"$out" \
     && fail "pg${pg}: apt refused partly because postgresql-${pg} was missing, so the
 glibc constraint was not shown to be what refused:

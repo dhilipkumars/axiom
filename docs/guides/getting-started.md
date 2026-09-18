@@ -387,11 +387,10 @@ a NodePort on a routable node address, a LoadBalancer, or an ingress.
 [Deploying the gateway](deploying.md) covers those choices and how each
 interacts with the certificate's SANs.
 
-So the server definition, in your own `psql`, is:
+So the server definition, in your own `psql`, is — the extension is already
+created above, so this picks up from there:
 
 ```sql
-CREATE EXTENSION axiom;
-
 CREATE SERVER prod
   FOREIGN DATA WRAPPER axiom_fdw
   OPTIONS (

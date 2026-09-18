@@ -25,6 +25,7 @@ case "$ARCH" in
 esac
 
 VERSION="$("$ROOT/scripts/version")"
+case "$ARCH" in amd64) RPM_ARCH=x86_64 ;; arm64) RPM_ARCH=aarch64 ;; esac
 OUT="$ROOT/dist"
 NAME="axiom-${VERSION}-pg${PG_MAJOR}-linux-${ARCH}"
 STAGE="$(mktemp -d)"
@@ -135,7 +136,7 @@ refuse to install on a system too old to run them rather than letting you find
 out when Postgres will not restart:
 
     sudo apt install ./postgresql-${PG_MAJOR}-axiom_${VERSION}-1_${ARCH}.deb
-    sudo dnf install ./axiom_${PG_MAJOR}-${VERSION}-1.el9.\$(uname -m).rpm
+    sudo dnf install ./axiom_${PG_MAJOR}-${VERSION}-1.el9.${RPM_ARCH}.rpm
 
 ## Limits
 

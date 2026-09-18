@@ -34,7 +34,7 @@ floor="$(docker run --rm -v "$(cd "$(dirname "$SO")" && pwd)/$(basename "$SO")":
 if docker run --rm -v "$(cd "$(dirname "$SO")" && pwd)/$(basename "$SO")":/x.so:ro \
      debian:bookworm-slim bash -c \
      'command -v readelf >/dev/null 2>&1 || { apt-get -qq update >/dev/null 2>&1; apt-get -qq install -y binutils >/dev/null 2>&1; }
-      readelf -d /x.so | grep -qi RELR' 2>/dev/null; then
+      readelf -d /x.so | grep -qE "\\((RELR|RELRSZ|RELRENT)\\)"' 2>/dev/null; then
   echo "glibc-floor: $SO uses DT_RELR, which needs glibc 2.36 regardless of its" >&2
   echo "  symbol versions. The symbol maximum ($floor) would be an under-report." >&2
   exit 1
