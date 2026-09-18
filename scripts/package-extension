@@ -67,10 +67,10 @@ cp "$ROOT/LICENSE" "${STAGE}/${NAME}/LICENSE" 2>/dev/null || true
 cat > "${STAGE}/${NAME}/INSTALL.md" <<EOF
 # Axiom ${VERSION} for PostgreSQL ${PG_MAJOR} (linux/${ARCH})
 
-Run everything below from the directory this file is in -- the paths are
-relative to it:
+Run everything below from the directory this file is in -- \`${NAME}\`, which
+the tarball unpacked. The paths are relative to it:
 
-    cd ${NAME}
+    tar -xzf ${NAME}.tar.gz && cd ${NAME}
 
 Place the files where this Postgres looks for them. \`pg_config\` is the
 authority, so ask it rather than guessing a layout:

@@ -281,8 +281,10 @@ cd extension && cargo pgrx install --release --no-default-features --features pg
 needs permission to do that — run it as a user who has it, or with `sudo -E`
 so the toolchain stays on `PATH`.
 
-The feature must match that major — `pg16`, `pg17` or `pg18` — or the build
-fails in a way that does not name the cause.
+**Three places name the major and all must agree**: `--pg17` on
+`cargo pgrx init`, `--features pg17`, and the `pg_config` you point at. Change
+one for a different major and change all three, or the build fails in a way
+that does not name the cause.
 
 Releases publish a tarball per Postgres major and architecture. **v0.1.0 does
 not have them**: it predates the change, so take `V` from a later release on
@@ -347,9 +349,30 @@ a NodePort on a routable node address, a LoadBalancer, or an ingress.
 [Deploying the gateway](deploying.md) covers those choices and how each
 interacts with the certificate's SANs.
 
-With the server created, [Import a schema](#6-import-a-schema) and
-[Query](#7-query) apply as written — those are plain SQL against the server you
-just defined, with nothing container-specific in them.
+So the server definition, in your own `psql`, is:
+
+```sql
+CREATE EXTENSION axiom;
+
+CREATE SERVER prod
+  FOREIGN DATA WRAPPER axiom_fdw
+  OPTIONS (
+    endpoint 'https://gateway.reachable.from.here:8443',
+    ca_cert  '/path/on/this/server/ca.crt'   -- omit for a publicly-trusted CA
+  );
+
+CREATE USER MAPPING FOR CURRENT_USER SERVER prod;
+
+CREATE SCHEMA k8s;
+IMPORT FOREIGN SCHEMA k8s FROM SERVER prod INTO k8s;
+
+SELECT name, namespace, phase FROM k8s.pods WHERE namespace = 'kube-system';
+```
+
+That is the whole path. [Import a schema](#6-import-a-schema) and
+[Query](#7-query), earlier on this page, go into what the import does and how
+the columns are chosen — they are the same SQL, so read them for the detail
+rather than for another set of steps.
 
 ### What the tarballs do and do not cover
 
@@ -368,6 +391,10 @@ just defined, with nothing container-specific in them.
   are out regardless of how the files are delivered.
 
 ## Tearing it down
+
+If you installed into your own Postgres, none of this applies: drop the server
+with `DROP SERVER prod CASCADE`, and remove the files you copied. The rest is
+for the container walkthrough above.
 
 ```sh
 docker rm -f axiom-postgres

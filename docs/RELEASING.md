@@ -76,9 +76,15 @@ Nothing about a development image is a release: no version tag is written, and
 
 ## What a release publishes
 
-- **Container images**, per supported Postgres major, multi-architecture:
-  `axiom-postgres:<version>-pgNN` and `axiom-gateway:<version>`, with the
-  floating tags moved once the install check has passed against them.
+- **Container images**, multi-architecture: `axiom-postgres:<version>-pgNN`
+  per supported major, and `axiom-gateway:v<version>` — note the gateway keeps
+  the tag's leading `v` and the Postgres images do not.
+
+  Their floating tags do not move on the same terms. `postgres-image.yml`
+  promotes `latest` and `latest-pgNN` only after `install-check` has pulled the
+  published images without credentials and run the whole install through
+  against them. `gateway-image.yml` has no such check and moves `latest` as
+  soon as both architectures are built. Issue #56 tracks closing that gap.
 - **Extension tarballs**, one per major and architecture, attached to the
   GitHub release with a `.sha256` beside each. These are for installing into a
   Postgres someone already runs; the images are for trying Axiom.
