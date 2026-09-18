@@ -36,9 +36,14 @@ git tag v0.1.0 && git push origin v0.1.0
 ```
 
 Then **publish a GitHub release from the tag**. That is the step that matters:
-`gateway-image.yml` triggers on `release: [published]`, not on the tag, and
-that is what publishes the semver image tag and moves `:latest`. A pushed tag
-with no published release builds nothing.
+both `gateway-image.yml` and `postgres-image.yml` trigger on
+`release: [published]`, not on the tag. A pushed tag with no published release
+builds nothing.
+
+`postgres-image.yml` does most of it: the per-major images, the extension
+tarballs attached to the release, the install check that pulls the published
+images with no credentials and runs the whole procedure against them, and only
+then the floating tags.
 
 The tag carries a leading `v`; the changelog heading and `make release-notes`
 do not. `scripts/version check v0.1.0` enforces that they agree, and the

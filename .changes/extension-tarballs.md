@@ -5,10 +5,10 @@ kind: added
 Releases from this one onward publish the extension as a downloadable
 tarball, one per supported Postgres major and architecture — `linux/amd64`
 and `linux/arm64`. Installing Axiom into a Postgres you already run no longer
-needs a Rust toolchain or a checkout. Substituting this release's version for
-`$V`:
+needs a Rust toolchain or a checkout. Set `V` to this release's version:
 
 ```sh
+V=          # this release, without the leading v
 PG=17; ARCH=$(uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/)
 BASE=https://github.com/dhilipkumars/axiom/releases/download/v$V
 curl -fsSLO "$BASE/axiom-$V-pg$PG-linux-$ARCH.tar.gz"

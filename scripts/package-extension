@@ -108,9 +108,14 @@ this Postgres at one there is nothing to query:
 
     SELECT name, namespace, phase FROM k8s.pods;
 
-\`endpoint\` has to be an address this database server can reach, and
-\`ca_cert\` a path on this server's filesystem, readable by the user Postgres
-runs as. Deploying the gateway and exposing it are covered here:
+\`endpoint\` has to be an address this database server can reach.
+
+\`ca_cert\` is a path on this server's filesystem, readable by the user
+Postgres runs as, and is for a gateway with a private CA -- the usual case.
+Omit the option entirely if the certificate is signed by a CA this host already
+trusts; it is not required.
+
+Deploying the gateway and exposing it are covered here:
 
     https://dhilipkumars.github.io/axiom/guides/deploying/
 

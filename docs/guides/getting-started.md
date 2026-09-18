@@ -267,11 +267,19 @@ rebuild.
 route into an existing Postgres.** That needs a Rust toolchain and
 `cargo-pgrx` matching the `pg_config` of the server you are installing into:
 
+This is the one part of this guide that does need a checkout:
+
 ```sh
+git clone https://github.com/dhilipkumars/axiom.git
+cd axiom
 cargo install cargo-pgrx --version 0.19.2 --locked
 cargo pgrx init --pg17 "$(which pg_config)"
 cd extension && cargo pgrx install --release --no-default-features --features pg17
 ```
+
+`cargo pgrx install` writes into the directories `pg_config` reports, so it
+needs permission to do that — run it as a user who has it, or with `sudo -E`
+so the toolchain stays on `PATH`.
 
 The feature must match that major — `pg16`, `pg17` or `pg18` — or the build
 fails in a way that does not name the cause.
@@ -339,14 +347,19 @@ a NodePort on a routable node address, a LoadBalancer, or an ingress.
 [Deploying the gateway](deploying.md) covers those choices and how each
 interacts with the certificate's SANs.
 
+With the server created, [Import a schema](#6-import-a-schema) and
+[Query](#7-query) apply as written — those are plain SQL against the server you
+just defined, with nothing container-specific in them.
+
 ### What the tarballs do and do not cover
 
 - **Built on Debian bookworm (glibc 2.36).** They will not load on an older
   glibc — Debian bullseye or RHEL 8, for instance. The failure is at load time,
   so Postgres refuses to start with the preload set; there is no silent
   half-working state.
-- **Linux, amd64 and arm64.** macOS and Windows are not published; building
-  from source works, and the repository's README covers it.
+- **Linux, amd64 and arm64.** No macOS or Windows tarballs are published.
+  Building from source is the only route there, with the caveat that it is not
+  something this project tests: every gate runs on Linux.
 - **Match the major exactly.** A `pg17` tarball is compiled against
   PostgreSQL 17's headers. Installing it beside a different major does not
   work and is not made to fail gracefully.
