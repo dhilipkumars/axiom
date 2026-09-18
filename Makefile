@@ -10,7 +10,7 @@ COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 
 .PHONY: all proto proto-check gateway-build gateway-test gateway-lint gateway-vuln \
         ext-build ext-test ext-lint ext-fmt ext-audit unit lint docs-generate docs-check \
-        version changelog release-check release-notes up down e2e-preload e2e-install e2e-ping e2e-phase0 e2e-pods e2e-phase1 e2e-configmaps e2e-phase2 e2e-watch e2e-phase3 e2e-crd e2e-phase4 e2e-cluster e2e-phase5 e2e
+        version changelog release-check release-notes up down e2e-preload package e2e-tarball e2e-install e2e-ping e2e-phase0 e2e-pods e2e-phase1 e2e-configmaps e2e-phase2 e2e-watch e2e-phase3 e2e-crd e2e-phase4 e2e-cluster e2e-phase5 e2e
 
 all: lint unit
 
@@ -121,6 +121,19 @@ e2e-preload:
 # Against the *published* images rather than a local build, so it needs no
 # build but does need the registry. Not part of `make e2e`: every other gate
 # tests the working tree, this one tests what is already on ghcr.io.
+# The downloadable artifact, and proof it installs into a stock Postgres --
+# which is the thing the images cannot demonstrate, since they ship it already
+# installed and already preloaded.
+# PG_MAJOR, not PG: PG is a cargo feature name ("pg16") used by the build
+# targets, while this wants a bare major. Defaulting to PG would pass "pg16"
+# and fail deep inside docker looking for postgres:pg16-bookworm.
+package:
+	@test -n "$(PG_MAJOR)" || { echo "usage: make package PG_MAJOR=17 [ARCH=arm64]" >&2; exit 2; }
+	./scripts/package-extension $(PG_MAJOR) $(ARCH)
+
+e2e-tarball:
+	./e2e/tarball_test.sh
+
 e2e-install:
 	./e2e/install_test.sh
 

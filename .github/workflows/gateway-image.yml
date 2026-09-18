@@ -167,9 +167,20 @@ jobs:
             tags+=(--tag "$IMAGE_NAME:development")
           fi
           # The filenames carry "<arch>-sha256:...", so strip the prefix.
+          # Asserted, not assumed. `imagetools create` defaults to
+          # --prefer-index, so handing it one digest produces a perfectly
+          # valid single-architecture manifest list and tags it -- which looks
+          # exactly like the missing-arm64 bug this whole change exists to
+          # fix. An unmatched glob would also pass the literal "*" through as
+          # a reference.
+          shopt -s nullglob
           refs=()
-          for f in /tmp/digests/*; do
-            name="$(basename "$f")"
+          for arch in amd64 arm64; do
+            found=(/tmp/digests/"$arch"-*)
+            (( ${#found[@]} == 1 )) \
+              || { echo "expected exactly one $arch digest, found ${#found[@]}" >&2; exit 1; }
+            name="$(basename "${found[0]}")"
             refs+=("$IMAGE_NAME@sha256:${name#*-}")
           done
+          (( ${#refs[@]} == 2 )) || { echo "need both architectures" >&2; exit 1; }
           docker buildx imagetools create "${tags[@]}" "${refs[@]}"

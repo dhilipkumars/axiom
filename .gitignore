@@ -20,3 +20,6 @@ e2e/.kind/
 # must never be committed. Anchored: unanchored, this would also swallow new
 # files under deploy/compose/certs/, which is tracked source.
 /certs/
+
+# Built artifacts (scripts/package-extension).
+/dist/

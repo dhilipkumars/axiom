@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# Builds the installable extension tree for one Postgres major and packages it
+# as a tarball, for people who already run Postgres and cannot use the images.
+#
+#   scripts/package-extension 17               # -> dist/axiom-<version>-pg17-linux-<arch>.tar.gz
+#   scripts/package-extension 17 arm64         # cross-arch, via emulation
+#
+# The tree comes from extension/Dockerfile's `artifact` stage, which exports
+# exactly what the image stage copies in -- so a tarball and an image of one
+# version are built from the same source by the same recipe, and neither can
+# gain a file the other lacks.
+#
+# They are not the same *compile*: in CI these are separate jobs on separate
+# runners with no shared cache, so each builds its own. Do not describe the
+# binaries as byte-identical.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PG_MAJOR="${1:?usage: package-extension <pg-major> [arch]}"
+ARCH="${2:-$(uname -m)}"
+case "$ARCH" in
+  x86_64|amd64)  ARCH=amd64 ;;
+  arm64|aarch64) ARCH=arm64 ;;
+  *) echo "package-extension: unsupported architecture '$ARCH'" >&2; exit 2 ;;
+esac
+
+VERSION="$("$ROOT/scripts/version")"
+OUT="$ROOT/dist"
+NAME="axiom-${VERSION}-pg${PG_MAJOR}-linux-${ARCH}"
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT
+
+echo "==> building the extension tree for pg${PG_MAJOR} (${ARCH})"
+DOCKER_BUILDKIT=1 docker build \
+  --target artifact \
+  --platform "linux/${ARCH}" \
+  --build-arg "PG_MAJOR=${PG_MAJOR}" \
+  -f "$ROOT/extension/Dockerfile" \
+  --output "type=local,dest=${STAGE}/${NAME}" \
+  "$ROOT" >/dev/null
+
+# A tarball of a shared library nobody can place is not installable, so the
+# paths are the reason it is shipped this way: they are what `pg_config
+# --pkglibdir` and `--sharedir` resolve to on a Debian-packaged Postgres, which
+# is what the install instructions unpack over.
+so="${STAGE}/${NAME}/usr/lib/postgresql/${PG_MAJOR}/lib/axiom.so"
+ext="${STAGE}/${NAME}/usr/share/postgresql/${PG_MAJOR}/extension"
+[[ -f "$so" ]] || { echo "package-extension: no axiom.so in the exported tree" >&2; exit 1; }
+# All three, not just the library: CREATE EXTENSION reads the control file to
+# find the SQL script, so a tarball with only the .so installs nothing and
+# fails for whoever downloads it rather than here.
+[[ -f "$ext/axiom.control" ]] \
+  || { echo "package-extension: no axiom.control in the exported tree" >&2; exit 1; }
+compgen -G "$ext/axiom--*.sql" >/dev/null \
+  || { echo "package-extension: no axiom--*.sql in the exported tree" >&2; exit 1; }
+
+# Fail rather than ship a tarball for the wrong machine. `--platform` is
+# advisory if the builder cannot honour it, and an amd64 .so inside a file
+# named arm64 would only be discovered by whoever it fails for.
+got="$(file -b "$so")"
+case "$ARCH:$got" in
+  amd64:*x86-64*|arm64:*aarch64*) ;;
+  *) echo "package-extension: built $got, which is not ${ARCH}" >&2; exit 1 ;;
+esac
+
+cp "$ROOT/LICENSE" "${STAGE}/${NAME}/LICENSE" 2>/dev/null || true
+cat > "${STAGE}/${NAME}/INSTALL.md" <<EOF
+# Axiom ${VERSION} for PostgreSQL ${PG_MAJOR} (linux/${ARCH})
+
+Run everything below from the directory this file is in -- \`${NAME}\`, which
+the tarball unpacked. The paths are relative to it:
+
+    tar -xzf ${NAME}.tar.gz && cd ${NAME}
+
+Place the files where this Postgres looks for them. \`pg_config\` is the
+authority, so ask it rather than guessing a layout:
+
+    sudo cp usr/lib/postgresql/${PG_MAJOR}/lib/axiom.so       "\$(pg_config --pkglibdir)/"
+    sudo cp usr/share/postgresql/${PG_MAJOR}/extension/axiom* "\$(pg_config --sharedir)/extension/"
+
+On a Debian or Ubuntu package these resolve to the paths already in this
+tarball, so unpacking the tree over / does the same thing:
+
+    sudo cp -r usr/. /usr/
+
+Axiom **must** be preloaded. It registers PGC_POSTMASTER settings, so
+\`CREATE EXTENSION\` fails outright without this rather than running degraded:
+
+    # postgresql.conf -- append to any existing list, then restart
+    shared_preload_libraries = 'axiom'
+
+Then, in the database you want to query from:
+
+    CREATE EXTENSION axiom;
+    SELECT axiom_version();
+
+## This is a foreign data wrapper, so there is one more step
+
+\`CREATE EXTENSION\` installs the machinery but no tables. Axiom reads
+Kubernetes through a **gateway** running in the cluster, and until you point
+this Postgres at one there is nothing to query:
+
+    CREATE SERVER prod FOREIGN DATA WRAPPER axiom_fdw
+      OPTIONS (endpoint 'https://your-gateway:8443', ca_cert '/path/on/this/host/ca.crt');
+    CREATE USER MAPPING FOR CURRENT_USER SERVER prod;
+    CREATE SCHEMA k8s;
+    IMPORT FOREIGN SCHEMA k8s FROM SERVER prod INTO k8s;
+
+    SELECT name, namespace, phase FROM k8s.pods;
+
+\`endpoint\` has to be an address this database server can reach.
+
+\`ca_cert\` is a path on this server's filesystem, readable by the user
+Postgres runs as, and is for a gateway with a private CA -- the usual case.
+Omit the option entirely if the certificate is signed by a CA this host already
+trusts; it is not required.
+
+Deploying the gateway and exposing it are covered here:
+
+    https://dhilipkumars.github.io/axiom/guides/deploying/
+
+## Limits
+
+Built against PostgreSQL ${PG_MAJOR} on Debian bookworm (glibc 2.36). It will
+not load on an older glibc, such as Debian bullseye or RHEL 8. A tarball for a
+different major will not load at all -- match it to your server.
+
+https://dhilipkumars.github.io/axiom/
+EOF
+
+mkdir -p "$OUT"
+# COPYFILE_DISABLE and --no-xattrs keep macOS out of the tarball. Without them
+# bsdtar records com.apple.provenance xattrs, and GNU tar prints a warning per
+# file on extraction -- so an artifact packaged on a maintainer's Mac looks
+# broken to everyone who unpacks it on Linux, which is everyone.
+COPYFILE_DISABLE=1 tar --no-xattrs -czf "${OUT}/${NAME}.tar.gz" -C "$STAGE" "$NAME"
+# sha256sum where it exists, shasum where it does not. The artifact is for
+# Linux, where sha256sum is standard and shasum often absent; this script also
+# runs on a maintainer's macOS, which is the other way round.
+( cd "$OUT" \
+  && { sha256sum "${NAME}.tar.gz" 2>/dev/null \
+       || shasum -a 256 "${NAME}.tar.gz"; } > "${NAME}.tar.gz.sha256" )
+echo "==> ${OUT}/${NAME}.tar.gz"
+tar -tzf "${OUT}/${NAME}.tar.gz" | sed 's/^/    /'

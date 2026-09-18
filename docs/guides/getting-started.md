@@ -259,16 +259,142 @@ explains the rules.
 
 ## Installing into a Postgres you already run
 
-This guide runs Postgres in a container because that is what can be done today
-without a toolchain. Installing Axiom into an existing Postgres currently means
-building the extension from source — see the repository's README.
+The guide above runs Postgres in a container. If you already have one, install
+the extension into it instead, using a release tarball — no toolchain, no
+rebuild.
 
-Downloadable extension artifacts, so that no longer needs a Rust toolchain, are
-the next thing on the roadmap. Note that Axiom cannot be installed on managed
-Postgres at all: it is not a trusted extension and needs
-`shared_preload_libraries`, neither of which RDS, Cloud SQL or Aurora permit.
+**Until a release carries those tarballs, building from source is the only
+route into an existing Postgres.** That needs a Rust toolchain and
+`cargo-pgrx` matching the `pg_config` of the server you are installing into:
+
+This is the one part of this guide that does need a checkout:
+
+```sh
+git clone https://github.com/dhilipkumars/axiom.git
+cd axiom
+cargo install cargo-pgrx --version 0.19.2 --locked
+cargo pgrx init --pg17 "$(which pg_config)"
+cd extension && cargo pgrx install --release --no-default-features --features pg17
+```
+
+`cargo pgrx install` writes into the directories `pg_config` reports, so it
+needs permission to do that — run it as a user who has it, or with `sudo -E`
+so the toolchain stays on `PATH`.
+
+**Three places name the major and all must agree**: `--pg17` on
+`cargo pgrx init`, `--features pg17`, and the `pg_config` you point at. Change
+one for a different major and change all three, or the build fails in a way
+that does not name the cause.
+
+Releases publish a tarball per Postgres major and architecture. **v0.1.0 does
+not have them**: it predates the change, so take `V` from a later release on
+the [releases page](https://github.com/dhilipkumars/axiom/releases) rather than
+the version below, which is only an example of the shape.
+
+```sh
+V=0.2.0; PG=17; ARCH=$(uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/)
+BASE=https://github.com/dhilipkumars/axiom/releases/download/v$V
+curl -fsSLO "$BASE/axiom-$V-pg$PG-linux-$ARCH.tar.gz"
+curl -fsSLO "$BASE/axiom-$V-pg$PG-linux-$ARCH.tar.gz.sha256"
+sha256sum -c "axiom-$V-pg$PG-linux-$ARCH.tar.gz.sha256"   # macOS: shasum -a 256 -c
+tar -xzf "axiom-$V-pg$PG-linux-$ARCH.tar.gz"
+```
+
+The tarball holds `axiom.so` and the extension's control and SQL files, under
+the paths a Debian-packaged Postgres uses. Unpack them over your installation:
+
+```sh
+sudo cp -r axiom-$V-pg$PG-linux-$ARCH/usr/. /usr/
+```
+
+If your Postgres does not use those paths — a source build, or a non-Debian
+package — place the two pieces where `pg_config` says they belong. This is
+still Linux only; see the limits below.
+
+```sh
+sudo cp axiom-$V-pg$PG-linux-$ARCH/usr/lib/postgresql/$PG/lib/axiom.so \
+  "$(pg_config --pkglibdir)/"
+sudo cp axiom-$V-pg$PG-linux-$ARCH/usr/share/postgresql/$PG/extension/axiom* \
+  "$(pg_config --sharedir)/extension/"
+```
+
+Then preload it and restart. **This is not optional**: Axiom registers
+`PGC_POSTMASTER` settings, so without it `CREATE EXTENSION` fails outright
+rather than running with the cache disabled.
+
+```ini
+# postgresql.conf — append to any existing list rather than replacing it
+shared_preload_libraries = 'axiom'
+```
+
+```sql
+CREATE EXTENSION axiom;
+SELECT axiom_version();
+```
+
+From here you still need a gateway, and the server and user mapping work the
+same way — but **do not copy step 5 verbatim**. It is written for the Postgres
+container this guide starts, and three of its details are specific to that:
+
+| Step 5 says | On your own Postgres |
+|---|---|
+| `docker exec -it axiom-postgres psql` | your usual `psql` |
+| `ca_cert '/certs/ca.crt'` | wherever the CA sits **on the database server's filesystem**, readable by the user Postgres runs as |
+| `endpoint 'https://axiom-control-plane:30443'` | an address your host can actually reach |
+
+That last one is the real work, and it is not a documentation detail: the
+guide's endpoint is a container name on kind's Docker network, which nothing
+outside Docker resolves. A Postgres elsewhere needs the gateway exposed to it —
+a NodePort on a routable node address, a LoadBalancer, or an ingress.
+[Deploying the gateway](deploying.md) covers those choices and how each
+interacts with the certificate's SANs.
+
+So the server definition, in your own `psql`, is:
+
+```sql
+CREATE EXTENSION axiom;
+
+CREATE SERVER prod
+  FOREIGN DATA WRAPPER axiom_fdw
+  OPTIONS (
+    endpoint 'https://gateway.reachable.from.here:8443',
+    ca_cert  '/path/on/this/server/ca.crt'   -- omit for a publicly-trusted CA
+  );
+
+CREATE USER MAPPING FOR CURRENT_USER SERVER prod;
+
+CREATE SCHEMA k8s;
+IMPORT FOREIGN SCHEMA k8s FROM SERVER prod INTO k8s;
+
+SELECT name, namespace, phase FROM k8s.pods WHERE namespace = 'kube-system';
+```
+
+That is the whole path. [Import a schema](#6-import-a-schema) and
+[Query](#7-query), earlier on this page, go into what the import does and how
+the columns are chosen — they are the same SQL, so read them for the detail
+rather than for another set of steps.
+
+### What the tarballs do and do not cover
+
+- **Built on Debian bookworm (glibc 2.36).** They will not load on an older
+  glibc — Debian bullseye or RHEL 8, for instance. The failure is at load time,
+  so Postgres refuses to start with the preload set; there is no silent
+  half-working state.
+- **Linux, amd64 and arm64.** No macOS or Windows tarballs are published.
+  Building from source is the only route there, with the caveat that it is not
+  something this project tests: every gate runs on Linux.
+- **Match the major exactly.** A `pg17` tarball is compiled against
+  PostgreSQL 17's headers. Installing it beside a different major does not
+  work and is not made to fail gracefully.
+- **Managed Postgres cannot use these at all.** Axiom is not a trusted
+  extension and needs `shared_preload_libraries`, so RDS, Cloud SQL and Aurora
+  are out regardless of how the files are delivered.
 
 ## Tearing it down
+
+If you installed into your own Postgres, none of this applies: drop the server
+with `DROP SERVER prod CASCADE`, and remove the files you copied. The rest is
+for the container walkthrough above.
 
 ```sh
 docker rm -f axiom-postgres

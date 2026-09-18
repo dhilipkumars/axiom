@@ -28,6 +28,19 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && mkdir -p /out \
     && cp -r target/release/axiom-pg${PG_MAJOR}/usr /out/
 
+# The installable tree on its own, for `--output type=local`. Extracting it
+# costs nothing extra: it exports the same build stage the image below copies
+# from, so a tarball and an image of one version come from the same source by
+# the same recipe. Not the same compile -- in CI they are separate jobs on
+# separate runners -- so do not describe the binaries as byte-identical.
+#
+# Deliberately *before* the image stage. `docker build` defaults to the last
+# stage, so appending this at the end would silently turn a plain
+# `docker build -f extension/Dockerfile` into an artifact export and break
+# every caller that expects an image.
+FROM scratch AS artifact
+COPY --from=build /out/usr /usr
+
 FROM postgres:${PG_MAJOR}-bookworm
 ARG PG_MAJOR
 COPY --from=build /out/usr/lib/postgresql/${PG_MAJOR}/lib/axiom.so /usr/lib/postgresql/${PG_MAJOR}/lib/

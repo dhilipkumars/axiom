@@ -36,9 +36,14 @@ git tag v0.1.0 && git push origin v0.1.0
 ```
 
 Then **publish a GitHub release from the tag**. That is the step that matters:
-`gateway-image.yml` triggers on `release: [published]`, not on the tag, and
-that is what publishes the semver image tag and moves `:latest`. A pushed tag
-with no published release builds nothing.
+both `gateway-image.yml` and `postgres-image.yml` trigger on
+`release: [published]`, not on the tag. A pushed tag with no published release
+builds nothing.
+
+`postgres-image.yml` does most of it: the per-major images, the extension
+tarballs attached to the release, the install check that pulls the published
+images with no credentials and runs the whole procedure against them, and only
+then the floating tags.
 
 The tag carries a leading `v`; the changelog heading and `make release-notes`
 do not. `scripts/version check v0.1.0` enforces that they agree, and the
@@ -69,8 +74,19 @@ by hand — both accept `workflow_dispatch` — or build locally.
 Nothing about a development image is a release: no version tag is written, and
 `latest` is untouched. Only publishing a GitHub release moves those.
 
-## What a release does not do yet
+## What a release publishes
 
-Publish downloadable extension artifacts. Today a release publishes container
-images, which serve evaluation rather than installation into an existing
-Postgres — see the tracking issue for v0.1.0 and the artifact issue it defers.
+- **Container images**, multi-architecture: `axiom-postgres:<version>-pgNN`
+  per supported major, and `axiom-gateway:v<version>` — note the gateway keeps
+  the tag's leading `v` and the Postgres images do not.
+
+  Their floating tags do not move on the same terms. `postgres-image.yml`
+  promotes `latest` and `latest-pgNN` only after `install-check` has pulled the
+  published images without credentials and run the whole install through
+  against them. `gateway-image.yml` has no such check and moves `latest` as
+  soon as both architectures are built. Issue #56 tracks closing that gap.
+- **Extension tarballs**, one per major and architecture, attached to the
+  GitHub release with a `.sha256` beside each. These are for installing into a
+  Postgres someone already runs; the images are for trying Axiom.
+
+v0.1.0 predates the tarballs and has only images.
