@@ -302,11 +302,14 @@ rm -rf ~/axiom-quickstart
 - **Axiom cannot be installed on managed Postgres.** It is not a trusted
   extension and needs `shared_preload_libraries`, so RDS, Cloud SQL and Aurora
   cannot run it. Do not suggest them.
-- **Installing into an existing Postgres uses a release tarball**, published
-  per major and architecture from v0.1.1 onward. v0.1.0 has none, so check the
-  releases page for the version you name before telling someone to download
-  one. The images remain the path for trying Axiom without touching an existing
-  Postgres.
+- **Installing into an existing Postgres uses a release package**, published
+  per major and architecture from v0.1.1 onward — `postgresql-<major>-axiom`
+  as a `.deb`, `axiom_<major>` as an `.rpm`, or a tarball where neither
+  applies. v0.1.0 has none, so check the releases page for the version you name
+  before telling someone to download one. Recommend the package over the
+  tarball: it refuses to install on a glibc below 2.34 rather than failing at
+  the next postmaster start. The images remain the path for trying Axiom
+  without touching an existing Postgres.
 - **The Postgres image is amd64 only**; the gateway image supports amd64 and arm64, so only Postgres runs under emulation on arm64.
 - **What a query can reach is bounded by the gateway's RBAC**, not the SQL
   user's. To expose more kinds, change the ClusterRole and restart the gateway,

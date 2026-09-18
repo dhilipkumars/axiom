@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Prints the highest glibc version an ELF actually requires, e.g. 2.34.
+#
+#   scripts/glibc-floor path/to/axiom.so
+#
+# This is not the glibc of the image the binary was *built* on, and conflating
+# the two is how the documentation came to claim 2.36 and so tell Ubuntu 22.04
+# and RHEL 9 users -- both of which run Axiom fine -- that it would not load.
+# The floor is the highest symbol version referenced, which is lower than the
+# build image's glibc whenever nothing in the binary reaches for the newest
+# symbols.
+#
+# Read inside a container so this works the same on a maintainer's macOS, which
+# has no readelf, and so it can read an arm64 ELF from an amd64 host.
+set -euo pipefail
+SO="${1:?usage: glibc-floor <path to .so>}"
+[[ -f "$SO" ]] || { echo "glibc-floor: no such file: $SO" >&2; exit 1; }
+floor="$(docker run --rm --platform linux/amd64 -v "$(cd "$(dirname "$SO")" && pwd)/$(basename "$SO")":/x.so:ro \
+  debian:bookworm-slim bash -c \
+  'command -v readelf >/dev/null 2>&1 || { apt-get -qq update >/dev/null 2>&1; apt-get -qq install -y binutils >/dev/null 2>&1; }
+   readelf -V /x.so | grep -o "GLIBC_[0-9.]*" | sed "s/GLIBC_//" | sort -uV | tail -1' \
+  2>/dev/null | tr -d '[:space:]')"
+[[ "$floor" =~ ^2\.[0-9]+$ ]] \
+  || { echo "glibc-floor: could not read a glibc version from $SO (got '$floor')" >&2; exit 1; }
+printf '%s\n' "$floor"

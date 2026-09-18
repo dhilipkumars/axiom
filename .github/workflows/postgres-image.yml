@@ -216,7 +216,7 @@ jobs:
   # Release only: there is nowhere to attach a development tarball, and a
   # moving download would be worse than none.
   artifacts:
-    name: pg${{ matrix.pg }} ${{ matrix.arch }} tarball
+    name: pg${{ matrix.pg }} ${{ matrix.arch }} artifacts
     # gate is in `needs` because the condition reads its output: the `needs`
     # context only exposes jobs listed there, so referencing one that is absent
     # makes the expression undefined and skips this job on every release --
@@ -247,14 +247,14 @@ jobs:
       # for their major and finds no checksum beside it.
       - uses: actions/upload-artifact@v4
         with:
-          name: tarball-${{ matrix.pg }}-${{ matrix.arch }}
+          name: artifacts-${{ matrix.pg }}-${{ matrix.arch }}
           path: dist/*
           retention-days: 1
 
-  # One job, one upload, after every tarball exists. So the release either has
+  # One job, one upload, after every artifact exists. So the release either has
   # the complete set or none of it.
   publish-artifacts:
-    name: attach tarballs to the release
+    name: attach artifacts to the release
     needs: artifacts
     if: github.event_name == 'release'
     permissions:
@@ -263,7 +263,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: tarball-*
+          pattern: artifacts-*
           merge-multiple: true
           path: dist
       - env:
@@ -274,11 +274,18 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          # Six majors-and-architectures, each with a tarball and a checksum.
-          # Counted rather than trusted: download-artifact merging fewer than
-          # expected would otherwise publish a quietly incomplete release.
-          count="$(find dist -name '*.tar.gz' | wc -l)"
-          [[ "$count" -eq 6 ]] || { echo "expected 6 tarballs, found $count" >&2; exit 1; }
+          # Six majors-and-architectures, each in three formats, each with a
+          # checksum. Counted per format rather than in total: a total would
+          # still pass if one format were missing entirely and another had
+          # twice as many, which is exactly the failure worth catching.
+          # Counted rather than trusted, because download-artifact merging
+          # fewer than expected would otherwise publish a quietly incomplete
+          # release.
+          for spec in "*.tar.gz:tarballs" "*.deb:debs" "*.rpm:rpms"; do
+            glob="${spec%%:*}"; label="${spec##*:}"
+            count="$(find dist -name "$glob" | wc -l)"
+            [[ "$count" -eq 6 ]] || { echo "expected 6 $label, found $count" >&2; exit 1; }
+          done
           # Verified, not just counted. A checksum that does not match what is
           # uploaded beside it is worse than none, because it is the thing
           # people use to decide the download is intact.
