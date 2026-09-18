@@ -109,7 +109,7 @@ releases. To pin a version instead:
 
 ```sh
 kubectl -n axiom-system set image deploy/axiom-gateway \
-  gateway=ghcr.io/dhilipkumars/axiom-gateway:v0.1.0
+  gateway=ghcr.io/dhilipkumars/axiom-gateway:v0.1.1
 ```
 
 [Releasing](../RELEASING.md) explains what each tag means.
@@ -177,7 +177,7 @@ convenience: Axiom registers `PGC_POSTMASTER` GUCs, so without preloading
 
 `axiom-postgres` is published per major — `latest-pg16`, `latest-pg17`,
 `latest-pg18` — each following the newest release for that major. Swap the tag
-to match the Postgres you want, or pin a version like `0.1.0-pg17` if you would
+to match the Postgres you want, or pin a version like `0.1.1-pg17` if you would
 rather choose when to move.
 
 ## 5. Install and connect
@@ -286,13 +286,13 @@ so the toolchain stays on `PATH`.
 one for a different major and change all three, or the build fails in a way
 that does not name the cause.
 
-Releases publish a tarball per Postgres major and architecture. **v0.1.0 does
-not have them**: it predates the change, so take `V` from a later release on
-the [releases page](https://github.com/dhilipkumars/axiom/releases) rather than
-the version below, which is only an example of the shape.
+Releases publish a tarball per Postgres major and architecture, from `v0.1.1`
+onward — **v0.1.0 predates them and has none**. Take `V` from the
+[releases page](https://github.com/dhilipkumars/axiom/releases) rather than
+copying the version below.
 
 ```sh
-V=0.2.0; PG=17; ARCH=$(uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/)
+V=0.1.1; PG=17; ARCH=$(uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/)
 BASE=https://github.com/dhilipkumars/axiom/releases/download/v$V
 curl -fsSLO "$BASE/axiom-$V-pg$PG-linux-$ARCH.tar.gz"
 curl -fsSLO "$BASE/axiom-$V-pg$PG-linux-$ARCH.tar.gz.sha256"

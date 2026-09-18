@@ -10,9 +10,96 @@ release without consuming them.
 
 Versions follow [semantic versioning](https://semver.org). While the major
 version is `0`, the SQL surface and the gateway's gRPC API may change between
-minor versions; the changelog says so when they do.
+minor versions; the changelog says so when they do. A patch release can still
+carry an `### Added` entry — the changelog describes what changed, the version
+describes what Axiom can now do, and new ways to install the same functionality
+are the former. [docs/RELEASING.md](docs/RELEASING.md) has the full rule.
 
 <!-- releases below -->
+
+## 0.1.1
+
+### Added
+
+Releases from this one onward publish the extension as a downloadable
+tarball, one per supported Postgres major and architecture — `linux/amd64`
+and `linux/arm64`. Installing Axiom into a Postgres you already run no longer
+needs a Rust toolchain or a checkout.
+
+```sh
+V=0.1.1
+PG=17; ARCH=$(uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/)
+BASE=https://github.com/dhilipkumars/axiom/releases/download/v$V
+curl -fsSLO "$BASE/axiom-$V-pg$PG-linux-$ARCH.tar.gz"
+curl -fsSLO "$BASE/axiom-$V-pg$PG-linux-$ARCH.tar.gz.sha256"
+sha256sum -c "axiom-$V-pg$PG-linux-$ARCH.tar.gz.sha256"
+tar -xzf "axiom-$V-pg$PG-linux-$ARCH.tar.gz"
+sudo cp -r axiom-$V-pg$PG-linux-$ARCH/usr/. /usr/
+```
+
+(v0.1.0 predates this and has no tarballs.)
+
+Each tarball carries a `.sha256` beside it and an `INSTALL.md`, and the files
+are exported from the same Dockerfile stage the published image is built from,
+so a tarball and an image of one version are made from the same source by the
+same recipe.
+
+They are built on Debian bookworm (glibc 2.36) and will not load on an older
+glibc such as bullseye or RHEL 8 — the failure is at load time, so Postgres
+refuses to start rather than half-working. Managed Postgres still cannot use
+them: Axiom is not a trusted extension and needs `shared_preload_libraries`.
+
+### Fixed
+
+Applying `deploy/k8s/gateway-deployment.yaml` now installs the newest released
+gateway rather than a nightly build from `main`. Following the published guide
+previously paired a released Postgres image with a development gateway — a
+combination no release describes.
+
+The agent setup guide also stops instead of adopting an existing kind cluster
+called `axiom`. It would have replaced that cluster's gateway TLS secret and
+restarted its gateway, and the remaining steps would then have passed while
+having broken something else. It now says where to run from, so a TLS private
+key does not land in whatever directory you happened to be in, checks that the
+gateway's NodePort is the one the next step dials, and says the import produces
+exactly two tables and which grant decides that.
+
+**The ClusterRole and ClusterRoleBinding are renamed** from
+`axiom-gateway-read` to `axiom-gateway`, matching the ServiceAccount. The name
+claimed read-only and never was: ConfigMaps and the example CRD are writable,
+because `INSERT`, `UPDATE` and `DELETE` on a foreign table are real Kubernetes
+writes. If you applied the previous manifest, the old objects are left behind
+and keep granting the same access to the same ServiceAccount — remove them once
+the new ones are in place:
+
+```sh
+kubectl delete clusterrolebinding axiom-gateway-read
+kubectl delete clusterrole axiom-gateway-read
+```
+
+**Check it for your own grants first.** If you added kinds by patching
+`axiom-gateway-read` — which is what the previous guide told you to do —
+those rules are only in that object. Copy them into `axiom-gateway` before
+deleting it, or the gateway silently goes back to offering pods, configmaps
+and the example CRD:
+
+```sh
+kubectl get clusterrole axiom-gateway-read -o yaml
+```
+
+The first query after about 40 seconds of an idle session no longer fails with
+`cannot reach gateway ... transport error`. The gateway pings a peer that has
+been idle for 30 seconds and drops it 10 seconds later, and a Postgres backend
+sitting between queries has nothing running to answer with — so the gateway
+closed a connection the backend still had cached, and the next statement paid
+for discovering it.
+
+A cached connection is now rebuilt once it has been unused for 25 seconds,
+before the gateway has even started asking. Reads and writes alike: previously
+a transaction that paused and then wrote lost the write and aborted, with no
+way to retry, and a pooled client hit this on every gap longer than the
+keepalive window.
+
 
 ## 0.1.0
 

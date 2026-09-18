@@ -21,18 +21,84 @@ unstamped binary should say so rather than claim a release it is not.
 
 To change the version, edit `extension/Cargo.toml` and nothing else.
 
+## What earns which number
+
+Decide this from the rule, not from scratch at each release. The number is a
+claim about what changed for someone using Axiom, so the test is always "what
+can a user now do, or no longer do", never "how much work was it".
+
+| Bump | For |
+|---|---|
+| **patch** — `0.1.0` → `0.1.1` | Fixes, packaging, distribution, tooling, docs, and security. Anything that does not change what Axiom can do. |
+| **minor** — `0.1.1` → `0.2.0` | Meaningful capability: roadmap items, new SQL surface, new gateway behaviour. Grouped, and cut every few months rather than per merge. **While the major version is `0`, breaking changes land here too.** |
+| **major** — `1.0.0` → `2.0.0` | A breaking change to a public surface, once there is a `1.0` to break. |
+
+Three consequences are easy to get wrong:
+
+**Shipping a capability is not the same as building one.** The extension
+tarballs are the example: they made installing Axiom into an existing Postgres
+possible without a Rust toolchain, which is a large improvement and still a
+patch, because Axiom does exactly what it did before. New delivery of the same
+functionality is mechanics. That is why the entry can be `kind: added` in the
+changelog and still land in a patch release — the changelog describes the
+change, the version describes the capability.
+
+**While the major version is `0`, breaking changes go in the minor.** This is
+Axiom's convention, not a rule semver imposes: semver says only that in `0.y.z`
+"anything MAY change at any time", which would permit breaking something in a
+patch. We do not, because there is no `1.0` yet, so major is not available as a
+signal and bumping it would spend the one-time meaning of `1.0` — the
+commitment that the surfaces below are stable — on an ordinary breaking change.
+Minor is the loudest number left. A minor that breaks something says so at the
+top of its changelog section, in the imperative, with the migration. After
+`1.0`, breaking moves to major and this paragraph goes away.
+
+**Adding to a surface is not breaking it.** A new FDW option, a new promoted
+column, a new RPC: those are minors after `1.0` too. Only removing or
+redefining something that already worked is a major.
+
+### The two surfaces
+
+Axiom has two, and they break differently:
+
+- **The SQL surface** — server and user-mapping options, `IMPORT FOREIGN
+  SCHEMA` options, promoted columns, and the `axiom_*()` functions. Breaking it
+  breaks someone's queries and DDL.
+- **The gRPC API** between the extension and the gateway. Breaking it means
+  **the two halves must be upgraded together**, and that is not something a
+  version number communicates on its own. Say it in the changelog entry, and
+  say which direction of skew fails.
+
+Everything under `deploy/` is an **example, not a surface**. Applying a renamed
+manifest leaves the old objects in place and still working, so a rename there
+does not break a running cluster and does not force a minor. It does oblige a
+changelog entry with the cleanup commands and a warning about local edits —
+`0.1.1`'s ClusterRole rename is the worked example. If a manifest change ever
+*would* break a cluster that just re-applies it, that is a breaking change and
+the paragraph above applies.
+
+### Cadence
+
+Minors go when enough has accumulated to be worth a release note, which in
+practice is every few months. That is a rhythm, not a deadline: never ship an
+empty minor to hit a date, and never rush half a feature into one. Patches go
+whenever there is something to fix.
+
+Security fixes are the exception to all of it — they ship as a patch
+immediately, and are never held back for a cadence.
+
 ## Cutting one
 
 ```sh
 make release-check                  # changesets well-formed, version consistent
 make changelog                      # read what the release will say
-make release-notes VERSION=0.1.0    # assemble CHANGELOG.md, empty .changes/
+make release-notes VERSION=X.Y.Z    # assemble CHANGELOG.md, empty .changes/
 ```
 
 Commit that, open it as a PR like anything else, and merge it. Then:
 
 ```sh
-git tag v0.1.0 && git push origin v0.1.0
+git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 
 Then **publish a GitHub release from the tag**. That is the step that matters:
@@ -46,7 +112,7 @@ images with no credentials and runs the whole procedure against them, and only
 then the floating tags.
 
 The tag carries a leading `v`; the changelog heading and `make release-notes`
-do not. `scripts/version check v0.1.0` enforces that they agree, and the
+do not. `scripts/version check vX.Y.Z` enforces that they agree, and the
 release workflow should call it before publishing anything.
 
 ## Writing the notes

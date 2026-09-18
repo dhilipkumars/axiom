@@ -48,7 +48,7 @@ spec:
           # apply, so it must not install a nightly build: pairing a released
           # Postgres image with a development gateway is a combination no
           # release describes and nobody tested. Pin a version
-          # (:v0.1.0) to choose when to move.
+          # (:vX.Y.Z) to choose when to move.
           #
           # The E2E suite does not rewrite this field. It side-loads its own
           # build into kind *under this exact reference*
