@@ -52,25 +52,33 @@ ext="${STAGE}/${NAME}/usr/share/postgresql/${PG_MAJOR}/extension"
 # fails for whoever downloads it rather than here.
 [[ -f "$ext/axiom.control" ]] \
   || { echo "package-extension: no axiom.control in the exported tree" >&2; exit 1; }
-# Exactly one, and it must be this version's. `cargo pgrx package` writes into
-# target/, which the Dockerfile mounts as a build cache, so a tree built after a
-# version bump on a warm cache still carries the previous versions' install
-# scripts. CI never sees it -- each job starts cold -- and a maintainer
-# building locally always does.
+# Exactly one *install* script, naming this version. `cargo pgrx package` adds
+# to its staging directory and never prunes, and target/ is a cache mount that
+# survives a version bump, so a tree built after one still carries the previous
+# releases' install scripts. CI never sees it -- each job starts cold -- and a
+# maintainer building locally always does. Shipping them is wrong rather than
+# untidy: `CREATE EXTENSION axiom VERSION '0.1.0'` would run an old release's
+# SQL against this release's library and succeed.
 #
-# Shipping them is not untidy, it is wrong: `CREATE EXTENSION axiom VERSION
-# '0.1.0'` would run an old release's SQL against this release's library, and
-# succeed.
-sqls=()
-for f in "$ext"/axiom--*.sql; do [[ -e "$f" ]] && sqls+=("$f"); done
-(( ${#sqls[@]} == 1 )) || {
-  echo "package-extension: expected exactly one axiom--*.sql, found ${#sqls[@]}:" >&2
-  for f in ${sqls[@]+"${sqls[@]}"}; do echo "  ${f##*/}" >&2; done
+# Upgrade scripts are a different thing and are allowed. Postgres names them
+# axiom--<from>--<to>.sql, and they are how `ALTER EXTENSION axiom UPDATE`
+# works; a rule that counted every axiom--*.sql as a duplicate would forbid
+# ever shipping one. Axiom has none today (see the upgrade-path issue), so the
+# expected count is zero, but the check must not be what stops that changing.
+install_sqls=(); upgrade_sqls=()
+for f in "$ext"/axiom--*.sql; do
+  [[ -e "$f" ]] || continue
+  base="${f##*/}"; mid="${base#axiom--}"; mid="${mid%.sql}"
+  if [[ "$mid" == *--* ]]; then upgrade_sqls+=("$f"); else install_sqls+=("$f"); fi
+done
+(( ${#install_sqls[@]} == 1 )) || {
+  echo "package-extension: expected exactly one install script, found ${#install_sqls[@]}:" >&2
+  for f in ${install_sqls[@]+"${install_sqls[@]}"}; do echo "  ${f##*/}" >&2; done
   echo "  a stale build cache carries old versions' scripts; rebuild without it" >&2
   exit 1
 }
-[[ "${sqls[0]##*/}" == "axiom--${VERSION}.sql" ]] \
-  || { echo "package-extension: tree holds ${sqls[0]##*/}, not axiom--${VERSION}.sql" >&2; exit 1; }
+[[ "${install_sqls[0]##*/}" == "axiom--${VERSION}.sql" ]] \
+  || { echo "package-extension: tree holds ${install_sqls[0]##*/}, not axiom--${VERSION}.sql" >&2; exit 1; }
 
 # Fail rather than ship a tarball for the wrong machine. `--platform` is
 # advisory if the builder cannot honour it, and an amd64 .so inside a file
@@ -89,7 +97,7 @@ esac
 GLIBC_FLOOR="$("$ROOT/scripts/glibc-floor" "$so")"
 # Packages spell a prerelease differently from the tarball, so INSTALL.md has
 # to name the files that will exist rather than the version it was built from.
-PKG_VERSION="$("$ROOT/scripts/version" package)"
+PKG_VERSION="$("$ROOT/scripts/version" package "$VERSION")"
 echo "==> glibc floor: ${GLIBC_FLOOR}"
 
 cp "$ROOT/LICENSE" "${STAGE}/${NAME}/LICENSE" 2>/dev/null || true

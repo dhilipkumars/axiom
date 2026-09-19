@@ -37,7 +37,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ -n "$TREE" && -n "$PG_MAJOR" && -n "$ARCH" ]] \
-  || { echo "usage: package-native --tree <dir> --pg <major> --arch <amd64|arm64> [--version <v>] [--out <dir>]" >&2; exit 2; }
+  || { echo "usage: package-native --tree <dir> --pg <major> --arch <amd64|arm64>
+                       [--version <v>] [--glibc-floor <x.y>] [--out <dir>]" >&2; exit 2; }
 VERSION="${VERSION:-$("$ROOT/scripts/version")}"
 
 # The packaging spelling of the version -- see `scripts/version package`, which
@@ -59,21 +60,35 @@ so="$TREE/usr/lib/postgresql/${PG_MAJOR}/lib/axiom.so"
 ext="$TREE/usr/share/postgresql/${PG_MAJOR}/extension"
 [[ -f "$so" ]] || { echo "package-native: no axiom.so under $TREE" >&2; exit 1; }
 [[ -f "$ext/axiom.control" ]] || { echo "package-native: no axiom.control under $TREE" >&2; exit 1; }
-# Exactly one, as in scripts/package-extension, and for the same reason: a tree
-# built on a warm cache carries previous releases' install scripts, and
-# `head -1` would quietly package the oldest of them. This script is also
-# invoked directly against an unpacked tarball, where nothing else checks.
-sqls=()
-for f in "$ext"/axiom--*.sql; do [[ -e "$f" ]] && sqls+=("$f"); done
-(( ${#sqls[@]} == 1 )) || {
-  echo "package-native: expected exactly one axiom--*.sql under $TREE, found ${#sqls[@]}:" >&2
-  for f in ${sqls[@]+"${sqls[@]}"}; do echo "  ${f##*/}" >&2; done
+# Exactly one *install* script, naming this version. `cargo pgrx package` adds
+# to its staging directory and never prunes, and target/ is a cache mount that
+# survives a version bump, so a tree built after one still carries the previous
+# releases' install scripts. CI never sees it -- each job starts cold -- and a
+# maintainer building locally always does. Shipping them is wrong rather than
+# untidy: `CREATE EXTENSION axiom VERSION '0.1.0'` would run an old release's
+# SQL against this release's library and succeed.
+#
+# Upgrade scripts are a different thing and are allowed. Postgres names them
+# axiom--<from>--<to>.sql, and they are how `ALTER EXTENSION axiom UPDATE`
+# works; a rule that counted every axiom--*.sql as a duplicate would forbid
+# ever shipping one. Axiom has none today (see the upgrade-path issue), so the
+# expected count is zero, but the check must not be what stops that changing.
+install_sqls=(); upgrade_sqls=()
+for f in "$ext"/axiom--*.sql; do
+  [[ -e "$f" ]] || continue
+  base="${f##*/}"; mid="${base#axiom--}"; mid="${mid%.sql}"
+  if [[ "$mid" == *--* ]]; then upgrade_sqls+=("$f"); else install_sqls+=("$f"); fi
+done
+(( ${#install_sqls[@]} == 1 )) || {
+  echo "package-native: expected exactly one install script, found ${#install_sqls[@]}:" >&2
+  for f in ${install_sqls[@]+"${install_sqls[@]}"}; do echo "  ${f##*/}" >&2; done
+  echo "  a stale build cache carries old versions' scripts; rebuild without it" >&2
   exit 1
 }
-sql="${sqls[0]}"
+[[ "${install_sqls[0]##*/}" == "axiom--${VERSION}.sql" ]] \
+  || { echo "package-native: tree holds ${install_sqls[0]##*/}, not axiom--${VERSION}.sql" >&2; exit 1; }
+sql="${install_sqls[0]}"
 sql_base="${sql##*/}"
-[[ "$sql_base" == "axiom--${VERSION}.sql" ]] \
-  || { echo "package-native: tree holds $sql_base, not axiom--${VERSION}.sql" >&2; exit 1; }
 
 # The tree must be for the architecture being labelled. A package whose name
 # says arm64 and whose payload is x86-64 is only discovered by whoever it fails

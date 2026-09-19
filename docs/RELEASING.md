@@ -90,6 +90,7 @@ immediately, and are never held back for a cadence.
 ## Cutting one
 
 ```sh
+# extension/Cargo.toml -> X.Y.Z first; everything else derives from it
 make release-check                  # changesets well-formed, version consistent
 make changelog                      # read what the release will say
 make release-notes VERSION=X.Y.Z    # assemble CHANGELOG.md, empty .changes/
@@ -149,8 +150,12 @@ release the rc is rehearsing; consuming them would leave the real release with
 an empty changelog. Paste `make changelog` into the GitHub release body
 instead — it renders the pending entries without consuming them.
 
-Afterwards, set the version to the final one and cut it normally. The rc's tag
-and release stay as a record; nothing needs deleting.
+Afterwards, cut the real release: set `extension/Cargo.toml` back to the final
+version — `0.1.2`, not `0.1.2-rc.1` — commit that with `Cargo.lock`, and follow
+[Cutting one](#cutting-one). Forgetting the bump is the easy mistake: the
+release workflow runs `scripts/version check` against the tag and fails there,
+after the release is published, rather than here. The rc's tag and release stay
+as a record; nothing needs deleting.
 
 ### Prereleases are spelled differently in packages
 
