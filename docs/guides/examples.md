@@ -19,12 +19,26 @@ These assume you have finished [Getting started](getting-started.md), so server
     ServiceAccount, and there is deliberately no wildcard.
 
     Examples below that use `nodes`, `deployments` or a CRD need that kind
-    granted first. The recipe is the same every time — grant, restart,
-    re-import:
+    granted first: grant, restart, re-import.
+
+    **The API group differs per kind**, and getting it wrong fails silently —
+    the gateway's access check rejects the kind, `IMPORT FOREIGN SCHEMA` simply
+    omits it, and the query then says the relation does not exist:
+
+    | Kind | `apiGroups` |
+    |---|---|
+    | `nodes`, `pods`, `configmaps` | `[""]` — the core group |
+    | `deployments` | `["apps"]` |
+    | CloudNativePG `clusters` | `["postgresql.cnpg.io"]` |
 
     ```sh
+    # nodes: core group, so apiGroups is the empty string
     kubectl patch clusterrole axiom-gateway --type=json -p='[{"op":"add","path":"/rules/-","value":
       {"apiGroups":[""],"resources":["nodes"],"verbs":["get","list","watch"]}}]'
+
+    # deployments: apps group
+    kubectl patch clusterrole axiom-gateway --type=json -p='[{"op":"add","path":"/rules/-","value":
+      {"apiGroups":["apps"],"resources":["deployments"],"verbs":["get","list","watch"]}}]'
 
     kubectl -n axiom-system rollout restart deploy/axiom-gateway
     kubectl -n axiom-system rollout status deploy/axiom-gateway
@@ -32,7 +46,7 @@ These assume you have finished [Getting started](getting-started.md), so server
 
     ```sql
     -- foreign tables are catalog objects; they do not follow an RBAC change
-    IMPORT FOREIGN SCHEMA k8s LIMIT TO (nodes) FROM SERVER prod INTO k8s;
+    IMPORT FOREIGN SCHEMA k8s LIMIT TO (nodes, deployments) FROM SERVER prod INTO k8s;
     ```
 
 ## Reading
@@ -81,14 +95,33 @@ FROM k8s.deployments
 WHERE raw->'spec'->'template'->'spec'->'containers' @> '[{"imagePullPolicy":"Always"}]';
 ```
 
-### Ask one question of several clusters
+### Find crash-looping pods
 
-Each cluster is a server, each server a schema:
+`CrashLoopBackOff` is **not** a pod phase — `phase` is `status.phase`, which is
+only ever `Pending`, `Running`, `Succeeded`, `Failed` or `Unknown`. A
+crash-looping pod is `Running`. The reason lives per container, which is
+exactly the kind of nested field `kubectl` cannot filter on:
 
 ```sql
-SELECT 'prod' AS cluster, name, phase FROM prod.pods  WHERE phase = 'CrashLoopBackOff'
+SELECT namespace, name
+FROM k8s.pods
+WHERE raw->'status'->'containerStatuses' @>
+      '[{"state":{"waiting":{"reason":"CrashLoopBackOff"}}}]';
+```
+
+### Ask one question of several clusters
+
+Each cluster is its own server and its own schema. This one needs a **second**
+cluster and gateway — the walkthrough sets up one, imported into `k8s` — so
+treat it as the shape rather than something to paste:
+
+```sql
+-- after CREATE SERVER stage ... and IMPORT ... INTO stage
+SELECT 'prod' AS cluster, namespace, name FROM k8s.pods
+WHERE raw->'status'->'containerStatuses' @> '[{"state":{"waiting":{"reason":"CrashLoopBackOff"}}}]'
 UNION ALL
-SELECT 'stage',           name, phase FROM stage.pods WHERE phase = 'CrashLoopBackOff';
+SELECT 'stage', namespace, name FROM stage.pods
+WHERE raw->'status'->'containerStatuses' @> '[{"state":{"waiting":{"reason":"CrashLoopBackOff"}}}]';
 ```
 
 ## Writing

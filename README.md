@@ -96,13 +96,23 @@ DELETE FROM k8s.configmaps WHERE namespace = 'staging' AND name = 'stale-flags';
 Pods are deliberately read-only at the SQL layer, whatever RBAC allows — a
 `DELETE` with a `WHERE` clause is too easy to get wrong and too hard to undo.
 
-**Ask one question across many clusters**, because each cluster is just another
-schema:
+**Find crash-looping pods.** `CrashLoopBackOff` is a container waiting reason,
+not a pod phase — so it lives in a nested field `kubectl` cannot filter on:
 
 ```sql
-SELECT 'prod' AS cluster, name, phase FROM prod.pods   WHERE phase = 'CrashLoopBackOff'
+SELECT namespace, name
+FROM k8s.pods
+WHERE raw->'status'->'containerStatuses' @>
+      '[{"state":{"waiting":{"reason":"CrashLoopBackOff"}}}]';
+```
+
+**Ask one question across many clusters**, because each cluster is its own
+server and its own schema:
+
+```sql
+SELECT 'prod' AS cluster, namespace, name FROM prod.pods  WHERE phase = 'Failed'
 UNION ALL
-SELECT 'stage',           name, phase FROM stage.pods  WHERE phase = 'CrashLoopBackOff';
+SELECT 'stage',           namespace, name FROM stage.pods WHERE phase = 'Failed';
 ```
 
 ## Getting started
