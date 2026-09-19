@@ -2,8 +2,9 @@
 
 Things worth doing that are awkward or impossible with `kubectl`.
 
-The CloudNativePG example at the end was run end to end, including confirming
-that `kubectl` saw the object Postgres created. The read queries are written
+The CloudNativePG example at the end was run end to end — create, observe and
+scale — against a kind cluster, confirming from `kubectl` that each change
+Postgres made was real. The read queries are written
 against the column reference in [Foreign table
 columns](../generated/columns.md) rather than run individually — if one does
 not work, that is a bug worth reporting.
@@ -142,10 +143,11 @@ k8s.pods` raises `0A000 foreign tables on pods are read-only` rather than
 evicting anything — deleting a pod by `WHERE` clause is too easy to do by
 accident and too hard to undo.
 
-## Creating a Postgres cluster, from Postgres
+## Manage Postgres with Postgres
 
-The clearest demonstration of what Axiom is: a Postgres instance provisioning a
-Postgres cluster by `INSERT`, through [CloudNativePG](https://cloudnative-pg.io).
+The clearest demonstration of what Axiom is: one Postgres instance creating,
+inspecting and scaling another — through [CloudNativePG](https://cloudnative-pg.io),
+with no `kubectl` and no YAML.
 
 **First, install the operator**, which is what creates the CRD the gateway can
 then discover:
@@ -216,12 +218,37 @@ NAME      AGE   INSTANCES   READY   STATUS   PRIMARY
 demo-db   0s
 ```
 
-And you can watch it come up without leaving SQL:
+Watch it come up without leaving SQL:
 
 ```sql
 SELECT name, status->>'phase' AS phase, status->>'readyInstances' AS ready
 FROM k8s.clusters WHERE namespace = 'default';
 ```
+
+### Scale it with an UPDATE
+
+`spec` is a `jsonb` column, so changing the cluster is a `jsonb_set`:
+
+```sql
+UPDATE k8s.clusters
+   SET spec = jsonb_set(spec, '{instances}', '3')
+ WHERE namespace = 'default' AND name = 'demo-db';
+```
+
+```
+UPDATE 1
+```
+
+The operator reconciles, and the change is visible from either side:
+
+```sh
+$ kubectl get cluster.postgresql.cnpg.io demo-db -o jsonpath='{.spec.instances}'
+3
+```
+
+A conflicting write does not silently win: Axiom sends the `resourceVersion` it
+read, so if something else changed the object first the API server rejects the
+update and you get a SQL error rather than a lost write.
 
 Nothing here is CNPG-specific. Any CRD the gateway's RBAC permits becomes a
 table the same way, with `spec` as the field you write.

@@ -42,7 +42,7 @@ either system pretending to be the other.
 
 ## Questions that need a query language
 
-*More, including creating a CloudNativePG cluster from SQL, in
+*More, including creating and scaling a CloudNativePG cluster from SQL, in
 [Examples](https://dhilipkumars.github.io/axiom/guides/examples/). Which kinds
 you can query is bounded by the gateway's RBAC — `nodes` and `deployments` below
 need granting, which the examples page shows how to do.*
