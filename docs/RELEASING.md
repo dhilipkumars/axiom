@@ -121,10 +121,11 @@ publishing anything.
 
 A prerelease runs the whole publish path and moves nothing. The version tags
 and every release asset are produced exactly as they would be, while `latest`,
-`latest-pgNN` and the gateway's `latest` stay where they are — `promote`
-declines on `github.event.release.prerelease`, and the gateway's tag is
-suppressed on the same condition. That makes an rc the only way to
-find out whether a release *works* without a release depending on the answer.
+`latest-pgNN` and the gateway's `latest` stay where they are. One job moves all
+three and it declines on `github.event.release.prerelease`, so there is no
+second mechanism to get wrong and no tag that can slip through. That makes an
+rc the only way to find out whether a release *works* without a release
+depending on the answer.
 
 ```sh
 # extension/Cargo.toml -> 0.1.2-rc.1, and extension/Cargo.lock with it
