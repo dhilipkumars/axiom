@@ -89,6 +89,13 @@ done
   || { echo "package-native: tree holds ${install_sqls[0]##*/}, not axiom--${VERSION}.sql" >&2; exit 1; }
 sql="${install_sqls[0]}"
 sql_base="${sql##*/}"
+# Every script ships, not just the install one. Permitting upgrade scripts past
+# the gate while packaging only the install script would put a file in the
+# tarball that the .deb and .rpm silently drop -- and the upgrade script is the
+# one that makes `ALTER EXTENSION axiom UPDATE` work at all, so losing it in
+# the package is losing the feature for exactly the users who installed the
+# package.
+all_sqls=("${install_sqls[@]}" ${upgrade_sqls[@]+"${upgrade_sqls[@]}"})
 
 # The tree must be for the architecture being labelled. A package whose name
 # says arm64 and whose payload is x86-64 is only discovered by whoever it fails
@@ -139,7 +146,9 @@ mkdir -p "$DEB_ROOT/DEBIAN" \
          "$DEB_ROOT/usr/share/doc/postgresql-${PG_MAJOR}-axiom"
 install -m755 "$so"  "$DEB_ROOT/usr/lib/postgresql/${PG_MAJOR}/lib/axiom.so"
 install -m644 "$ext/axiom.control" "$DEB_ROOT/usr/share/postgresql/${PG_MAJOR}/extension/"
-install -m644 "$sql" "$DEB_ROOT/usr/share/postgresql/${PG_MAJOR}/extension/"
+for f in "${all_sqls[@]}"; do
+  install -m644 "$f" "$DEB_ROOT/usr/share/postgresql/${PG_MAJOR}/extension/"
+done
 install -m644 "$ROOT/LICENSE" "$DEB_ROOT/usr/share/doc/postgresql-${PG_MAJOR}-axiom/copyright"
 
 # libc6 (>= 2.34) is the floor the binary actually has, read off the ELF below
@@ -192,7 +201,9 @@ mkdir -p "$RPM_TOP/SPECS" "$RPM_TOP/BUILDROOT/usr/pgsql-${PG_MAJOR}/lib" \
          "$RPM_TOP/BUILDROOT/usr/pgsql-${PG_MAJOR}/share/extension" "$RPM_TOP/RPMS"
 install -m755 "$so"  "$RPM_TOP/BUILDROOT/usr/pgsql-${PG_MAJOR}/lib/axiom.so"
 install -m644 "$ext/axiom.control" "$RPM_TOP/BUILDROOT/usr/pgsql-${PG_MAJOR}/share/extension/"
-install -m644 "$sql" "$RPM_TOP/BUILDROOT/usr/pgsql-${PG_MAJOR}/share/extension/"
+for f in "${all_sqls[@]}"; do
+  install -m644 "$f" "$RPM_TOP/BUILDROOT/usr/pgsql-${PG_MAJOR}/share/extension/"
+done
 
 cat > "$RPM_TOP/SPECS/axiom.spec" <<EOF
 Name:           axiom_${PG_MAJOR}
@@ -211,7 +222,7 @@ ${DESC_LONG}
 %files
 /usr/pgsql-${PG_MAJOR}/lib/axiom.so
 /usr/pgsql-${PG_MAJOR}/share/extension/axiom.control
-/usr/pgsql-${PG_MAJOR}/share/extension/${sql_base}
+$(for f in "${all_sqls[@]}"; do echo "/usr/pgsql-${PG_MAJOR}/share/extension/${f##*/}"; done)
 %changelog
 * $(LC_ALL=C date -u '+%a %b %d %Y') Axiom release automation <s.dhilipkumar@gmail.com> - ${PKG_VERSION}-1
 - Packaged from the ${VERSION} release artifacts.

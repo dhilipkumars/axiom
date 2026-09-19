@@ -142,8 +142,18 @@ on the unbumped tree fails there rather than here. Then:
 git tag v0.1.2-rc.1 && git push origin v0.1.2-rc.1
 ```
 
-Then publish it from the tag **with "Set as a pre-release" ticked**. Without
-that box the floating tags move and it is not a rehearsal.
+Then publish it from the tag **with "Set as a pre-release" ticked**. `promote`
+also refuses any tag containing a hyphen, so a forgotten checkbox cannot move
+the floating tags on its own — but tick it anyway, because that belt only
+catches tags spelled as prereleases.
+
+**Treat any database you install an rc into as throwaway.** Axiom ships no
+extension upgrade scripts (#65), so an instance where you ran
+`CREATE EXTENSION` against `0.1.2-rc.1` has no path to `0.1.2`:
+`ALTER EXTENSION axiom UPDATE` fails, and the only way forward is
+`DROP EXTENSION axiom CASCADE`, which takes every foreign table, server and
+user mapping with it. The package upgrade itself works fine — it is the
+extension inside the database that is stranded.
 
 **Do not run `make release-notes` for an rc.** The changesets belong to the
 release the rc is rehearsing; consuming them would leave the real release with
