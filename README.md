@@ -38,7 +38,9 @@ somewhere else, here is how to reason about it as if it did not."
 ## Things you cannot do with kubectl
 
 *More, including creating a CloudNativePG cluster from SQL, in
-[Examples](https://dhilipkumars.github.io/axiom/guides/examples/).*
+[Examples](https://dhilipkumars.github.io/axiom/guides/examples/). Which kinds
+you can query is bounded by the gateway's RBAC — `nodes` and `deployments` below
+need granting, which the examples page shows how to do.*
 
 **Join across kinds.** Which pods are running on nodes under memory pressure?
 
@@ -88,8 +90,11 @@ UPDATE k8s.configmaps
    SET data = data || '{"LOG_LEVEL":"debug"}'
  WHERE namespace = 'payments' AND name = 'api';
 
-DELETE FROM k8s.pods WHERE namespace = 'staging' AND phase = 'Failed';
+DELETE FROM k8s.configmaps WHERE namespace = 'staging' AND name = 'stale-flags';
 ```
+
+Pods are deliberately read-only at the SQL layer, whatever RBAC allows — a
+`DELETE` with a `WHERE` clause is too easy to get wrong and too hard to undo.
 
 **Ask one question across many clusters**, because each cluster is just another
 schema:
@@ -102,28 +107,24 @@ SELECT 'stage',           name, phase FROM stage.pods  WHERE phase = 'CrashLoopB
 
 ## Getting started
 
-Run a Postgres image with Axiom already in it, deploy the gateway, and query:
+Nothing is built from source. The walkthrough brings up a kind cluster, a TLS
+keypair, the gateway, and a Postgres image with Axiom already in it, then
+queries real cluster state — about ten minutes.
 
-```sh
-kubectl apply -f https://raw.githubusercontent.com/dhilipkumars/axiom/main/deploy/k8s/gateway-rbac.yaml
-kubectl apply -f https://raw.githubusercontent.com/dhilipkumars/axiom/main/deploy/k8s/gateway-deployment.yaml
+**→ [Getting started](https://dhilipkumars.github.io/axiom/guides/getting-started/)**
 
-docker run -d --name axiom-postgres \
-  -e POSTGRES_PASSWORD=axiom -p 55432:5432 \
-  ghcr.io/dhilipkumars/axiom-postgres:latest-pg17
-```
-
-Already run Postgres? Install the extension into it instead — a `.deb` or
-`.rpm` per major and architecture, no toolchain and no rebuild:
+Already run Postgres? The same guide's
+[package route](https://dhilipkumars.github.io/axiom/guides/getting-started/#installing-into-a-postgres-you-already-run)
+installs the extension into it with `apt` or `dnf` — a `.deb` and an `.rpm` per
+Postgres major and architecture, no toolchain and no rebuild:
 
 ```sh
 sudo apt install ./postgresql-17-axiom_<version>-1_amd64.deb     # Debian, Ubuntu
 sudo dnf install ./axiom_17-<version>-1.el9.x86_64.rpm           # RHEL, Rocky, Alma 9
 ```
 
-**→ [Full walkthrough](https://dhilipkumars.github.io/axiom/guides/getting-started/)**,
-including the TLS keypair, the `shared_preload_libraries` step Axiom requires,
-and the download links. Artifacts are on the
+Axiom must be loaded through `shared_preload_libraries`; a package cannot do
+that for you. Artifacts are on the
 [releases page](https://github.com/dhilipkumars/axiom/releases).
 
 ## What makes it different

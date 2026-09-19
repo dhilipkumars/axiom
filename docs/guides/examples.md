@@ -1,11 +1,39 @@
 # Examples
 
-Things worth doing that are awkward or impossible with `kubectl`. Every query
-here was run against a live cluster; the CNPG example at the end was verified
-end to end, including that `kubectl` saw the object Postgres created.
+Things worth doing that are awkward or impossible with `kubectl`.
 
-These assume you have finished [Getting started](getting-started.md), so a
-schema is imported and `k8s.*` tables exist.
+The CloudNativePG example at the end was run end to end, including confirming
+that `kubectl` saw the object Postgres created. The read queries are written
+against the column reference in [Foreign table
+columns](../generated/columns.md) rather than run individually — if one does
+not work, that is a bug worth reporting.
+
+These assume you have finished [Getting started](getting-started.md), so server
+`prod` exists and its kinds are imported into schema `k8s`.
+
+!!! warning "Most of these need a kind the shipped RBAC does not grant"
+
+    The ClusterRole in `deploy/k8s/gateway-rbac.yaml` grants **pods**,
+    **configmaps** and the example CRD — nothing else. That is the design, not
+    an oversight: what a query can reach is bounded by the gateway's
+    ServiceAccount, and there is deliberately no wildcard.
+
+    Examples below that use `nodes`, `deployments` or a CRD need that kind
+    granted first. The recipe is the same every time — grant, restart,
+    re-import:
+
+    ```sh
+    kubectl patch clusterrole axiom-gateway --type=json -p='[{"op":"add","path":"/rules/-","value":
+      {"apiGroups":[""],"resources":["nodes"],"verbs":["get","list","watch"]}}]'
+
+    kubectl -n axiom-system rollout restart deploy/axiom-gateway
+    kubectl -n axiom-system rollout status deploy/axiom-gateway
+    ```
+
+    ```sql
+    -- foreign tables are catalog objects; they do not follow an RBAC change
+    IMPORT FOREIGN SCHEMA k8s LIMIT TO (nodes) FROM SERVER prod INTO k8s;
+    ```
 
 ## Reading
 
@@ -73,17 +101,32 @@ UPDATE k8s.configmaps
    SET data = data || '{"LOG_LEVEL":"debug"}'
  WHERE namespace = 'payments' AND name = 'api';
 
-DELETE FROM k8s.pods WHERE namespace = 'staging' AND phase = 'Failed';
+DELETE FROM k8s.configmaps WHERE namespace = 'staging' AND name = 'stale-flags';
 ```
+
+**Pods are read-only at the SQL layer**, whatever RBAC allows. `DELETE FROM
+k8s.pods` raises `0A000 foreign tables on pods are read-only` rather than
+evicting anything — deleting a pod by `WHERE` clause is too easy to do by
+accident and too hard to undo.
 
 ## Creating a Postgres cluster, from Postgres
 
 The clearest demonstration of what Axiom is: a Postgres instance provisioning a
 Postgres cluster by `INSERT`, through [CloudNativePG](https://cloudnative-pg.io).
 
-**First, let the gateway see the kind.** What a query can reach is bounded by
-the gateway's RBAC, and the shipped ClusterRole does not grant CNPG — nothing
-does by default, which is the point:
+**First, install the operator**, which is what creates the CRD the gateway can
+then discover:
+
+```sh
+kubectl apply --server-side -f \
+  https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.30/releases/cnpg-1.30.0.yaml
+
+kubectl wait --for=condition=Available deploy/cnpg-controller-manager \
+  -n cnpg-system --timeout=240s
+```
+
+**Then let the gateway see the kind.** What a query can reach is bounded by the
+gateway's RBAC, and nothing grants CNPG by default:
 
 ```sh
 kubectl patch clusterrole axiom-gateway --type=json -p='[{"op":"add","path":"/rules/-","value":
@@ -98,7 +141,7 @@ Foreign tables are catalog objects and do not follow an RBAC change, so import
 the kind after restarting:
 
 ```sql
-IMPORT FOREIGN SCHEMA k8s LIMIT TO (clusters) FROM SERVER k8s INTO k8s;
+IMPORT FOREIGN SCHEMA k8s LIMIT TO (clusters) FROM SERVER prod INTO k8s;
 ```
 
 That produces the usual shape — the universal columns, the kind's own top-level
