@@ -67,6 +67,7 @@ nav:
       - FDW options: generated/fdw-options.md
       - Foreign table columns: generated/columns.md
   - Design notes (for contributors):
+      - Developer guide: development.md
       - Architecture: DESIGN.md
       - Auth design: AUTH.md
       - Engineering rules: RULES.md
