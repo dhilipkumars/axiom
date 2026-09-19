@@ -48,13 +48,11 @@ CLUSTER=axiom-install
 NODE="${CLUSTER}-control-plane"
 CONTAINER=axiom-install-pg
 
-# Expanded as ${PLATFORM[@]+"${PLATFORM[@]}"} everywhere below, not
-# "${PLATFORM[@]}": on x86_64 this array is empty, and bash 3.2 -- which is
-# what macOS ships -- treats an empty array expansion as an unbound variable
-# under `set -u`. bash 4.4 and later do not, so the plain form works in CI and
-# fails only for a developer on an Intel Mac.
-PLATFORM=()
-[[ "$(uname -m)" =~ ^(arm64|aarch64)$ ]] && PLATFORM=(--platform linux/amd64)
+# No `--platform` anywhere in this file, deliberately. Every published image is
+# multi-architecture from v0.1.1, so docker resolves the right slice and this
+# gate runs the artifact a stranger on this machine would actually get. Forcing
+# amd64 would have checked a slice no arm64 user runs, under emulation, and
+# reported it as a pass.
 
 log()  { printf '\n==> %s\n' "$*"; }
 fail() { printf '\nE2E FAILED: %s\n' "$*" >&2; exit 1; }
@@ -104,8 +102,13 @@ wait_for_image() {
       # turn a clear answer into a ten-minute timeout.
       *denied*|*unauthorized*)
         fail "$ref is not publicly pullable. A new GHCR package is private until someone changes it: $out" ;;
+      # Before v0.1.1 this meant "you are on arm64, pass --platform". Now it
+      # means the multi-architecture publish is broken -- `merge` in
+      # postgres-image.yml did not assemble a manifest list, or assembled one
+      # missing this architecture. Not retried: it will not fix itself.
       *"no matching manifest"*)
-        fail "$ref has no image for this machine's architecture: $out" ;;
+        fail "$ref has no image for $(uname -m). Every tag is supposed to be
+multi-architecture; check the merge job in postgres-image.yml: $out" ;;
       *) fail "could not pull $ref: $out" ;;
     esac
   done
@@ -113,13 +116,9 @@ wait_for_image() {
 
 log "pulling with no credentials (tag: $TAG)"
 for pg in $MAJORS; do
-  wait_for_image "${PG_IMAGE}:${TAG}-pg${pg}" ${PLATFORM[@]+"${PLATFORM[@]}"}
+  wait_for_image "${PG_IMAGE}:${TAG}-pg${pg}"
   echo "  ${PG_IMAGE}:${TAG}-pg${pg}"
 done
-# No platform override for the gateway: it is published multi-architecture, and
-# kind pulls whichever slice the node needs. Forcing amd64 here would check a
-# slice this machine's cluster will not run, and would hide a missing arm64
-# publish on an arm64 host.
 wait_for_image "$GW_IMAGE"
 echo "  $GW_IMAGE"
 
@@ -128,7 +127,7 @@ echo "  $GW_IMAGE"
 for pg in $MAJORS; do
   log "pg${pg}: the image installs and reports itself"
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-  docker run -d --name "$CONTAINER" ${PLATFORM[@]+"${PLATFORM[@]}"} \
+  docker run -d --name "$CONTAINER" \
     -e POSTGRES_PASSWORD=install-test "${PG_IMAGE}:${TAG}-pg${pg}" >/dev/null
   for _ in $(seq 1 90); do
     docker exec "$CONTAINER" pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1 && break
@@ -239,7 +238,7 @@ kubectl --context "kind-$CLUSTER" -n kube-system wait --for=condition=Ready pod 
 for pg in $MAJORS; do
   log "pg${pg}: the whole procedure from docs/guides/for-agents.md"
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-  docker run -d --name "$CONTAINER" ${PLATFORM[@]+"${PLATFORM[@]}"} --network kind \
+  docker run -d --name "$CONTAINER" --network kind \
     -e POSTGRES_PASSWORD=install-test -v "$PWD/certs:/certs:ro" \
     "${PG_IMAGE}:${TAG}-pg${pg}" >/dev/null
   for _ in $(seq 1 90); do

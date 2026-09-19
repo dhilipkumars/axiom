@@ -7,13 +7,6 @@ from a URL. You need Docker, `kubectl` and `kind`.
 Every command has been run end to end, in this order. If one does not work,
 that is a bug worth reporting.
 
-!!! note "On Apple Silicon"
-
-    The images are `linux/amd64` only for now, so `docker` needs
-    `--platform linux/amd64` or it fails with *no matching manifest for
-    linux/arm64/v8*. It runs under emulation. Every `docker` command below
-    already carries the flag; drop it on an amd64 machine if you prefer.
-
 ## 1. A cluster
 
 **This walkthrough is written for [kind](https://kind.sigs.k8s.io).** Not
@@ -150,7 +143,7 @@ reflects that.
 Rather than installing the extension, run a Postgres image that has it:
 
 ```sh
-docker run -d --name axiom-postgres --platform linux/amd64 \
+docker run -d --name axiom-postgres \
   --network kind \
   -e POSTGRES_PASSWORD=axiom \
   -v "$PWD/certs:/certs:ro" \

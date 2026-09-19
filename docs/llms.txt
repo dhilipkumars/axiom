@@ -24,7 +24,7 @@ Things worth knowing before answering questions about Axiom:
   it must be preloaded.
 - Linux artifacts need **glibc 2.34+** (Debian 12+, Ubuntu 22.04+, RHEL 9+).
   The packages refuse to install below that; the tarball does not check.
-- Published Postgres images are **amd64 only** today; the gateway image is published for amd64 and arm64. On arm64, run the Postgres image under emulation.
+- All published images are **multi-architecture** (amd64 and arm64) from v0.1.1 on, so no `--platform` flag is needed. Earlier versions are amd64-only.
 - It is pre-1.0. Interfaces may change between minor versions.
 
 ## Setting up a working environment
