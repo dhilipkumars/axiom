@@ -44,7 +44,7 @@ VERSION="${VERSION:-$("$ROOT/scripts/version")}"
 # owns the rule and refuses versions it cannot represent faithfully. Asked for
 # rather than derived here, so this and the gate that looks for the filenames
 # it writes cannot disagree about it.
-PKG_VERSION="$("$ROOT/scripts/version" package)"
+PKG_VERSION="$("$ROOT/scripts/version" package "$VERSION")"
 [[ "$PKG_VERSION" == "$VERSION" ]] \
   || echo "    prerelease: packages use ${PKG_VERSION}, artifacts use ${VERSION}"
 

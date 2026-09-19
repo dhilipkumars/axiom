@@ -39,34 +39,45 @@ version="$(awk '
 # Computed here rather than in each caller, so scripts/package-native and the
 # gate that looks for the filenames it writes cannot disagree about it.
 if [[ "${1:-}" == "package" ]]; then
+  # An explicit version wins over the manifest. package-native is run directly
+  # against an unpacked tarball to build packages for a release the working
+  # tree is no longer on -- which is how v0.1.1's packages were made -- and
+  # reading Cargo.toml there would name the files after the wrong release.
+  pkg_version="${2:-$version}"
+
   # Only the first hyphen separates a prerelease, and only one can be
   # represented. `1.0.0-alpha-2` would become `1.0.0~alpha~2`, which sorts
   # *before* `1.0.0~alpha` in both dpkg and rpm -- the reverse of what semver
   # means -- and rpm cannot hold the hyphen that would spell it correctly. So
   # refuse rather than ship a package that orders wrongly.
-  rest="${version#*-}"
-  if [[ "$version" == *-* && "$rest" == *-* ]]; then
-    die "cannot package version '$version': more than one hyphen has no correct
+  rest="${pkg_version#*-}"
+  if [[ "$pkg_version" == *-* && "$rest" == *-* ]]; then
+    die "cannot package version '$pkg_version': more than one hyphen has no correct
   spelling in dpkg or rpm. Use a single prerelease segment, such as
-  ${version%%-*}-rc.1"
+  ${pkg_version%%-*}-rc.1"
   fi
-  # Built by concatenation, not `${version/-/~}`. The replacement string in a
-  # substitution undergoes tilde expansion, and bash 5 does it even here: that
-  # form yields 0.1.2~rc.1 on macOS's bash 3.2 and 0.1.2/home/runnerrc.1 on a
-  # GitHub runner, which dpkg then rejects. A tilde inside double quotes in the
-  # middle of a word is never expanded, so this spells the same thing on both.
-  if [[ "$version" == *-* ]]; then
-    printf '%s\n' "${version%%-*}~${version#*-}"
+  # Built by concatenation, not `${pkg_version/-/~}`. The replacement string in
+  # a substitution undergoes tilde expansion, and bash 5 does it even here:
+  # that form yields 0.1.2~rc.1 on macOS's bash 3.2 and 0.1.2/home/runnerrc.1
+  # on a GitHub runner, which dpkg then rejects. A tilde inside double quotes
+  # in the middle of a word is never expanded, so this spells the same thing on
+  # both.
+  if [[ "$pkg_version" == *-* ]]; then
+    printf '%s\n' "${pkg_version%%-*}~${pkg_version#*-}"
   else
-    printf '%s\n' "$version"
+    printf '%s\n' "$pkg_version"
   fi
   exit 0
 fi
 
-if [[ "${1:-}" != "check" ]]; then
-  printf '%s\n' "$version"
-  exit 0
-fi
+case "${1:-}" in
+  "")      printf '%s\n' "$version"; exit 0 ;;
+  check)   ;;
+  # Anything else is a typo. Printing the version and exiting 0 for
+  # `scripts/version pkg` would look like success and hand the caller a
+  # plausible wrong answer, which is the failure this script exists to prevent.
+  *)       die "unknown mode '$1'; expected no argument, 'package [<version>]', or 'check [<tag>]'" ;;
+esac
 
 # The control file must template the version rather than pin it. A literal here
 # would be a second source of truth, and it would be wrong the first time the
