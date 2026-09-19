@@ -25,6 +25,7 @@ case "$ARCH" in
 esac
 
 VERSION="$("$ROOT/scripts/version")"
+case "$ARCH" in amd64) RPM_ARCH=x86_64 ;; arm64) RPM_ARCH=aarch64 ;; esac
 OUT="$ROOT/dist"
 NAME="axiom-${VERSION}-pg${PG_MAJOR}-linux-${ARCH}"
 STAGE="$(mktemp -d)"
@@ -62,6 +63,14 @@ case "$ARCH:$got" in
   amd64:*x86-64*|arm64:*aarch64*) ;;
   *) echo "package-extension: built $got, which is not ${ARCH}" >&2; exit 1 ;;
 esac
+
+# Read off the binary, not taken from the build image's glibc. Those are
+# different numbers -- bookworm ships 2.36 and this binary needs 2.34 -- and
+# using the image's is what made the docs exclude Ubuntu 22.04 and RHEL 9,
+# both of which run Axiom. Templated into INSTALL.md and handed to the
+# packagers so all three state one measured fact.
+GLIBC_FLOOR="$("$ROOT/scripts/glibc-floor" "$so")"
+echo "==> glibc floor: ${GLIBC_FLOOR}"
 
 cp "$ROOT/LICENSE" "${STAGE}/${NAME}/LICENSE" 2>/dev/null || true
 cat > "${STAGE}/${NAME}/INSTALL.md" <<EOF
@@ -119,11 +128,26 @@ Deploying the gateway and exposing it are covered here:
 
     https://dhilipkumars.github.io/axiom/guides/deploying/
 
+## A package may suit you better
+
+If this machine uses apt or dnf, the release also publishes a \`.deb\` and an
+\`.rpm\` for this major and architecture. They place the same files, and they
+refuse to install on a system too old to run them rather than letting you find
+out when Postgres will not restart:
+
+    sudo apt install ./postgresql-${PG_MAJOR}-axiom_${VERSION}-1_${ARCH}.deb
+    sudo dnf install ./axiom_${PG_MAJOR}-${VERSION}-1.el9.${RPM_ARCH}.rpm
+
 ## Limits
 
-Built against PostgreSQL ${PG_MAJOR} on Debian bookworm (glibc 2.36). It will
-not load on an older glibc, such as Debian bullseye or RHEL 8. A tarball for a
-different major will not load at all -- match it to your server.
+Needs **glibc ${GLIBC_FLOOR} or newer** -- Debian 12+, Ubuntu 22.04+, RHEL 9+.
+Older systems such as Debian bullseye and RHEL 8 cannot load it; the failure is
+at load time, so Postgres refuses to start rather than half-working. This is
+the floor the binary actually requires, which is lower than the glibc of the
+Debian bookworm image it was built on.
+
+Built against PostgreSQL ${PG_MAJOR}. A tarball for a different major will not
+load at all -- match it to your server.
 
 https://dhilipkumars.github.io/axiom/
 EOF
@@ -142,3 +166,27 @@ COPYFILE_DISABLE=1 tar --no-xattrs -czf "${OUT}/${NAME}.tar.gz" -C "$STAGE" "$NA
        || shasum -a 256 "${NAME}.tar.gz"; } > "${NAME}.tar.gz.sha256" )
 echo "==> ${OUT}/${NAME}.tar.gz"
 tar -tzf "${OUT}/${NAME}.tar.gz" | sed 's/^/    /'
+
+# The .deb and .rpm come from this same exported tree rather than a second
+# build, so the library inside a package is the same bytes the tarball ships.
+# package-native also does the RHEL relocation, which is a copy: the .so has no
+# RPATH and the control file resolves $libdir at runtime, so the layout is the
+# packager's choice and needs no separate compile.
+#
+# AXIOM_NO_NATIVE_PACKAGES=1 skips them. The tarball gate sets it: it needs the
+# tree and the tarball and tests neither package, so building them there only
+# spends a couple of minutes per major and -- worse -- reports a packaging
+# failure as a tarball failure, in a job whose name says nothing about
+# packages.
+if [[ "${AXIOM_NO_NATIVE_PACKAGES:-0}" == "1" ]]; then
+  echo "==> skipping .deb/.rpm (AXIOM_NO_NATIVE_PACKAGES=1)"
+  exit 0
+fi
+
+"$ROOT/scripts/package-native" \
+  --tree "${STAGE}/${NAME}" \
+  --pg "$PG_MAJOR" \
+  --arch "$ARCH" \
+  --version "$VERSION" \
+  --glibc-floor "$GLIBC_FLOOR" \
+  --out "$OUT"

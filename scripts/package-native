@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+# Builds a .deb and an .rpm for one Postgres major and architecture, from an
+# already-exported extension tree.
+#
+#   scripts/package-native --tree <dir> --pg 17 --arch amd64 [--version 0.1.1]
+#
+# The tree is what `extension/Dockerfile`'s `artifact` stage exports, which is
+# also exactly what the release tarball unpacks: a Debian-shaped `usr/` holding
+# axiom.so, axiom.control and axiom--<version>.sql. Taking a tree rather than
+# building one means the packages can be cut from a published tarball, so the
+# .so inside a package is the same bytes the tarball shipped rather than a
+# second compile of the same source.
+#
+# Why this can repackage a Debian tree as an RPM without rebuilding: nothing in
+# the artifacts encodes its own path. The .so carries no RPATH, RUNPATH or
+# SONAME, and axiom.control sets `module_pathname = '$libdir/axiom'`, which the
+# postmaster resolves at runtime against its own pkglibdir. So the install
+# layout is the packager's choice. (`relocatable = false` in the control file
+# is a different thing entirely -- it refers to ALTER EXTENSION SET SCHEMA.)
+#
+# Both packages are built inside containers, so this runs the same on a
+# maintainer's macOS as in CI, and neither dpkg-dev nor rpm-build has to exist
+# on the host.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TREE="" PG_MAJOR="" ARCH="" VERSION="" OUT="$ROOT/dist" GLIBC_FLOOR=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tree)    TREE="$2"; shift 2 ;;
+    --pg)      PG_MAJOR="$2"; shift 2 ;;
+    --arch)    ARCH="$2"; shift 2 ;;
+    --version) VERSION="$2"; shift 2 ;;
+    --out)     OUT="$2"; shift 2 ;;
+    --glibc-floor) GLIBC_FLOOR="$2"; shift 2 ;;
+    *) echo "package-native: unknown argument '$1'" >&2; exit 2 ;;
+  esac
+done
+[[ -n "$TREE" && -n "$PG_MAJOR" && -n "$ARCH" ]] \
+  || { echo "usage: package-native --tree <dir> --pg <major> --arch <amd64|arm64> [--version <v>] [--out <dir>]" >&2; exit 2; }
+VERSION="${VERSION:-$("$ROOT/scripts/version")}"
+
+case "$ARCH" in
+  amd64) DEB_ARCH=amd64; RPM_ARCH=x86_64 ;;
+  arm64) DEB_ARCH=arm64; RPM_ARCH=aarch64 ;;
+  *) echo "package-native: unsupported architecture '$ARCH'" >&2; exit 2 ;;
+esac
+
+TREE="$(cd "$TREE" && pwd)"
+so="$TREE/usr/lib/postgresql/${PG_MAJOR}/lib/axiom.so"
+ext="$TREE/usr/share/postgresql/${PG_MAJOR}/extension"
+[[ -f "$so" ]] || { echo "package-native: no axiom.so under $TREE" >&2; exit 1; }
+[[ -f "$ext/axiom.control" ]] || { echo "package-native: no axiom.control under $TREE" >&2; exit 1; }
+sql="$(compgen -G "$ext/axiom--*.sql" | head -1)" \
+  || { echo "package-native: no axiom--*.sql under $TREE" >&2; exit 1; }
+sql_base="$(basename "$sql")"
+
+# The tree must be for the architecture being labelled. A package whose name
+# says arm64 and whose payload is x86-64 is only discovered by whoever it fails
+# for, and a package manager will have recorded it as installed by then.
+got="$(file -b "$so")"
+case "$ARCH:$got" in
+  amd64:*x86-64*|arm64:*aarch64*) ;;
+  *) echo "package-native: tree holds $got, which is not ${ARCH}" >&2; exit 1 ;;
+esac
+
+mkdir -p "$OUT"
+STAGE="$(mktemp -d)"
+
+# sha256sum on Linux, shasum on a maintainer's macOS. Packages carry internal
+# digests, but those authenticate the payload *after* dpkg or rpm has accepted
+# the file; a checksum beside the download is what lets someone verify it
+# before installing, which is what a Dockerfile or a provisioning script does.
+checksum() {
+  ( cd "$(dirname "$1")" \
+    && { sha256sum "$(basename "$1")" 2>/dev/null \
+         || shasum -a 256 "$(basename "$1")"; } > "$(basename "$1").sha256" )
+}
+trap 'rm -rf "$STAGE"' EXIT
+
+DESC_SHORT="Query and control Kubernetes from PostgreSQL ${PG_MAJOR}"
+DESC_LONG="Axiom is a foreign data wrapper that exposes Kubernetes resources -- built-in
+kinds and CRDs alike -- as PostgreSQL foreign tables. SELECT reads the cluster,
+INSERT/UPDATE/DELETE map to real Kubernetes writes, and a table declared
+cache_mode 'watch' is served from a shared-memory cache kept current by a
+standing watch. The Postgres may sit entirely outside the cluster's network.
+
+Axiom must be loaded through shared_preload_libraries; it registers
+PGC_POSTMASTER settings and refuses to initialise otherwise."
+
+# --- .deb -------------------------------------------------------------------
+#
+# Debian's convention for an extension is postgresql-<major>-<name>, which is
+# what apt users expect to find and what PGDG itself publishes under.
+#
+# The package owns the three files and not the directories holding them:
+# /usr/lib/postgresql/N/lib belongs to the postgresql-N package, and a second
+# package claiming it makes the two conflict on install.
+echo "==> postgresql-${PG_MAJOR}-axiom ${VERSION} (${DEB_ARCH})"
+DEB_ROOT="$STAGE/deb"
+mkdir -p "$DEB_ROOT/DEBIAN" \
+         "$DEB_ROOT/usr/lib/postgresql/${PG_MAJOR}/lib" \
+         "$DEB_ROOT/usr/share/postgresql/${PG_MAJOR}/extension" \
+         "$DEB_ROOT/usr/share/doc/postgresql-${PG_MAJOR}-axiom"
+install -m755 "$so"  "$DEB_ROOT/usr/lib/postgresql/${PG_MAJOR}/lib/axiom.so"
+install -m644 "$ext/axiom.control" "$DEB_ROOT/usr/share/postgresql/${PG_MAJOR}/extension/"
+install -m644 "$sql" "$DEB_ROOT/usr/share/postgresql/${PG_MAJOR}/extension/"
+install -m644 "$ROOT/LICENSE" "$DEB_ROOT/usr/share/doc/postgresql-${PG_MAJOR}-axiom/copyright"
+
+# libc6 (>= 2.34) is the floor the binary actually has, read off the ELF below
+# rather than taken from the build image's glibc -- those are different
+# numbers, and using the build image's is what made the docs claim 2.36.
+GLIBC_FLOOR="${GLIBC_FLOOR:-$("$ROOT/scripts/glibc-floor" "$so")}"
+[[ "$GLIBC_FLOOR" =~ ^2\.[0-9]+$ ]] \
+  || { echo "package-native: could not read the glibc floor from the .so (got '$GLIBC_FLOOR')" >&2; exit 1; }
+echo "    glibc floor: ${GLIBC_FLOOR}"
+
+cat > "$DEB_ROOT/DEBIAN/control" <<EOF
+Package: postgresql-${PG_MAJOR}-axiom
+Version: ${VERSION}-1
+Architecture: ${DEB_ARCH}
+Maintainer: Dhilip Kumar S <s.dhilipkumar@gmail.com>
+Section: database
+Priority: optional
+Homepage: https://github.com/dhilipkumars/axiom
+Depends: postgresql-${PG_MAJOR}, libc6 (>= ${GLIBC_FLOOR})
+Description: ${DESC_SHORT}
+$(sed 's/^$/./; s/^/ /' <<<"$DESC_LONG")
+EOF
+
+DEB_NAME="postgresql-${PG_MAJOR}-axiom_${VERSION}-1_${DEB_ARCH}.deb"
+docker run --rm \
+  -v "$DEB_ROOT":/pkg:ro -v "$OUT":/out \
+  debian:bookworm-slim bash -c "
+    set -e
+    cp -r /pkg /tmp/build
+    dpkg-deb --root-owner-group --build /tmp/build /out/${DEB_NAME} >/dev/null
+  "
+checksum "${OUT}/${DEB_NAME}"
+echo "    ${OUT}/${DEB_NAME}"
+
+# --- .rpm -------------------------------------------------------------------
+#
+# PGDG's yum packages install extensions under /usr/pgsql-<major>, not the
+# Debian layout, and name themselves <extension>_<major> -- pg_cron_17,
+# postgis34_17. Both conventions are followed so the package looks native to
+# whichever side the user is on.
+#
+# rpmbuild scans the payload ELF and generates the glibc requirement itself,
+# which is why nothing below declares one: a generated
+# `libc.so.6(GLIBC_2.34)(64bit)` cannot drift the way a hand-written number can,
+# and it is what makes dnf refuse cleanly on RHEL 8 instead of letting someone
+# edit shared_preload_libraries and meet a postmaster that will not start.
+echo "==> axiom_${PG_MAJOR} ${VERSION} (${RPM_ARCH})"
+RPM_TOP="$STAGE/rpm"
+mkdir -p "$RPM_TOP/SPECS" "$RPM_TOP/BUILDROOT/usr/pgsql-${PG_MAJOR}/lib" \
+         "$RPM_TOP/BUILDROOT/usr/pgsql-${PG_MAJOR}/share/extension" "$RPM_TOP/RPMS"
+install -m755 "$so"  "$RPM_TOP/BUILDROOT/usr/pgsql-${PG_MAJOR}/lib/axiom.so"
+install -m644 "$ext/axiom.control" "$RPM_TOP/BUILDROOT/usr/pgsql-${PG_MAJOR}/share/extension/"
+install -m644 "$sql" "$RPM_TOP/BUILDROOT/usr/pgsql-${PG_MAJOR}/share/extension/"
+
+cat > "$RPM_TOP/SPECS/axiom.spec" <<EOF
+Name:           axiom_${PG_MAJOR}
+Version:        ${VERSION}
+Release:        1%{?dist}
+Summary:        ${DESC_SHORT}
+License:        Apache-2.0
+URL:            https://github.com/dhilipkumars/axiom
+BuildArch:      ${RPM_ARCH}
+Requires:       postgresql${PG_MAJOR}-server
+# The directories belong to postgresql${PG_MAJOR}-server. Owning them here
+# would make the two packages conflict, so only the three files are claimed.
+%global _build_id_links none
+%description
+${DESC_LONG}
+%files
+/usr/pgsql-${PG_MAJOR}/lib/axiom.so
+/usr/pgsql-${PG_MAJOR}/share/extension/axiom.control
+/usr/pgsql-${PG_MAJOR}/share/extension/${sql_base}
+%changelog
+* $(LC_ALL=C date -u '+%a %b %d %Y') Axiom release automation <s.dhilipkumar@gmail.com> - ${VERSION}-1
+- Packaged from the ${VERSION} release artifacts.
+EOF
+
+RPM_STAGE="$STAGE/rpmout"; mkdir -p "$RPM_STAGE"
+docker run --rm --platform "linux/${ARCH}" \
+  -v "$RPM_TOP":/top -v "$RPM_STAGE":/staged \
+  rockylinux:9 bash -c "
+    set -e
+    dnf install -y -q rpm-build >/dev/null 2>&1
+    # Assert rather than assume the emulation took. A container that silently
+    # ran as the host architecture would build an rpm whose auto-generated
+    # dependencies describe the wrong libc, and nothing downstream would say so.
+    [[ \"\$(rpm --eval %_arch)\" == '${RPM_ARCH}' ]] \
+      || { echo \"package-native: rpm builder is \$(rpm --eval %_arch), not ${RPM_ARCH}\" >&2; exit 1; }
+    cp -r /top /tmp/top
+    rpmbuild -bb \
+      --define '_topdir /tmp/top' \
+      --define '_rpmdir /tmp/top/RPMS' \
+      --buildroot /tmp/top/BUILDROOT \
+      /tmp/top/SPECS/axiom.spec >/dev/null
+    cp /tmp/top/RPMS/${RPM_ARCH}/*.rpm /staged/
+  "
+# Named from a directory this run created and nothing else writes to, so the
+# name is this build's output. Globbing dist/ and taking `tail -1` would pick
+# up a package left by an earlier run whenever one sorted later -- a different
+# dist tag is enough -- and then checksum and report that one instead.
+found=("$RPM_STAGE"/*.rpm)
+[[ ${#found[@]} -eq 1 && -f "${found[0]}" ]] \
+  || { echo "package-native: expected exactly one rpm, got ${#found[@]}" >&2; exit 1; }
+RPM_NAME="$(basename "${found[0]}")"
+mv "${found[0]}" "$OUT/$RPM_NAME"
+checksum "${OUT}/${RPM_NAME}"
+echo "    ${OUT}/${RPM_NAME}"

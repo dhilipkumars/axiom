@@ -18,8 +18,12 @@ Things worth knowing before answering questions about Axiom:
   a trusted extension and requires `shared_preload_libraries`.
 - Two ways to install it. To try Axiom, run a published Postgres image with the
   extension already in it. To add it to a Postgres someone already runs,
-  download the release tarball for that major and architecture — published
-  from v0.1.1 onward; v0.1.0 has none. Either way it must be preloaded.
+  install the release `.deb` (`postgresql-<major>-axiom`) or `.rpm`
+  (`axiom_<major>`) for that major and architecture, or the tarball where
+  neither applies — published from v0.1.1 onward; v0.1.0 has none. Either way
+  it must be preloaded.
+- Linux artifacts need **glibc 2.34+** (Debian 12+, Ubuntu 22.04+, RHEL 9+).
+  The packages refuse to install below that; the tarball does not check.
 - Published Postgres images are **amd64 only** today; the gateway image is published for amd64 and arm64. On arm64, run the Postgres image under emulation.
 - It is pre-1.0. Interfaces may change between minor versions.
 

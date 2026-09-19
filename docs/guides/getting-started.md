@@ -260,31 +260,41 @@ explains the rules.
 ## Installing into a Postgres you already run
 
 The guide above runs Postgres in a container. If you already have one, install
-the extension into it instead, using a release tarball — no toolchain, no
-rebuild.
+the extension into it instead — no toolchain, no rebuild. Three routes, best
+first.
 
-**Until a release carries those tarballs, building from source is the only
-route into an existing Postgres.** That needs a Rust toolchain and
-`cargo-pgrx` matching the `pg_config` of the server you are installing into:
+### A package, if this machine uses apt or dnf
 
-This is the one part of this guide that does need a checkout:
+Releases publish a `.deb` and an `.rpm` per major and architecture. Prefer
+these: they place the files, they can be removed again, and — the part that
+matters — **they refuse to install on a system whose glibc is too old to run
+the library**, instead of letting you discover it when Postgres will not
+restart.
 
 ```sh
-git clone https://github.com/dhilipkumars/axiom.git
-cd axiom
-cargo install cargo-pgrx --version 0.19.2 --locked
-cargo pgrx init --pg17 "$(which pg_config)"
-cd extension && cargo pgrx install --release --no-default-features --features pg17
+V=0.1.1; PG=17
+BASE=https://github.com/dhilipkumars/axiom/releases/download/v$V
+
+# Debian, Ubuntu
+ARCH=$(dpkg --print-architecture)
+curl -fsSLO "$BASE/postgresql-$PG-axiom_$V-1_$ARCH.deb"
+sudo apt install "./postgresql-$PG-axiom_$V-1_$ARCH.deb"
+
+# RHEL, Rocky, Alma 9 — needs PGDG's repo for postgresql$PG-server
+curl -fsSLO "$BASE/axiom_$PG-$V-1.el9.$(uname -m).rpm"
+sudo dnf install "./axiom_$PG-$V-1.el9.$(uname -m).rpm"
 ```
 
-`cargo pgrx install` writes into the directories `pg_config` reports, so it
-needs permission to do that — run it as a user who has it, or with `sudo -E`
-so the toolchain stays on `PATH`.
+The Debian package installs under `/usr/lib/postgresql/$PG`, the RPM under
+`/usr/pgsql-$PG`, each matching what that distribution's Postgres expects.
+Neither owns those directories, so neither conflicts with the server package.
 
-**Three places name the major and all must agree**: `--pg17` on
-`cargo pgrx init`, `--features pg17`, and the `pg_config` you point at. Change
-one for a different major and change all three, or the build fails in a way
-that does not name the cause.
+A package cannot set `shared_preload_libraries` for you, and Axiom will not
+load without it. Continue at [Preload, then connect](#preload-then-connect) —
+not at step 5, which is written for the container this guide starts and uses
+`docker exec` and a CA path inside it.
+
+### A tarball, anywhere else
 
 Releases publish a tarball per Postgres major and architecture, from `v0.1.1`
 onward — **v0.1.0 predates them and has none**. Take `V` from the
@@ -318,7 +328,35 @@ sudo cp axiom-$V-pg$PG-linux-$ARCH/usr/share/postgresql/$PG/extension/axiom* \
   "$(pg_config --sharedir)/extension/"
 ```
 
-Then preload it and restart. **This is not optional**: Axiom registers
+### Building from source, as a last resort
+
+Only if no artifact matches your platform. This needs a Rust toolchain and
+`cargo-pgrx` matching the `pg_config` of the server you are installing into,
+and it is the one part of this guide that needs a checkout:
+
+```sh
+git clone https://github.com/dhilipkumars/axiom.git
+cd axiom
+cargo install cargo-pgrx --version 0.19.2 --locked
+cargo pgrx init --pg17 "$(which pg_config)"
+cd extension && cargo pgrx install --release --no-default-features --features pg17
+```
+
+`cargo pgrx install` writes into the directories `pg_config` reports, so it
+needs permission to do that — run it as a user who has it, or with `sudo -E`
+so the toolchain stays on `PATH`.
+
+**Three places name the major and all must agree**: `--pg17` on
+`cargo pgrx init`, `--features pg17`, and the `pg_config` you point at. Change
+one for a different major and change all three, or the build fails in a way
+that does not name the cause.
+
+### Preload, then connect
+
+However you placed the files — package, tarball or source build — the
+remaining steps are the same.
+
+Preload the library and restart. **This is not optional**: Axiom registers
 `PGC_POSTMASTER` settings, so without it `CREATE EXTENSION` fails outright
 rather than running with the cache disabled.
 
@@ -349,11 +387,10 @@ a NodePort on a routable node address, a LoadBalancer, or an ingress.
 [Deploying the gateway](deploying.md) covers those choices and how each
 interacts with the certificate's SANs.
 
-So the server definition, in your own `psql`, is:
+So the server definition, in your own `psql`, is — the extension is already
+created above, so this picks up from there:
 
 ```sql
-CREATE EXTENSION axiom;
-
 CREATE SERVER prod
   FOREIGN DATA WRAPPER axiom_fdw
   OPTIONS (
@@ -374,12 +411,18 @@ That is the whole path. [Import a schema](#6-import-a-schema) and
 the columns are chosen — they are the same SQL, so read them for the detail
 rather than for another set of steps.
 
-### What the tarballs do and do not cover
+### What the artifacts do and do not cover
 
-- **Built on Debian bookworm (glibc 2.36).** They will not load on an older
-  glibc — Debian bullseye or RHEL 8, for instance. The failure is at load time,
-  so Postgres refuses to start with the preload set; there is no silent
-  half-working state.
+- **glibc 2.34 or newer** — Debian 12+, Ubuntu 22.04+, RHEL 9+ and their
+  rebuilds. Older systems such as Debian bullseye and RHEL 8 cannot load the
+  library. The failure is at load time, so Postgres refuses to start with the
+  preload set; there is no silent half-working state. This is the floor the
+  binary actually requires, which is lower than the glibc of the Debian
+  bookworm image it is built on — the two are not the same number.
+
+  **The `.deb` and `.rpm` check this for you** and refuse to install on a
+  system below the floor, which is the main reason to prefer one over the
+  tarball if your machine uses apt or dnf.
 - **Linux, amd64 and arm64.** No macOS or Windows tarballs are published.
   Building from source is the only route there, with the caveat that it is not
   something this project tests: every gate runs on Linux.

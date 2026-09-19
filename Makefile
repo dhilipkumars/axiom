@@ -10,7 +10,7 @@ COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 
 .PHONY: all proto proto-check gateway-build gateway-test gateway-lint gateway-vuln \
         ext-build ext-test ext-lint ext-fmt ext-audit unit lint docs-generate docs-check \
-        version changelog release-check release-notes up down e2e-preload package e2e-tarball e2e-install e2e-ping e2e-phase0 e2e-pods e2e-phase1 e2e-configmaps e2e-phase2 e2e-watch e2e-phase3 e2e-crd e2e-phase4 e2e-cluster e2e-phase5 e2e
+        version changelog release-check release-notes up down e2e-preload package e2e-tarball e2e-package e2e-install e2e-ping e2e-phase0 e2e-pods e2e-phase1 e2e-configmaps e2e-phase2 e2e-watch e2e-phase3 e2e-crd e2e-phase4 e2e-cluster e2e-phase5 e2e
 
 all: lint unit
 
@@ -133,6 +133,11 @@ package:
 
 e2e-tarball:
 	./e2e/tarball_test.sh
+
+# The .deb and .rpm, and -- the half that matters -- that they refuse on a
+# glibc below the binary's floor instead of installing and failing later.
+e2e-package:
+	./e2e/package_test.sh
 
 e2e-install:
 	./e2e/install_test.sh

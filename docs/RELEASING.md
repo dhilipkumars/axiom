@@ -154,5 +154,19 @@ Nothing about a development image is a release: no version tag is written, and
 - **Extension tarballs**, one per major and architecture, attached to the
   GitHub release with a `.sha256` beside each. These are for installing into a
   Postgres someone already runs; the images are for trying Axiom.
+- **`.deb` and `.rpm` packages**, the same six majors-and-architectures in two
+  formats, also with a `.sha256` each. Built from the same exported tree as the
+  tarball, so the library inside a package is the same bytes rather than a
+  second compile. Prefer them wherever a package manager applies: they declare
+  the glibc floor read off the binary, so an unsupported system is refused at
+  install time instead of at the next postmaster start.
 
 v0.1.0 predates the tarballs and has only images.
+
+**v0.1.1 carries packages, but its own workflow did not build them.** They were
+cut from that release's published tarballs after the fact and uploaded by hand,
+so the bytes match — the library inside each package is byte-identical to the
+one in the tarball — but re-running v0.1.1's workflow would not reproduce them.
+From v0.1.2 the workflow produces all three formats itself. Do not repeat the
+manual step; if a release is missing artifacts, fix the workflow and cut
+another patch.
