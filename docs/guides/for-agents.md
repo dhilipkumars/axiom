@@ -31,14 +31,11 @@ kind version
 uname -m
 ```
 
-All three must be installed. Record `uname -m`:
-
-- `arm64` or `aarch64` → the Postgres image below needs `--platform linux/amd64`; the gateway image is published for both amd64 and arm64.
-- `x86_64` → omit that flag.
-
-The flag is on the Postgres commands below. The OpenSSL image and the gateway
-image are multi-architecture, so they need nothing. On x86_64 you may drop the
-flag or leave it; Docker accepts a matching platform.
+All four must succeed. The first three are required tools; `uname -m` is
+recorded only so a bug report can name the machine — **it changes nothing
+below**. `arm64`/`aarch64` and `x86_64` are both supported natively, every
+image this guide uses is published for both, and adding a `--platform` flag
+would pin you to a slice your machine then has to emulate.
 
 ## Step 0 — somewhere to work
 
@@ -185,7 +182,7 @@ kubectl --context kind-axiom -n axiom-system logs deploy/axiom-gateway --tail=30
 
 ```sh
 docker rm -f axiom-postgres 2>/dev/null || true
-docker run -d --name axiom-postgres --platform linux/amd64 \
+docker run -d --name axiom-postgres \
   --network kind \
   -e POSTGRES_PASSWORD=axiom \
   -v ~/axiom-quickstart/certs:/certs:ro \
@@ -277,7 +274,7 @@ point of the project.
 
 | Symptom | Cause | Action |
 | --- | --- | --- |
-| `no matching manifest for linux/arm64/v8` | images are amd64 only, you are on arm64 | add `--platform linux/amd64` |
+| `no matching manifest for linux/arm64/v8` | the tag has no slice for this machine. Versions before `0.1.1` are amd64-only and give this legitimately; every tag from `0.1.1` on, including the `latest-pgNN` this guide uses, should be multi-architecture | if you pinned an older version, use `latest-pgNN` or `0.1.1`+. Otherwise the publish is broken — confirm with `docker manifest inspect ghcr.io/dhilipkumars/axiom-postgres:latest-pg17` and report it. Retrying will not help: a manifest list is tagged atomically |
 | `denied` on `docker pull` | image is private or the tag does not exist | check the tag; do not retry with credentials |
 | `FATAL: cannot create PGC_POSTMASTER variables after startup` | Axiom loaded without `shared_preload_libraries` | use the published image, or preload it |
 | `CREATE EXTENSION` closes the connection | same as above | as above |
@@ -310,7 +307,7 @@ rm -rf ~/axiom-quickstart
   tarball: it refuses to install on a glibc below 2.34 rather than failing at
   the next postmaster start. The images remain the path for trying Axiom
   without touching an existing Postgres.
-- **The Postgres image is amd64 only**; the gateway image supports amd64 and arm64, so only Postgres runs under emulation on arm64.
+- **Every image is published for amd64 and arm64** from v0.1.1 on, so nothing runs under emulation and no `--platform` flag is needed. Versions before that are amd64-only.
 - **What a query can reach is bounded by the gateway's RBAC**, not the SQL
   user's. To expose more kinds, change the ClusterRole and restart the gateway,
   then re-import — foreign tables are catalog objects and do not follow the
