@@ -152,17 +152,23 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-          IS_PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
           set -euo pipefail
           tags=()
           if [[ "$GITHUB_EVENT_NAME" == "release" ]]; then
             [[ -n "$RELEASE_TAG" ]] || { echo "release event with an empty tag" >&2; exit 1; }
             tags+=(--tag "$IMAGE_NAME:$RELEASE_TAG")
-            # A prerelease publishes its own tag but must not move :latest,
-            # which is what someone pulling without a version is trusting to be
-            # the current stable release.
-            [[ "$IS_PRERELEASE" == "true" ]] || tags+=(--tag "$IMAGE_NAME:latest")
+            # `:latest` is deliberately NOT moved here, and this job is the
+            # wrong place to move it. It would move as soon as both
+            # architectures build, which says the image exists, not that it
+            # works -- so a release whose install check failed would still
+            # hand everyone pulling `:latest` a new gateway paired with the
+            # previous Postgres release, a combination nothing tested.
+            #
+            # postgres-image.yml's `promote` moves it, after `install-check`
+            # has pulled this exact tag credential-free and run the published
+            # procedure against it. That job already proves the gateway; it
+            # just was not wired to the tag. See issue #56.
           else
             tags+=(--tag "$IMAGE_NAME:development")
           fi

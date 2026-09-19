@@ -48,6 +48,10 @@ concurrency:
 
 env:
   IMAGE_NAME: ghcr.io/dhilipkumars/axiom-postgres
+  # Promoted here rather than in gateway-image.yml, because the evidence that
+  # it works is here: `install-check` pulls this exact tag and runs the
+  # published procedure against it.
+  GATEWAY_IMAGE: ghcr.io/dhilipkumars/axiom-gateway
 
 jobs:
   # A nightly build of a branch that has not moved republishes the same source
@@ -389,3 +393,13 @@ jobs:
           docker buildx imagetools create \
             --tag "$IMAGE_NAME:latest" \
             "$IMAGE_NAME:${version}-pg${newest}"
+
+          # The gateway's floating tag moves on the same evidence and in the
+          # same step, so the pair someone gets from two unpinned pulls is the
+          # pair install-check exercised together. gateway-image.yml publishes
+          # the version tag; it does not move this one.
+          #
+          # The tag keeps its leading v, which the Postgres tags do not.
+          docker buildx imagetools create \
+            --tag "$GATEWAY_IMAGE:latest" \
+            "$GATEWAY_IMAGE:${RELEASE_TAG}"
