@@ -68,8 +68,9 @@ for pg in $MAJORS; do
   # scripts/glibc-floor uses. Checking a value against itself proves only that
   # the same code ran twice, so a flaw in that heuristic would make the
   # generator and this assertion agree on the same wrong number.
-  actual="$(docker run --rm -v "$DIST":/d:ro debian:bookworm-slim bash -c '
-      apt-get -qq update >/dev/null 2>&1 && apt-get -qq install -y binutils dpkg-dev >/dev/null 2>&1
+  actual="$(docker run --rm -v "$DIST":/d:ro debian:bookworm-slim bash -c "$RETRY"'
+      retry apt-get -qq update >/dev/null 2>&1
+      retry apt-get -qq install -y binutils dpkg-dev >/dev/null 2>&1
       cd /tmp && dpkg-deb -x /d/'"$(basename "$deb")"' x
       objdump -p "$(find x -name axiom.so)" \
         | awk "/GLIBC_/ { for (i=1;i<=NF;i++) if (\$i ~ /^GLIBC_/) { sub(/^GLIBC_/,\"\",\$i); print \$i } }" \
@@ -85,7 +86,7 @@ for pg in $MAJORS; do
   out="$(docker run --rm -v "$DIST":/d:ro "postgres:${pg}" bash -c "$RETRY"'
     set -e
     retry apt-get -qq update >/dev/null 2>&1
-    apt-get install -y -qq /d/'"$(basename "$deb")"' >/dev/null 2>&1 || { echo "INSTALL-FAILED"; exit 1; }
+    retry apt-get install -y -qq /d/'"$(basename "$deb")"' >/dev/null 2>&1 || { echo "INSTALL-FAILED"; exit 1; }
     su postgres -c "/usr/lib/postgresql/'"$pg"'/bin/initdb -D /tmp/data" >/dev/null 2>&1
     echo "shared_preload_libraries = '"'"'axiom'"'"'" >> /tmp/data/postgresql.conf
     su postgres -c "/usr/lib/postgresql/'"$pg"'/bin/pg_ctl -D /tmp/data -l /tmp/pg.log -w start" >/dev/null \
@@ -110,42 +111,59 @@ $out"
   echo "    version ${VERSION}, worker running, removed cleanly"
 
   # The half that actually justifies shipping a package: on a glibc below the
-  # floor, apt must refuse and place nothing.
+  # floor, apt must refuse and install nothing.
   #
   # Ubuntu 20.04 is glibc 2.31. It is used rather than Debian bullseye because
   # bullseye is EOL and deb.debian.org now 404s its security pool, so
-  # installing anything there fails for reasons that have nothing to do with
-  # this test.
+  # installing anything there fails for reasons unrelated to this test.
   #
-  # Note what this cannot do, and why it does not try. The ideal check makes
-  # postgresql-N installable so glibc is the only possible objection -- which
-  # is what the EL8 check below does. On the apt side that combination no
-  # longer exists: PGDG stopped publishing for focal, and every Debian-family
-  # release it still supports has glibc at or above the floor already. So the
-  # refusal here is necessarily over-determined, and the proof is made
-  # differently: assert that this system genuinely is below the declared floor,
-  # and that apt named libc6 as the reason. Drop the Depends and apt stops
-  # naming libc6; set the floor to something old and the version comparison
-  # stops holding. Both mutations fail, which is what the check is for.
+  # A stand-in postgresql-N is installed first, and that is the point of the
+  # check rather than a detail. PGDG stopped publishing for focal, so without
+  # it postgresql-N is simply missing, apt refuses over that as well, and the
+  # assertions below hold for a package that is not actually protecting
+  # anyone: `Depends: postgresql-N | libc6 (>= floor)` would still see apt cite
+  # both unmet branches here, while on a real machine with Postgres installed
+  # the first branch is satisfied and the thing installs onto glibc 2.31. With
+  # the server dependency satisfied, glibc is the only objection left, so a
+  # refusal can only have come from it.
   log "pg${pg}: the .deb refuses on a glibc below its floor"
-  # apt writes the dependency back with an architecture qualifier whenever the
-  # package is not the container's native architecture -- "libc6:arm64 (>= 2.34)"
-  # rather than "libc6 (>= 2.34)". A literal match would pass on a runner whose
-  # architecture happens to match the package and fail on a maintainer's
-  # machine, which is the wrong way round for a gate.
-  floor_re="libc6(:[a-z0-9-]+)? \\(>= ${declared//./\\.}\\)"
-  out="$(docker run --rm -v "$DIST":/d:ro ubuntu:20.04 bash -c "$RETRY"'
+  # Anchored on the left so it cannot be satisfied by some other package whose
+  # name merely ends in libc6. apt always writes a space before the name.
+  floor_re="(^| )libc6(:[a-z0-9-]+)? \\(>= ${declared//./\\.}\\)"
+  # Native architecture, so apt is comparing like with like and the package is
+  # not treated as foreign.
+  out="$(docker run --rm --platform "linux/${ARCH}" -v "$DIST":/d:ro ubuntu:20.04 bash -c "$RETRY"'
     export DEBIAN_FRONTEND=noninteractive
     retry apt-get -qq update >/dev/null 2>&1
     # This system must really be below the floor, or the refusal proves
-    # nothing. dpkg does the comparison, so it is apt policy deciding, not a
-    # string match written here.
+    # nothing. dpkg does the comparison, so it is apt policy deciding rather
+    # than a string written here.
     have="$(dpkg-query -W -f="\${Version}" libc6)"
     dpkg --compare-versions "$have" ge "'"$declared"'" \
       || echo "BELOW-THE-FLOOR have=$have floor='"$declared"'"
+
+    # A stand-in for the server package, so the only thing left to object to is
+    # glibc. It carries no files; it exists to satisfy one dependency.
+    mkdir -p /tmp/stand-in/DEBIAN
+    printf "%s\n" \
+      "Package: postgresql-'"$pg"'" \
+      "Version: 99:0-stand-in" \
+      "Architecture: $(dpkg --print-architecture)" \
+      "Maintainer: axiom package gate <noreply@example.invalid>" \
+      "Description: stand-in so the gate can attribute a refusal to glibc" \
+      > /tmp/stand-in/DEBIAN/control
+    dpkg-deb --root-owner-group --build /tmp/stand-in /tmp/stand-in.deb >/dev/null 2>&1
+    dpkg -i /tmp/stand-in.deb >/dev/null 2>&1
+    dpkg-query -W -f="\${Status}" postgresql-'"$pg"' 2>/dev/null | grep -q "install ok installed" \
+      && echo SERVER-SATISFIED
+
     apt-get install -y /d/'"$(basename "$deb")"' >/tmp/o 2>&1 || true
     grep -qE "'"$floor_re"'" /tmp/o && echo CITED-THE-FLOOR
-    test ! -f /usr/lib/postgresql/'"$pg"'/lib/axiom.so && echo PLACED-NOTHING
+    grep -qE "(^| )postgresql-'"$pg"'(:[a-z0-9-]+)? " /tmp/o && echo ALSO-BLOCKED-BY-SERVER
+    # Not a file check: /usr/lib/postgresql does not exist on a stock focal
+    # image, so asserting the .so is absent would pass without apt having
+    # decided anything. Whether dpkg registered the package is the real question.
+    dpkg-query -W postgresql-'"$pg"'-axiom >/dev/null 2>&1 || echo NOT-INSTALLED
     # Carried out so a failure shows what apt actually said rather than only
     # which marker was missing.
     sed -n "/unmet dependencies/,/^E:/p" /tmp/o | sed "s/^/apt| /"
@@ -154,12 +172,23 @@ $out"
     || fail "pg${pg}: the test system is not below the declared floor of ${declared},
 so its refusal would not show the constraint works:
 $out"
-  grep -q CITED-THE-FLOOR <<<"$out" \
-    || fail "pg${pg}: apt did not name 'libc6 (>= ${declared})' as unmet -- on a system
-that is demonstrably below that floor, the dependency is not load-bearing:
+  grep -q SERVER-SATISFIED <<<"$out" \
+    || fail "pg${pg}: the stand-in postgresql-${pg} did not install, so a refusal here
+cannot be attributed to glibc rather than to the missing server package:
 $out"
-  grep -q PLACED-NOTHING <<<"$out" || fail "pg${pg}: a refused install still placed axiom.so"
-  echo "    refused, citing libc6, and placed nothing"
+  grep -q ALSO-BLOCKED-BY-SERVER <<<"$out" \
+    && fail "pg${pg}: apt still objected to postgresql-${pg} despite the stand-in, so the
+glibc constraint was not shown to be what refused:
+$out"
+  grep -q CITED-THE-FLOOR <<<"$out" \
+    || fail "pg${pg}: with the server dependency satisfied and this system below the
+floor, apt did not name 'libc6 (>= ${declared})' -- the dependency is not
+load-bearing:
+$out"
+  grep -q NOT-INSTALLED <<<"$out" \
+    || fail "pg${pg}: a refused install still registered the package with dpkg:
+$out"
+  echo "    server dependency satisfied, refused on libc6 alone, registered nothing"
 done
 
 if [[ "$RUN_RPM" == "1" ]]; then
@@ -188,7 +217,7 @@ $reqs"
     set -e
     retry dnf install -y -q https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-'"$RPM_ARCH"'/pgdg-redhat-repo-latest.noarch.rpm >/dev/null 2>&1
     dnf -qy module disable postgresql >/dev/null 2>&1 || true
-    dnf install -y -q /d/'"$base"' >/dev/null 2>&1 || { echo INSTALL-FAILED; exit 1; }
+    retry dnf install -y -q /d/'"$base"' >/dev/null 2>&1 || { echo INSTALL-FAILED; exit 1; }
     su postgres -c "/usr/pgsql-'"$pg"'/bin/initdb -D /var/lib/pgsql/'"$pg"'/data" >/dev/null 2>&1
     echo "shared_preload_libraries = '"'"'axiom'"'"'" >> /var/lib/pgsql/'"$pg"'/data/postgresql.conf
     su postgres -c "/usr/pgsql-'"$pg"'/bin/pg_ctl -D /var/lib/pgsql/'"$pg"'/data -l /tmp/pg.log -w start" >/dev/null \
