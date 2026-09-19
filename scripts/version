@@ -50,7 +50,16 @@ if [[ "${1:-}" == "package" ]]; then
   spelling in dpkg or rpm. Use a single prerelease segment, such as
   ${version%%-*}-rc.1"
   fi
-  printf '%s\n' "${version/-/~}"
+  # Built by concatenation, not `${version/-/~}`. The replacement string in a
+  # substitution undergoes tilde expansion, and bash 5 does it even here: that
+  # form yields 0.1.2~rc.1 on macOS's bash 3.2 and 0.1.2/home/runnerrc.1 on a
+  # GitHub runner, which dpkg then rejects. A tilde inside double quotes in the
+  # middle of a word is never expanded, so this spells the same thing on both.
+  if [[ "$version" == *-* ]]; then
+    printf '%s\n' "${version%%-*}~${version#*-}"
+  else
+    printf '%s\n' "$version"
+  fi
   exit 0
 fi
 
