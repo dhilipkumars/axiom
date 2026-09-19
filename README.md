@@ -19,23 +19,28 @@ Axiom makes Kubernetes resources — built-in kinds and CRDs alike — look like
 tables in Postgres. `SELECT` reads the live cluster. `INSERT`, `UPDATE` and
 `DELETE` are real Kubernetes writes, with optimistic-concurrency conflicts
 surfaced as SQL errors. The Postgres doing the querying can live entirely
-outside the cluster it is querying, and can query several clusters at once.
+outside the cluster it is querying.
 
 ## Why "Axiom"
 
-An axiom is something a system takes as given and reasons from. Kubernetes
-already holds the facts about your infrastructure — what is running, where,
-owned by what, in what state. Axiom stops treating those facts as something you
-fetch and start parsing, and starts treating them as something you **query**:
-a relational surface over the cluster's own truth, in the database you already
-use for everything else.
+Kubernetes is declarative. You do not instruct it to start a container; you
+assert that one should be running, and controllers reconcile reality toward
+that assertion. Its objects are axioms — facts the system takes as given and
+works to make true — and what you read back is eventually consistent,
+converging on what was asserted rather than reflecting it the instant you
+write it.
 
-The name is also a small joke about the two halves. **Ax**iom sits between the
-Kubernetes **API** and Postgres's relational mod**el** — a foreign data wrapper
-is exactly the mechanism Postgres provides for saying "this data lives
-somewhere else, here is how to reason about it as if it did not."
+Postgres is the opposite discipline: ACID, a consistent snapshot per
+transaction, a commit that either happened or did not.
 
-## Things you cannot do with kubectl
+Axiom is the extension that bridges those two consistency models. It brings the
+declarative, eventually-consistent view into a relational one, and is explicit
+about where the seam falls: a `SELECT` reflects cluster state within watch
+latency, and an `INSERT` is an assertion the cluster will reconcile, not a row
+committed with your transaction. SQL over the cluster's own facts, without
+either system pretending to be the other.
+
+## Questions that need a query language
 
 *More, including creating a CloudNativePG cluster from SQL, in
 [Examples](https://dhilipkumars.github.io/axiom/guides/examples/). Which kinds
@@ -137,15 +142,17 @@ Axiom must be loaded through `shared_preload_libraries`; a package cannot do
 that for you. Artifacts are on the
 [releases page](https://github.com/dhilipkumars/axiom/releases).
 
-## What makes it different
+## Design
 
 - **Watch-driven, not polling.** A standing watch keeps a shared-memory cache
   live, so a `SELECT` reflects cluster state within watch latency and costs the
   API server nothing. Tables opt in per kind with `cache_mode 'watch'`.
 - **Postgres can live outside the cluster.** It always dials out, so it never
   needs inbound connectivity, a kubeconfig, or credentials of its own.
-- **Multi-cluster from the start.** One server per cluster, one schema per
-  server, joins across them.
+- **Multi-cluster by design.** One server per cluster, one schema per server,
+  joins across them; the cache has been keyed by cluster since the first
+  release. Isolation between two live clusters is not yet covered by a test —
+  see the [roadmap](ROADMAP.md).
 - **Bounded by RBAC, not by configuration.** The gateway offers exactly the
   kinds its ServiceAccount may list. Discovery finds CRDs with no code change.
 - **Writes are real.** `INSERT`/`UPDATE`/`DELETE` become create/update/delete
