@@ -37,8 +37,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ -n "$TREE" && -n "$PG_MAJOR" && -n "$ARCH" ]] \
-  || { echo "usage: package-native --tree <dir> --pg <major> --arch <amd64|arm64> [--version <v>] [--out <dir>]" >&2; exit 2; }
+  || { echo "usage: package-native --tree <dir> --pg <major> --arch <amd64|arm64>
+                       [--version <v>] [--glibc-floor <x.y>] [--out <dir>]" >&2; exit 2; }
 VERSION="${VERSION:-$("$ROOT/scripts/version")}"
+
+# The packaging spelling of the version -- see `scripts/version package`, which
+# owns the rule and refuses versions it cannot represent faithfully. Asked for
+# rather than derived here, so this and the gate that looks for the filenames
+# it writes cannot disagree about it.
+PKG_VERSION="$("$ROOT/scripts/version" package "$VERSION")"
+[[ "$PKG_VERSION" == "$VERSION" ]] \
+  || echo "    prerelease: packages use ${PKG_VERSION}, artifacts use ${VERSION}"
 
 case "$ARCH" in
   amd64) DEB_ARCH=amd64; RPM_ARCH=x86_64 ;;
@@ -51,9 +60,35 @@ so="$TREE/usr/lib/postgresql/${PG_MAJOR}/lib/axiom.so"
 ext="$TREE/usr/share/postgresql/${PG_MAJOR}/extension"
 [[ -f "$so" ]] || { echo "package-native: no axiom.so under $TREE" >&2; exit 1; }
 [[ -f "$ext/axiom.control" ]] || { echo "package-native: no axiom.control under $TREE" >&2; exit 1; }
-sql="$(compgen -G "$ext/axiom--*.sql" | head -1)" \
-  || { echo "package-native: no axiom--*.sql under $TREE" >&2; exit 1; }
-sql_base="$(basename "$sql")"
+# Exactly one *install* script, naming this version. `cargo pgrx package` adds
+# to its staging directory and never prunes, and target/ is a cache mount that
+# survives a version bump, so a tree built after one still carries the previous
+# releases' install scripts. CI never sees it -- each job starts cold -- and a
+# maintainer building locally always does. Shipping them is wrong rather than
+# untidy: `CREATE EXTENSION axiom VERSION '0.1.0'` would run an old release's
+# SQL against this release's library and succeed.
+#
+# Upgrade scripts are a different thing and are allowed. Postgres names them
+# axiom--<from>--<to>.sql, and they are how `ALTER EXTENSION axiom UPDATE`
+# works; a rule that counted every axiom--*.sql as a duplicate would forbid
+# ever shipping one. Axiom has none today (see the upgrade-path issue), so the
+# expected count is zero, but the check must not be what stops that changing.
+install_sqls=(); upgrade_sqls=()
+for f in "$ext"/axiom--*.sql; do
+  [[ -e "$f" ]] || continue
+  base="${f##*/}"; mid="${base#axiom--}"; mid="${mid%.sql}"
+  if [[ "$mid" == *--* ]]; then upgrade_sqls+=("$f"); else install_sqls+=("$f"); fi
+done
+(( ${#install_sqls[@]} == 1 )) || {
+  echo "package-native: expected exactly one install script, found ${#install_sqls[@]}:" >&2
+  for f in ${install_sqls[@]+"${install_sqls[@]}"}; do echo "  ${f##*/}" >&2; done
+  echo "  a stale build cache carries old versions' scripts; rebuild without it" >&2
+  exit 1
+}
+[[ "${install_sqls[0]##*/}" == "axiom--${VERSION}.sql" ]] \
+  || { echo "package-native: tree holds ${install_sqls[0]##*/}, not axiom--${VERSION}.sql" >&2; exit 1; }
+sql="${install_sqls[0]}"
+sql_base="${sql##*/}"
 
 # The tree must be for the architecture being labelled. A package whose name
 # says arm64 and whose payload is x86-64 is only discovered by whoever it fails
@@ -117,7 +152,7 @@ echo "    glibc floor: ${GLIBC_FLOOR}"
 
 cat > "$DEB_ROOT/DEBIAN/control" <<EOF
 Package: postgresql-${PG_MAJOR}-axiom
-Version: ${VERSION}-1
+Version: ${PKG_VERSION}-1
 Architecture: ${DEB_ARCH}
 Maintainer: Dhilip Kumar S <s.dhilipkumar@gmail.com>
 Section: database
@@ -128,7 +163,7 @@ Description: ${DESC_SHORT}
 $(sed 's/^$/./; s/^/ /' <<<"$DESC_LONG")
 EOF
 
-DEB_NAME="postgresql-${PG_MAJOR}-axiom_${VERSION}-1_${DEB_ARCH}.deb"
+DEB_NAME="postgresql-${PG_MAJOR}-axiom_${PKG_VERSION}-1_${DEB_ARCH}.deb"
 docker run --rm \
   -v "$DEB_ROOT":/pkg:ro -v "$OUT":/out \
   debian:bookworm-slim bash -c "
@@ -161,7 +196,7 @@ install -m644 "$sql" "$RPM_TOP/BUILDROOT/usr/pgsql-${PG_MAJOR}/share/extension/"
 
 cat > "$RPM_TOP/SPECS/axiom.spec" <<EOF
 Name:           axiom_${PG_MAJOR}
-Version:        ${VERSION}
+Version:        ${PKG_VERSION}
 Release:        1%{?dist}
 Summary:        ${DESC_SHORT}
 License:        Apache-2.0
@@ -178,7 +213,7 @@ ${DESC_LONG}
 /usr/pgsql-${PG_MAJOR}/share/extension/axiom.control
 /usr/pgsql-${PG_MAJOR}/share/extension/${sql_base}
 %changelog
-* $(LC_ALL=C date -u '+%a %b %d %Y') Axiom release automation <s.dhilipkumar@gmail.com> - ${VERSION}-1
+* $(LC_ALL=C date -u '+%a %b %d %Y') Axiom release automation <s.dhilipkumar@gmail.com> - ${PKG_VERSION}-1
 - Packaged from the ${VERSION} release artifacts.
 EOF
 

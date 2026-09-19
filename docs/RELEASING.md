@@ -90,6 +90,7 @@ immediately, and are never held back for a cadence.
 ## Cutting one
 
 ```sh
+# extension/Cargo.toml -> X.Y.Z first; everything else derives from it
 make release-check                  # changesets well-formed, version consistent
 make changelog                      # read what the release will say
 make release-notes VERSION=X.Y.Z    # assemble CHANGELOG.md, empty .changes/
@@ -112,8 +113,66 @@ images with no credentials and runs the whole procedure against them, and only
 then the floating tags.
 
 The tag carries a leading `v`; the changelog heading and `make release-notes`
-do not. `scripts/version check vX.Y.Z` enforces that they agree, and the
-release workflow should call it before publishing anything.
+do not. `scripts/version check vX.Y.Z` compares the tag against
+`extension/Cargo.toml` — it does not read `CHANGELOG.md`, so nothing mechanical
+catches a changelog heading that disagrees. The release workflow calls it before
+publishing anything.
+
+## Rehearsing with a release candidate
+
+A prerelease runs the whole publish path and moves nothing. The version tags
+and every release asset are produced exactly as they would be, while `latest`,
+`latest-pgNN` and the gateway's `latest` stay where they are. One job moves all
+three and it declines on `github.event.release.prerelease`, so there is no
+second mechanism to get wrong and no tag that can slip through. That makes an
+rc the only way to find out whether a release *works* without a release
+depending on the answer.
+
+```sh
+# extension/Cargo.toml -> 0.1.2-rc.1, and extension/Cargo.lock with it
+make release-check
+```
+
+Commit that and merge it like any other change **before tagging**. The tag has
+to point at a commit that carries the bump: `scripts/version check` runs in the
+release workflow and compares the tag against `extension/Cargo.toml`, so a tag
+on the unbumped tree fails there rather than here. Then:
+
+```sh
+git tag v0.1.2-rc.1 && git push origin v0.1.2-rc.1
+```
+
+Then publish it from the tag **with "Set as a pre-release" ticked**. Without
+that box the floating tags move and it is not a rehearsal.
+
+**Do not run `make release-notes` for an rc.** The changesets belong to the
+release the rc is rehearsing; consuming them would leave the real release with
+an empty changelog. Paste `make changelog` into the GitHub release body
+instead — it renders the pending entries without consuming them.
+
+Afterwards, cut the real release: set `extension/Cargo.toml` back to the final
+version — `0.1.2`, not `0.1.2-rc.1` — commit that with `Cargo.lock`, and follow
+[Cutting one](#cutting-one). Forgetting the bump is the easy mistake: the
+release workflow runs `scripts/version check` against the tag and fails there,
+after the release is published, rather than here. The rc's tag and release stay
+as a record; nothing needs deleting.
+
+### Prereleases are spelled differently in packages
+
+Semver writes `0.1.2-rc.1`. Neither package manager accepts that: rpm rejects a
+hyphen in `Version` outright, and dpkg would read `rc.1` as the Debian
+revision, so the final `0.1.2-1` would compare as **older** than the rc and apt
+would refuse the upgrade.
+
+`scripts/package-native` translates the hyphen to a tilde for both, which is
+what each of them uses for "precedes the release of the same name":
+
+    0.1.1  <  0.1.2~rc.1  <  0.1.2
+
+So the tarball is `axiom-0.1.2-rc.1-…`, the package is
+`postgresql-17-axiom_0.1.2~rc.1-1_amd64.deb`, and `axiom_version()` reports
+`0.1.2-rc.1`, since that comes from `CARGO_PKG_VERSION`. The two spellings are
+deliberate and the gates assert them separately.
 
 ## Writing the notes
 
