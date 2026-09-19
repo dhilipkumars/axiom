@@ -45,6 +45,8 @@ fail() { printf '\nE2E FAILED: %s\n' "$*" >&2; exit 1; }
 # network-restricted run can still gate the .deb.
 RUN_RPM="${E2E_PACKAGE_RPM:-1}"
 
+RETRY='retry() { n=0; until "$@"; do n=$((n+1)); [ "$n" -ge 3 ] && return 1; sleep $((n*5)); done; }; '
+
 for pg in $MAJORS; do
   # Always repackaged, never reused: a package left in dist/ from before a
   # source edit would make this pass against code that is no longer there, and
@@ -71,7 +73,7 @@ for pg in $MAJORS; do
       cd /tmp && dpkg-deb -x /d/'"$(basename "$deb")"' x
       objdump -p "$(find x -name axiom.so)" \
         | awk "/GLIBC_/ { for (i=1;i<=NF;i++) if (\$i ~ /^GLIBC_/) { sub(/^GLIBC_/,\"\",\$i); print \$i } }" \
-        | sort -uV | tail -1')"
+        | sort -uV | tail -1')" || true
   [[ -n "$declared" ]] || fail "pg${pg}: the .deb declares no libc6 floor at all"
   [[ "$declared" == "$actual" ]] \
     || fail "pg${pg}: .deb declares libc6 >= $declared but the binary needs $actual"
@@ -80,9 +82,9 @@ for pg in $MAJORS; do
   # Install into upstream's image, which is Debian and already has the matching
   # postgresql-N package, so the dependency resolves the way a user's would.
   log "pg${pg}: the .deb installs and the extension runs"
-  out="$(docker run --rm -v "$DIST":/d:ro "postgres:${pg}" bash -c '
+  out="$(docker run --rm -v "$DIST":/d:ro "postgres:${pg}" bash -c "$RETRY"'
     set -e
-    apt-get -qq update >/dev/null 2>&1
+    retry apt-get -qq update >/dev/null 2>&1
     apt-get install -y -qq /d/'"$(basename "$deb")"' >/dev/null 2>&1 || { echo "INSTALL-FAILED"; exit 1; }
     su postgres -c "/usr/lib/postgresql/'"$pg"'/bin/initdb -D /tmp/data" >/dev/null 2>&1
     echo "shared_preload_libraries = '"'"'axiom'"'"'" >> /tmp/data/postgresql.conf
@@ -107,49 +109,54 @@ $out"
 $out"
   echo "    version ${VERSION}, worker running, removed cleanly"
 
-  # The half that actually justifies shipping a package. bullseye is glibc
-  # 2.31, below the floor, so apt must refuse and place nothing.
+  # The half that actually justifies shipping a package: on a glibc below the
+  # floor, apt must refuse and place nothing.
   #
-  # PGDG's bullseye repository is added first, and that is the whole point of
-  # the check rather than a detail. Without it `postgresql-${pg}` does not
-  # exist on bullseye either, apt refuses for two reasons at once, and the
-  # test would pass even if the libc6 constraint were absent -- proving only
-  # that bullseye has no modern Postgres, which is not what is being claimed.
-  # With the server package installable, glibc is the *only* thing left to
-  # refuse, so a pass means the constraint carried the refusal on its own.
+  # Ubuntu 20.04 is glibc 2.31. It is used rather than Debian bullseye because
+  # bullseye is EOL and deb.debian.org now 404s its security pool, so
+  # installing anything there fails for reasons that have nothing to do with
+  # this test.
+  #
+  # Note what this cannot do, and why it does not try. The ideal check makes
+  # postgresql-N installable so glibc is the only possible objection -- which
+  # is what the EL8 check below does. On the apt side that combination no
+  # longer exists: PGDG stopped publishing for focal, and every Debian-family
+  # release it still supports has glibc at or above the floor already. So the
+  # refusal here is necessarily over-determined, and the proof is made
+  # differently: assert that this system genuinely is below the declared floor,
+  # and that apt named libc6 as the reason. Drop the Depends and apt stops
+  # naming libc6; set the floor to something old and the version comparison
+  # stops holding. Both mutations fail, which is what the check is for.
   log "pg${pg}: the .deb refuses on a glibc below its floor"
-  out="$(docker run --rm -v "$DIST":/d:ro debian:bullseye-slim bash -c '
-    set -e
-    apt-get -qq update >/dev/null 2>&1
-    apt-get -qq install -y curl ca-certificates gnupg >/dev/null 2>&1
-    install -d /usr/share/postgresql-common/pgdg
-    curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
-      https://www.postgresql.org/media/keys/ACCC4CF8.asc
-    echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bullseye-pgdg main" \
-      > /etc/apt/sources.list.d/pgdg.list
-    apt-get -qq update >/dev/null 2>&1
-    # If the server package is not actually installable the rest proves
-    # nothing, so say so rather than passing.
-    apt-cache policy postgresql-'"$pg"' | grep -qE "Candidate: [0-9]" && echo SERVER-AVAILABLE
+  # apt writes the dependency back with an architecture qualifier whenever the
+  # package is not the container's native architecture -- "libc6:arm64 (>= 2.34)"
+  # rather than "libc6 (>= 2.34)". A literal match would pass on a runner whose
+  # architecture happens to match the package and fail on a maintainer's
+  # machine, which is the wrong way round for a gate.
+  floor_re="libc6(:[a-z0-9-]+)? \\(>= ${declared//./\\.}\\)"
+  out="$(docker run --rm -v "$DIST":/d:ro ubuntu:20.04 bash -c "$RETRY"'
+    export DEBIAN_FRONTEND=noninteractive
+    retry apt-get -qq update >/dev/null 2>&1
+    # This system must really be below the floor, or the refusal proves
+    # nothing. dpkg does the comparison, so it is apt policy deciding, not a
+    # string match written here.
+    have="$(dpkg-query -W -f="\${Version}" libc6)"
+    dpkg --compare-versions "$have" ge "'"$declared"'" \
+      || echo "BELOW-THE-FLOOR have=$have floor='"$declared"'"
     apt-get install -y /d/'"$(basename "$deb")"' >/tmp/o 2>&1 || true
-    grep -qF "libc6 (>= '"$declared"')" /tmp/o && echo CITED-THE-FLOOR
-    grep -qF "Depends: postgresql-'"$pg"' " /tmp/o && echo ALSO-BLOCKED-BY-SERVER
+    grep -qE "'"$floor_re"'" /tmp/o && echo CITED-THE-FLOOR
     test ! -f /usr/lib/postgresql/'"$pg"'/lib/axiom.so && echo PLACED-NOTHING
-  ' 2>&1)"
-  grep -q SERVER-AVAILABLE <<<"$out" \
-    || fail "pg${pg}: postgresql-${pg} is not installable on bullseye, so this check cannot
-attribute the refusal to glibc. Fix the PGDG setup rather than trusting the result:
-$out"
-  # The container matches "Depends: postgresql-N " with a trailing space, which
-  # this package's own name -- postgresql-N-axiom, on the left of every line in
-  # the same block -- cannot satisfy.
-  grep -q ALSO-BLOCKED-BY-SERVER <<<"$out" \
-    && fail "pg${pg}: apt refused partly because postgresql-${pg} was missing, so the
-glibc constraint was not shown to be what refused:
+    # Carried out so a failure shows what apt actually said rather than only
+    # which marker was missing.
+    sed -n "/unmet dependencies/,/^E:/p" /tmp/o | sed "s/^/apt| /"
+  ' 2>&1)" || true
+  grep -q BELOW-THE-FLOOR <<<"$out" \
+    || fail "pg${pg}: the test system is not below the declared floor of ${declared},
+so its refusal would not show the constraint works:
 $out"
   grep -q CITED-THE-FLOOR <<<"$out" \
-    || fail "pg${pg}: apt did not refuse citing 'libc6 (>= ${declared})' -- with the server
-package available, that means the floor is not load-bearing:
+    || fail "pg${pg}: apt did not name 'libc6 (>= ${declared})' as unmet -- on a system
+that is demonstrably below that floor, the dependency is not load-bearing:
 $out"
   grep -q PLACED-NOTHING <<<"$out" || fail "pg${pg}: a refused install still placed axiom.so"
   echo "    refused, citing libc6, and placed nothing"
@@ -167,7 +174,7 @@ if [[ "$RUN_RPM" == "1" ]]; then
   # start, so assert the requirement is present rather than assuming rpmbuild
   # did its job.
   log "pg${pg}: the .rpm declares a generated glibc requirement"
-  reqs="$(docker run --rm -v "$DIST":/d:ro rockylinux:9 rpm -qp --requires "/d/$base" 2>/dev/null)"
+  reqs="$(docker run --rm -v "$DIST":/d:ro rockylinux:9 rpm -qp --requires "/d/$base" 2>/dev/null)" || true
   grep -q 'libc\.so\.6(GLIBC_' <<<"$reqs" \
     || fail "pg${pg}: the .rpm declares no glibc symbol requirement:
 $reqs"
@@ -177,9 +184,9 @@ $reqs"
   echo "    $(grep -c 'libc\.so\.6(GLIBC_' <<<"$reqs") glibc symbol requirements, requires postgresql${pg}-server"
 
   log "pg${pg}: the .rpm installs on EL9 and the extension runs"
-  out="$(docker run --rm -v "$DIST":/d:ro rockylinux:9 bash -c '
+  out="$(docker run --rm -v "$DIST":/d:ro rockylinux:9 bash -c "$RETRY"'
     set -e
-    dnf install -y -q https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-'"$RPM_ARCH"'/pgdg-redhat-repo-latest.noarch.rpm >/dev/null 2>&1
+    retry dnf install -y -q https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-'"$RPM_ARCH"'/pgdg-redhat-repo-latest.noarch.rpm >/dev/null 2>&1
     dnf -qy module disable postgresql >/dev/null 2>&1 || true
     dnf install -y -q /d/'"$base"' >/dev/null 2>&1 || { echo INSTALL-FAILED; exit 1; }
     su postgres -c "/usr/pgsql-'"$pg"'/bin/initdb -D /var/lib/pgsql/'"$pg"'/data" >/dev/null 2>&1
@@ -200,15 +207,15 @@ $out"
   # above: without it postgresql${pg}-server is missing too, dnf refuses for
   # two reasons, and the check would pass with no glibc requirement at all.
   log "pg${pg}: the .rpm refuses on EL8"
-  out="$(docker run --rm -v "$DIST":/d:ro rockylinux:8 bash -c '
-    dnf install -y -q https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-'"$RPM_ARCH"'/pgdg-redhat-repo-latest.noarch.rpm >/dev/null 2>&1
+  out="$(docker run --rm -v "$DIST":/d:ro rockylinux:8 bash -c "$RETRY"'
+    retry dnf install -y -q https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-'"$RPM_ARCH"'/pgdg-redhat-repo-latest.noarch.rpm >/dev/null 2>&1
     dnf -qy module disable postgresql >/dev/null 2>&1 || true
-    dnf list --available postgresql'"$pg"'-server >/dev/null 2>&1 && echo SERVER-AVAILABLE
+    retry dnf list --available postgresql'"$pg"'-server >/dev/null 2>&1 && echo SERVER-AVAILABLE
     dnf install -y /d/'"$base"' >/tmp/o 2>&1 || true
     grep -qi "nothing provides libc.so.6(GLIBC" /tmp/o && echo CITED-GLIBC
     grep -qi "nothing provides postgresql'"$pg"'-server" /tmp/o && echo ALSO-BLOCKED-BY-SERVER
     rpm -q axiom_'"$pg"' >/dev/null 2>&1 || echo NOT-INSTALLED
-  ' 2>&1)"
+  ' 2>&1)" || true
   grep -q SERVER-AVAILABLE <<<"$out" \
     || fail "pg${pg}: postgresql${pg}-server is not available on EL8, so this check cannot
 attribute the refusal to glibc. Fix the PGDG setup rather than trusting the result:
