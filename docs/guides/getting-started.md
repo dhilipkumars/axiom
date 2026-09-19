@@ -7,6 +7,22 @@ from a URL. You need Docker, `kubectl` and `kind`.
 Every command has been run end to end, in this order. If one does not work,
 that is a bug worth reporting.
 
+## Two routes, and what they share
+
+**Steps 1 to 3 are the same either way.** Axiom reads Kubernetes through a
+gateway running in the cluster, so you need a cluster, a TLS keypair and the
+gateway regardless of how Postgres gets the extension. Only then do the routes
+diverge:
+
+| | For | Start at |
+|---|---|---|
+| **Container** | trying Axiom without touching an existing database | [4. Postgres, with Axiom already in it](#4-postgres-with-axiom-already-in-it) |
+| **Package** | a Postgres you already run, on Debian/Ubuntu or RHEL 9 | [Installing into a Postgres you already run](#installing-into-a-postgres-you-already-run) |
+
+The container route is the whole walkthrough end to end and is the faster way
+to see it work. The package route joins the same path at
+[Preload, then connect](#preload-then-connect).
+
 ## 1. A cluster
 
 **This walkthrough is written for [kind](https://kind.sigs.k8s.io).** Not
@@ -253,8 +269,19 @@ explains the rules.
 ## Installing into a Postgres you already run
 
 The guide above runs Postgres in a container. If you already have one, install
-the extension into it instead — no toolchain, no rebuild. Three routes, best
-first.
+the extension into it instead — no toolchain, no rebuild.
+
+!!! warning "Steps 1 to 3 still apply"
+
+    This section replaces **step 4 only**. Axiom reads Kubernetes through a
+    gateway, so you still need [a cluster](#1-a-cluster), [a TLS
+    keypair](#2-a-tls-keypair) and [the gateway](#3-the-gateway-in-the-cluster)
+    before any of this is useful. What changes is where the extension comes
+    from, and that your Postgres is somewhere the gateway must be reachable
+    *from* — see the caveats under [Preload, then
+    connect](#preload-then-connect).
+
+Three routes, best first.
 
 ### A package, if this machine uses apt or dnf
 

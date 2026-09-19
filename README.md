@@ -37,6 +37,9 @@ somewhere else, here is how to reason about it as if it did not."
 
 ## Things you cannot do with kubectl
 
+*More, including creating a CloudNativePG cluster from SQL, in
+[Examples](https://dhilipkumars.github.io/axiom/guides/examples/).*
+
 **Join across kinds.** Which pods are running on nodes under memory pressure?
 
 ```sql

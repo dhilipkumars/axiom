@@ -61,6 +61,7 @@ nav:
       - Setting up (for coding agents): guides/for-agents.md
       - Deploying the gateway: guides/deploying.md
       - Querying: guides/querying.md
+      - Examples: guides/examples.md
   - Reference:
       - gRPC API: generated/api.md
       - Gateway flags: generated/gateway-flags.md
