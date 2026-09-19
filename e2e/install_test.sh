@@ -81,7 +81,7 @@ trap cleanup EXIT
 # other than "not found" fails immediately: a private package or a missing
 # architecture will not fix itself by waiting.
 wait_for_image() {
-  local ref="$1" waited=0 out
+  local ref="$1" waited=0 out wf
   while :; do
     out="$(docker pull "$ref" 2>&1)" && return 0
     case "$out" in
@@ -108,10 +108,10 @@ wait_for_image() {
       # the reference because this runs for the gateway image too, which
       # gateway-image.yml builds rather than postgres-image.yml.
       *"no matching manifest"*)
-        case "$ref" in
-          *axiom-gateway*) wf=gateway-image.yml ;;
-          *)               wf=postgres-image.yml ;;
-        esac
+        # Compared against the variable rather than matched on the name:
+        # E2E_INSTALL_GATEWAY can point this at any reference, and a custom one
+        # would not contain "axiom-gateway" to match on.
+        if [[ "$ref" == "$GW_IMAGE" ]]; then wf=gateway-image.yml; else wf=postgres-image.yml; fi
         fail "$ref has no image for $(uname -m); every tag should be multi-architecture. Check the merge job in $wf: $out" ;;
       *) fail "could not pull $ref: $out" ;;
     esac

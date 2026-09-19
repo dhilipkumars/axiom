@@ -274,7 +274,7 @@ point of the project.
 
 | Symptom | Cause | Action |
 | --- | --- | --- |
-| `no matching manifest for linux/arm64/v8` | the tag has no slice for this machine. Following this guide, that means the publish is broken, not that you did something wrong — it pins `latest-pg17`, which should be multi-architecture | `docker manifest inspect <tag>` to see which architectures exist, and report it. Retrying will not help: a manifest list is tagged atomically. Pinning a version before `0.1.1` produces the same error legitimately, since those are amd64-only |
+| `no matching manifest for linux/arm64/v8` | the tag has no slice for this machine. Versions before `0.1.1` are amd64-only and give this legitimately; every tag from `0.1.1` on, including the `latest-pgNN` this guide uses, should be multi-architecture | if you pinned an older version, use `latest-pgNN` or `0.1.1`+. Otherwise the publish is broken — confirm with `docker manifest inspect ghcr.io/dhilipkumars/axiom-postgres:latest-pg17` and report it. Retrying will not help: a manifest list is tagged atomically |
 | `denied` on `docker pull` | image is private or the tag does not exist | check the tag; do not retry with credentials |
 | `FATAL: cannot create PGC_POSTMASTER variables after startup` | Axiom loaded without `shared_preload_libraries` | use the published image, or preload it |
 | `CREATE EXTENSION` closes the connection | same as above | as above |
