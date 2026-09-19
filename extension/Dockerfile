@@ -21,9 +21,21 @@ WORKDIR /src
 COPY proto/ proto/
 COPY extension/ extension/
 WORKDIR /src/extension
+# The staging directory is removed first, not just written over. `cargo pgrx
+# package` adds files to it and never prunes, and target/ is a cache mount that
+# survives a version bump -- so after one, the tree still holds the previous
+# releases' axiom--<version>.sql alongside the new one. CI never sees this
+# because each job starts with a cold cache; a maintainer building locally
+# always does.
+#
+# Shipping those is wrong rather than untidy: `CREATE EXTENSION axiom VERSION
+# '0.1.0'` would run an old release's SQL against this release's library and
+# succeed. Only the staging directory is deleted, so nothing is recompiled --
+# the object files live elsewhere under target/.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/extension/target \
-    cargo pgrx package --pg-config /usr/lib/postgresql/${PG_MAJOR}/bin/pg_config \
+    rm -rf target/release/axiom-pg${PG_MAJOR} \
+    && cargo pgrx package --pg-config /usr/lib/postgresql/${PG_MAJOR}/bin/pg_config \
         --no-default-features --features pg${PG_MAJOR} \
     && mkdir -p /out \
     && cp -r target/release/axiom-pg${PG_MAJOR}/usr /out/

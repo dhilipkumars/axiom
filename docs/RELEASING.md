@@ -115,6 +115,48 @@ The tag carries a leading `v`; the changelog heading and `make release-notes`
 do not. `scripts/version check vX.Y.Z` enforces that they agree, and the
 release workflow should call it before publishing anything.
 
+## Rehearsing with a release candidate
+
+A prerelease runs the whole publish path and moves nothing. `promote` declines
+on `github.event.release.prerelease`, so the version tags and the release
+assets are produced exactly as they would be, while `latest`, `latest-pgNN` and
+the gateway's `latest` stay where they are. That makes an rc the only way to
+find out whether a release *works* without a release depending on the answer.
+
+```sh
+# extension/Cargo.toml -> 0.1.2-rc.1
+make release-check
+git tag v0.1.2-rc.1 && git push origin v0.1.2-rc.1
+```
+
+Then publish it from the tag **with "Set as a pre-release" ticked**. Without
+that box the floating tags move and it is not a rehearsal.
+
+**Do not run `make release-notes` for an rc.** The changesets belong to the
+release the rc is rehearsing; consuming them would leave the real release with
+an empty changelog. Paste `make changelog` into the GitHub release body
+instead — it renders the pending entries without consuming them.
+
+Afterwards, set the version to the final one and cut it normally. The rc's tag
+and release stay as a record; nothing needs deleting.
+
+### Prereleases are spelled differently in packages
+
+Semver writes `0.1.2-rc.1`. Neither package manager accepts that: rpm rejects a
+hyphen in `Version` outright, and dpkg would read `rc.1` as the Debian
+revision, so the final `0.1.2-1` would compare as **older** than the rc and apt
+would refuse the upgrade.
+
+`scripts/package-native` translates the hyphen to a tilde for both, which is
+what each of them uses for "precedes the release of the same name":
+
+    0.1.1  <  0.1.2~rc.1  <  0.1.2
+
+So the tarball is `axiom-0.1.2-rc.1-…`, the package is
+`postgresql-17-axiom_0.1.2~rc.1-1_amd64.deb`, and `axiom_version()` reports
+`0.1.2-rc.1`, since that comes from `CARGO_PKG_VERSION`. The two spellings are
+deliberate and the gates assert them separately.
+
 ## Writing the notes
 
 Do not write them at release time. They are the `.changes/` files, written by

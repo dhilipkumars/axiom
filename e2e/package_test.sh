@@ -30,6 +30,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MAJORS="${E2E_PACKAGE_MAJORS:-16 17 18}"
 RPM_MAJOR="${E2E_PACKAGE_RPM_MAJOR:-17}"
 VERSION="$("$ROOT/scripts/version")"
+# Package filenames spell a prerelease with a tilde, because rpm rejects a
+# hyphen in a version and dpkg would misread one as the Debian revision -- see
+# scripts/package-native. `axiom_version()` still reports the semver spelling,
+# since that comes from CARGO_PKG_VERSION, so the two are asserted separately
+# and must not be conflated.
+PKG_VERSION="${VERSION//-/~}"
 DIST="$ROOT/dist"
 case "$(uname -m)" in
   x86_64) ARCH=amd64; RPM_ARCH=x86_64 ;;
@@ -55,7 +61,7 @@ for pg in $MAJORS; do
   "$ROOT/scripts/package-extension" "$pg" "$ARCH" >/dev/null \
     || fail "pg${pg}: could not build the packages"
 
-  deb="$DIST/postgresql-${pg}-axiom_${VERSION}-1_${ARCH}.deb"
+  deb="$DIST/postgresql-${pg}-axiom_${PKG_VERSION}-1_${ARCH}.deb"
   [[ -f "$deb" ]] || fail "pg${pg}: no .deb at $deb"
 
   # The declared floor must be the floor the binary actually has. These are
@@ -193,7 +199,7 @@ done
 
 if [[ "$RUN_RPM" == "1" ]]; then
   pg="$RPM_MAJOR"
-  rpm_file="$(ls -1 "$DIST"/axiom_${pg}-${VERSION}-1*.${RPM_ARCH}.rpm 2>/dev/null | tail -1)" \
+  rpm_file="$(ls -1 "$DIST"/axiom_${pg}-${PKG_VERSION}-1*.${RPM_ARCH}.rpm 2>/dev/null | tail -1)" \
     || fail "no .rpm for pg${pg} ${RPM_ARCH} in dist/"
   [[ -n "$rpm_file" ]] || fail "no .rpm for pg${pg} ${RPM_ARCH} in dist/"
   base="$(basename "$rpm_file")"
