@@ -87,6 +87,9 @@ esac
 # both of which run Axiom. Templated into INSTALL.md and handed to the
 # packagers so all three state one measured fact.
 GLIBC_FLOOR="$("$ROOT/scripts/glibc-floor" "$so")"
+# Packages spell a prerelease differently from the tarball, so INSTALL.md has
+# to name the files that will exist rather than the version it was built from.
+PKG_VERSION="$("$ROOT/scripts/version" package)"
 echo "==> glibc floor: ${GLIBC_FLOOR}"
 
 cp "$ROOT/LICENSE" "${STAGE}/${NAME}/LICENSE" 2>/dev/null || true
@@ -152,8 +155,8 @@ If this machine uses apt or dnf, the release also publishes a \`.deb\` and an
 refuse to install on a system too old to run them rather than letting you find
 out when Postgres will not restart:
 
-    sudo apt install ./postgresql-${PG_MAJOR}-axiom_${VERSION}-1_${ARCH}.deb
-    sudo dnf install ./axiom_${PG_MAJOR}-${VERSION}-1.el9.${RPM_ARCH}.rpm
+    sudo apt install ./postgresql-${PG_MAJOR}-axiom_${PKG_VERSION}-1_${ARCH}.deb
+    sudo dnf install ./axiom_${PG_MAJOR}-${PKG_VERSION}-1.el9.${RPM_ARCH}.rpm
 
 ## Limits
 

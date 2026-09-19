@@ -30,12 +30,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MAJORS="${E2E_PACKAGE_MAJORS:-16 17 18}"
 RPM_MAJOR="${E2E_PACKAGE_RPM_MAJOR:-17}"
 VERSION="$("$ROOT/scripts/version")"
-# Package filenames spell a prerelease with a tilde, because rpm rejects a
-# hyphen in a version and dpkg would misread one as the Debian revision -- see
-# scripts/package-native. `axiom_version()` still reports the semver spelling,
-# since that comes from CARGO_PKG_VERSION, so the two are asserted separately
-# and must not be conflated.
-PKG_VERSION="${VERSION//-/~}"
+# Package filenames use the packaging spelling of the version, which differs
+# from semver for a prerelease. `axiom_version()` still reports the semver one,
+# since it comes from CARGO_PKG_VERSION, so the two are asserted separately.
+PKG_VERSION="$("$ROOT/scripts/version" package)"
 DIST="$ROOT/dist"
 case "$(uname -m)" in
   x86_64) ARCH=amd64; RPM_ARCH=x86_64 ;;

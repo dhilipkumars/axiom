@@ -112,20 +112,31 @@ images with no credentials and runs the whole procedure against them, and only
 then the floating tags.
 
 The tag carries a leading `v`; the changelog heading and `make release-notes`
-do not. `scripts/version check vX.Y.Z` enforces that they agree, and the
-release workflow should call it before publishing anything.
+do not. `scripts/version check vX.Y.Z` compares the tag against
+`extension/Cargo.toml` — it does not read `CHANGELOG.md`, so nothing mechanical
+catches a changelog heading that disagrees. The release workflow calls it before
+publishing anything.
 
 ## Rehearsing with a release candidate
 
-A prerelease runs the whole publish path and moves nothing. `promote` declines
-on `github.event.release.prerelease`, so the version tags and the release
-assets are produced exactly as they would be, while `latest`, `latest-pgNN` and
-the gateway's `latest` stay where they are. That makes an rc the only way to
+A prerelease runs the whole publish path and moves nothing. The version tags
+and every release asset are produced exactly as they would be, while `latest`,
+`latest-pgNN` and the gateway's `latest` stay where they are — `promote`
+declines on `github.event.release.prerelease`, and the gateway's tag is
+suppressed on the same condition. That makes an rc the only way to
 find out whether a release *works* without a release depending on the answer.
 
 ```sh
-# extension/Cargo.toml -> 0.1.2-rc.1
+# extension/Cargo.toml -> 0.1.2-rc.1, and extension/Cargo.lock with it
 make release-check
+```
+
+Commit that and merge it like any other change **before tagging**. The tag has
+to point at a commit that carries the bump: `scripts/version check` runs in the
+release workflow and compares the tag against `extension/Cargo.toml`, so a tag
+on the unbumped tree fails there rather than here. Then:
+
+```sh
 git tag v0.1.2-rc.1 && git push origin v0.1.2-rc.1
 ```
 

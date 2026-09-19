@@ -40,19 +40,11 @@ done
   || { echo "usage: package-native --tree <dir> --pg <major> --arch <amd64|arm64> [--version <v>] [--out <dir>]" >&2; exit 2; }
 VERSION="${VERSION:-$("$ROOT/scripts/version")}"
 
-# Package managers do not speak semver's prerelease syntax. rpm rejects a
-# hyphen in Version outright -- "Illegal char '-'" -- because it separates
-# version from release, and dpkg would accept 0.1.2-rc.1 but read "rc.1" as the
-# Debian revision, so a later 0.1.2-1 would compare as *older*.
-#
-# Both spell a prerelease with a tilde, which sorts before the release it
-# precedes. Checked rather than assumed, in dpkg and rpm:
-#
-#   0.1.1 < 0.1.2~rc.1 < 0.1.2
-#
-# so an rc upgrades cleanly from the previous release and is superseded by the
-# final one. The tarball keeps the semver spelling; only the packages differ.
-PKG_VERSION="${VERSION//-/~}"
+# The packaging spelling of the version -- see `scripts/version package`, which
+# owns the rule and refuses versions it cannot represent faithfully. Asked for
+# rather than derived here, so this and the gate that looks for the filenames
+# it writes cannot disagree about it.
+PKG_VERSION="$("$ROOT/scripts/version" package)"
 [[ "$PKG_VERSION" == "$VERSION" ]] \
   || echo "    prerelease: packages use ${PKG_VERSION}, artifacts use ${VERSION}"
 
@@ -67,9 +59,21 @@ so="$TREE/usr/lib/postgresql/${PG_MAJOR}/lib/axiom.so"
 ext="$TREE/usr/share/postgresql/${PG_MAJOR}/extension"
 [[ -f "$so" ]] || { echo "package-native: no axiom.so under $TREE" >&2; exit 1; }
 [[ -f "$ext/axiom.control" ]] || { echo "package-native: no axiom.control under $TREE" >&2; exit 1; }
-sql="$(compgen -G "$ext/axiom--*.sql" | head -1)" \
-  || { echo "package-native: no axiom--*.sql under $TREE" >&2; exit 1; }
-sql_base="$(basename "$sql")"
+# Exactly one, as in scripts/package-extension, and for the same reason: a tree
+# built on a warm cache carries previous releases' install scripts, and
+# `head -1` would quietly package the oldest of them. This script is also
+# invoked directly against an unpacked tarball, where nothing else checks.
+sqls=()
+for f in "$ext"/axiom--*.sql; do [[ -e "$f" ]] && sqls+=("$f"); done
+(( ${#sqls[@]} == 1 )) || {
+  echo "package-native: expected exactly one axiom--*.sql under $TREE, found ${#sqls[@]}:" >&2
+  for f in ${sqls[@]+"${sqls[@]}"}; do echo "  ${f##*/}" >&2; done
+  exit 1
+}
+sql="${sqls[0]}"
+sql_base="${sql##*/}"
+[[ "$sql_base" == "axiom--${VERSION}.sql" ]] \
+  || { echo "package-native: tree holds $sql_base, not axiom--${VERSION}.sql" >&2; exit 1; }
 
 # The tree must be for the architecture being labelled. A package whose name
 # says arm64 and whose payload is x86-64 is only discovered by whoever it fails
