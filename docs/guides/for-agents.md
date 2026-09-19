@@ -31,13 +31,11 @@ kind version
 uname -m
 ```
 
-All three must be installed.
-
-`uname -m` is worth recording for a bug report, but it does not change any
-command here: `arm64`/`aarch64` and `x86_64` are both supported natively.
-Every image this guide uses is published for both, so no `--platform` flag
-appears anywhere below, and adding one would pin you to a slice your machine
-then has to emulate.
+All four must succeed. The first three are required tools; `uname -m` is
+recorded only so a bug report can name the machine — **it changes nothing
+below**. `arm64`/`aarch64` and `x86_64` are both supported natively, every
+image this guide uses is published for both, and adding a `--platform` flag
+would pin you to a slice your machine then has to emulate.
 
 ## Step 0 — somewhere to work
 
@@ -276,7 +274,7 @@ point of the project.
 
 | Symptom | Cause | Action |
 | --- | --- | --- |
-| `no matching manifest for linux/arm64/v8` | you pinned a version older than `0.1.1`, which was amd64-only | use `latest-pgNN` or a version from `0.1.1` on |
+| `no matching manifest for linux/arm64/v8` | the tag has no slice for this machine. Following this guide, that means the publish is broken, not that you did something wrong — it pins `latest-pg17`, which should be multi-architecture | `docker manifest inspect <tag>` to see which architectures exist, and report it. Retrying will not help: a manifest list is tagged atomically. Pinning a version before `0.1.1` produces the same error legitimately, since those are amd64-only |
 | `denied` on `docker pull` | image is private or the tag does not exist | check the tag; do not retry with credentials |
 | `FATAL: cannot create PGC_POSTMASTER variables after startup` | Axiom loaded without `shared_preload_libraries` | use the published image, or preload it |
 | `CREATE EXTENSION` closes the connection | same as above | as above |

@@ -82,10 +82,8 @@ trap cleanup EXIT
 # architecture will not fix itself by waiting.
 wait_for_image() {
   local ref="$1" waited=0 out
-  shift
-  local -a plat=("$@")
   while :; do
-    out="$(docker pull ${plat[@]+"${plat[@]}"} "$ref" 2>&1)" && return 0
+    out="$(docker pull "$ref" 2>&1)" && return 0
     case "$out" in
       *"not found"*|*"manifest unknown"*)
         (( waited >= 600 )) && fail "$ref never appeared after ${waited}s: $out"
@@ -103,12 +101,18 @@ wait_for_image() {
       *denied*|*unauthorized*)
         fail "$ref is not publicly pullable. A new GHCR package is private until someone changes it: $out" ;;
       # Before v0.1.1 this meant "you are on arm64, pass --platform". Now it
-      # means the multi-architecture publish is broken -- `merge` in
-      # postgres-image.yml did not assemble a manifest list, or assembled one
-      # missing this architecture. Not retried: it will not fix itself.
+      # means the multi-architecture publish is broken: the merge step did not
+      # assemble a manifest list, or assembled one missing an architecture.
+      # Not retried -- a manifest list is tagged atomically, so unlike an
+      # unbuilt tag it will not appear by waiting. The workflow is named from
+      # the reference because this runs for the gateway image too, which
+      # gateway-image.yml builds rather than postgres-image.yml.
       *"no matching manifest"*)
-        fail "$ref has no image for $(uname -m). Every tag is supposed to be
-multi-architecture; check the merge job in postgres-image.yml: $out" ;;
+        case "$ref" in
+          *axiom-gateway*) wf=gateway-image.yml ;;
+          *)               wf=postgres-image.yml ;;
+        esac
+        fail "$ref has no image for $(uname -m); every tag should be multi-architecture. Check the merge job in $wf: $out" ;;
       *) fail "could not pull $ref: $out" ;;
     esac
   done
