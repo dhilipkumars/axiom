@@ -86,8 +86,7 @@ cluster, starts Postgres with the extension, imports the schema, and prints the
 | | |
 |---|---|
 | **kind** | yes — macOS and Linux |
-| **docker-desktop** | yes |
-| k3d, minikube | refused with a message; tracked in [#68](https://github.com/dhilipkumars/axiom/issues/68) |
+| docker-desktop, k3d, minikube | refused with a message; tracked in [#68](https://github.com/dhilipkumars/axiom/issues/68) |
 | EKS, GKE, AKS | refused — see below |
 
 **Why kind works the same on both platforms.** A kind kubeconfig names the API
@@ -112,8 +111,9 @@ kubectl --context=<ctx> -n axiom-system create token axiom-gateway --duration=8h
 
 **Re-running is how you pick up a newly granted kind.** The gateway reads its
 kubeconfig once and caches authorization decisions for its lifetime, so
-`local-dev-up` recreates it rather than leaving it running. It also drops and
-rebuilds the `k8s` schema — keep anything of your own in another one.
+`local-dev-up` recreates it rather than leaving it running. It also replaces the
+imported foreign tables — only those, and without `CASCADE`, so if a view of
+yours depends on one it stops and tells you rather than dropping your work.
 
 ## 2. Get the code
 

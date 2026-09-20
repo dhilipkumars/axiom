@@ -100,18 +100,15 @@ $(kubectl config get-contexts -o name | sed 's/^/    /')"
       say "kind cluster '$cluster'; gateway will join the kind network"
       say "api server: $(kubectl --kubeconfig="$kubeconfig" config view -o jsonpath='{.clusters[0].cluster.server}')"
       ;;
-    docker-desktop)
-      kubectl config view --minify --flatten --context="$ctx" > "$kubeconfig"
-      local port; port="${server##*:}"
-      kubectl --kubeconfig="$kubeconfig" config set-cluster \
-        "$(kubectl --kubeconfig="$kubeconfig" config view -o jsonpath='{.clusters[0].name}')" \
-        --server="https://host.docker.internal:${port}" --tls-server-name=127.0.0.1 >/dev/null
-      say "docker-desktop; api server via host.docker.internal:${port}"
-      ;;
-    k3d-*|minikube|rancher-desktop|colima)
+    docker-desktop|k3d-*|minikube|rancher-desktop|colima)
       die "'$ctx' is a local cluster local-dev does not handle yet.
-  Only kind and docker-desktop are wired up; each needs its own Docker network
-  and node address. Tracked in #68 -- kind is the one CI exercises."
+
+  Only kind is wired up, because it is the one CI exercises and the one this
+  was verified against. Each of the others needs its own Docker network and
+  node address, and shipping a path nobody has run produces a confusing TLS or
+  routing error rather than this message. Tracked in #68.
+
+    kind create cluster --name dev && make local-dev-up CONTEXT=kind-dev"
       ;;
     *)
       case "$server" in
@@ -140,11 +137,30 @@ $(kubectl config get-contexts -o name | sed 's/^/    /')"
 CREATE SERVER IF NOT EXISTS k8s FOREIGN DATA WRAPPER axiom_fdw
   OPTIONS (endpoint 'https://gateway:8443', ca_cert '/certs/ca.crt');
 CREATE USER MAPPING IF NOT EXISTS FOR CURRENT_USER SERVER k8s;
-DROP SCHEMA IF EXISTS k8s CASCADE;
-CREATE SCHEMA k8s;
+CREATE SCHEMA IF NOT EXISTS k8s;
+DO \$\$
+DECLARE t text;
+BEGIN
+  FOR t IN
+    SELECT c.relname FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_foreign_table f ON f.ftrelid = c.oid
+     WHERE n.nspname = 'k8s'
+  LOOP
+    EXECUTE format('DROP FOREIGN TABLE k8s.%I', t);
+  END LOOP;
+END \$\$;
 IMPORT FOREIGN SCHEMA k8s FROM SERVER k8s INTO k8s;"
   if ! out="$(AXIOM_KUBECONFIG="$kubeconfig" compose exec -T postgres \
               psql -U axiom -d axiom -v ON_ERROR_STOP=1 -q -c "$sql" 2>&1)"; then
+    case "$out" in
+      *"depends on"*|*"cannot drop"*)
+        die "a view or another object depends on the imported tables, so they cannot be
+  replaced. Nothing was dropped. Drop the dependent object, or keep your own
+  objects in a different schema:
+
+$out" ;;
+    esac
     die "the stack started but Postgres could not be wired to the gateway:
 
 $out
