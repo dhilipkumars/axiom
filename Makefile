@@ -128,9 +128,7 @@ local-dev-down:
 
 # psql into the stack this brought up.
 local-dev-psql:
-	@docker compose -f deploy/compose/docker-compose.yml \
-	                -f deploy/compose/docker-compose.local-dev.yml \
-	                exec postgres psql -U axiom -d axiom
+	@psql "postgresql://axiom:axiom-dev@127.0.0.1:$(or $(AXIOM_PG_PORT),55432)/axiom" 
 
 down:
 	$(COMPOSE) down -v --remove-orphans

@@ -68,35 +68,52 @@ in beta and is not built here yet.
 
 ## Against a cluster you already have
 
-The quickest way to a Postgres that answers questions about a real cluster:
+One command from a kind cluster to a Postgres that answers questions about it:
 
 ```sh
-make local-dev-up CONTEXT=kind-mycluster   # or CONTEXT=... as an environment
+make local-dev-up CONTEXT=kind-mycluster   # or as an environment variable
 make local-dev-up                          # or just: current-context
 make local-dev-psql
 make local-dev-down
 ```
 
-That mints a throwaway CA and server certificate, starts the gateway against
-that context, starts Postgres with the extension, creates the server and
-imports the schema — then tells you how many pods it can see, which is the only
-honest proof the gateway reached the API server. `kubectl` is untouched.
+It mints a throwaway CA and certificate, starts the gateway against that
+cluster, starts Postgres with the extension, imports the schema, and prints the
+`psql` command to connect. `kubectl` is untouched.
 
-**A host kubeconfig usually does not work inside a container.** kind, k3d,
-minikube and Docker Desktop all name the API server as `127.0.0.1:<port>`, and
-inside a container that is the container. `scripts/local-dev` rewrites the
-address to `host.docker.internal` and pins `tls-server-name` to the original
-host, so the certificate still has to match — the dev stack speaks the same TLS
-the deployed one does, and there is no plaintext path to drift out of test.
+**What is supported**
 
-**A context that does not look local needs `CONFIRM=1`.** The gateway runs with
-*your* credentials, which on a laptop are often cluster-admin, and Axiom's
-writes are real API calls — an `UPDATE` against a "local dev" stack pointed at
-production is a production write. `kind-*`, `k3d-*`, `minikube`,
-`docker-desktop`, `rancher-desktop` and `colima` proceed without it.
+| | |
+|---|---|
+| **kind** | yes — macOS and Linux |
+| **docker-desktop** | yes |
+| k3d, minikube | refused with a message; tracked in [#68](https://github.com/dhilipkumars/axiom/issues/68) |
+| EKS, GKE, AKS | refused — see below |
 
-Re-running `local-dev-up` is how you pick up a kind newly granted in RBAC: it
-drops and rebuilds the `k8s` schema, so keep anything of your own elsewhere.
+**Why kind works the same on both platforms.** A kind kubeconfig names the API
+server as `127.0.0.1:<port>`, which inside a container is the container. Rather
+than rewrite that address, the gateway joins kind's own Docker network and uses
+`kind get kubeconfig --internal`, which addresses the node container directly.
+That is the route `e2e/lib/kind.sh` takes and CI exercises on every PR. Postgres
+stays on the compose network, so nothing binds a host port your own Postgres
+might hold.
+
+**Why a cloud kubeconfig is refused.** EKS, GKE and AKS kubeconfigs carry an
+`exec:` block rather than a credential — *"run this program to get a token"*.
+**client-go** runs it, not `kubectl`, so the requirement travels with the file
+into the gateway's distroless image, which has no shell and no cloud CLI. This
+is not platform-specific. For a remote cluster, give the gateway a
+ServiceAccount token instead:
+
+```sh
+kubectl --context=<ctx> apply -f ../deploy/k8s/gateway-rbac.yaml
+kubectl --context=<ctx> -n axiom-system create token axiom-gateway --duration=8h
+```
+
+**Re-running is how you pick up a newly granted kind.** The gateway reads its
+kubeconfig once and caches authorization decisions for its lifetime, so
+`local-dev-up` recreates it rather than leaving it running. It also drops and
+rebuilds the `k8s` schema — keep anything of your own in another one.
 
 ## 2. Get the code
 

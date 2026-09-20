@@ -1,13 +1,28 @@
-# Overlay for `make local-dev-up`: the base stack, pointed at a real cluster
-# through a kubeconfig that scripts/local-dev prepared.
-#
-#   scripts/local-dev up [context]
+# Overlay for `make local-dev-up`. Driven by scripts/local-dev, which decides
+# how this cluster should be reached and prepares the kubeconfig.
 #
 # The base stack already mints a throwaway CA and server certificate in its
-# `certs` init service, and both services wait for it, so there is no openssl
-# ceremony here and no plaintext path -- the dev stack speaks the same TLS the
+# `certs` init service and both services wait on it, so there is no openssl
+# ceremony here and no plaintext path: the dev stack speaks the same TLS the
 # deployed one does.
 services:
+  # A bind-mounted kubeconfig is unreadable by the gateway, which runs as
+  # nonroot (uid 65532). On Linux a bind mount keeps the host inode's
+  # ownership, so a file the developer owns is denied to 65532 -- and loosening
+  # it to 0644 would leave cluster credentials world-readable on disk.
+  # Copying it into a volume as root and chowning is what certs/gen.sh already
+  # does for the server key.
+  kubeconfig:
+    image: alpine:3.20
+    user: root
+    entrypoint:
+      - /bin/sh
+      - -c
+      - install -o 65532 -g 65532 -m 0600 /in/config /kube/config
+    volumes:
+      - ${AXIOM_KUBECONFIG:-/dev/null}:/in/config:ro
+      - kube:/kube
+
   gateway:
     command:
       - -listen
@@ -19,19 +34,21 @@ services:
       - -kubeconfig
       - /kube/config
       # No -serve: it narrows nothing by default, so the credentials in the
-      # kubeconfig are what bound this. That is the same rule the deployed
-      # gateway follows, where RBAC on the ServiceAccount is the only bound.
+      # kubeconfig are the bound -- the same rule the deployed gateway follows.
     volumes:
       - certs:/certs:ro
-      - ${AXIOM_KUBECONFIG:-/dev/null}:/kube/config:ro
-    # Linux does not resolve host.docker.internal on its own; Docker Desktop
-    # does. Declaring it on both is harmless and makes a host-local API server
-    # reachable the same way everywhere.
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - kube:/kube:ro
+    depends_on:
+      certs:
+        condition: service_completed_successfully
+      kubeconfig:
+        condition: service_completed_successfully
 
   postgres:
-    # Published so a psql on the host can reach it. Loopback only: this
-    # password is a development constant and the port must not be routable.
+    # Loopback only. This password is a development constant, so the port must
+    # not be routable.
     ports:
       - "127.0.0.1:${AXIOM_PG_PORT:-55432}:5432"
+
+volumes:
+  kube:

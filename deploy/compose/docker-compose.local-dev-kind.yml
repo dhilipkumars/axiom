@@ -1,0 +1,20 @@
+# Added on top of docker-compose.local-dev.yml when the context is a kind
+# cluster.
+#
+# kind publishes its API server on host loopback, which a container cannot
+# reach -- but every kind node is also a container on kind's own Docker
+# network. Joining it lets the gateway address the node directly, which is the
+# same route e2e/lib/kind.sh takes and behaves identically on macOS and Linux.
+#
+# Only the gateway joins. Postgres stays on the compose bridge and still
+# reaches the gateway at gateway:8443, so nothing binds a host port that a
+# developer's own Postgres might already hold.
+services:
+  gateway:
+    networks:
+      - default
+      - kind
+
+networks:
+  kind:
+    external: true
