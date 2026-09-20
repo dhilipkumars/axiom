@@ -156,8 +156,14 @@ IMPORT FOREIGN SCHEMA k8s FROM SERVER k8s INTO k8s;"
     case "$out" in
       *"depends on"*|*"cannot drop"*)
         die "a view or another object depends on the imported tables, so they cannot be
-  replaced. Nothing was dropped. Drop the dependent object, or keep your own
-  objects in a different schema:
+  replaced. Nothing was dropped.
+
+  Postgres tracks this across schemas, so moving the dependent object elsewhere
+  does not help. Either drop it and recreate it after the refresh, or give it
+  its own tables to build on, which this command will not touch:
+
+    CREATE SCHEMA mine;
+    IMPORT FOREIGN SCHEMA k8s LIMIT TO (pods) FROM SERVER k8s INTO mine;
 
 $out" ;;
     esac

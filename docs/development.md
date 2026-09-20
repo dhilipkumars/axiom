@@ -105,7 +105,7 @@ is not platform-specific. For a remote cluster, give the gateway a
 ServiceAccount token instead:
 
 ```sh
-kubectl --context=<ctx> apply -f ../deploy/k8s/gateway-rbac.yaml
+kubectl --context=<ctx> apply -f deploy/k8s/gateway-rbac.yaml
 kubectl --context=<ctx> -n axiom-system create token axiom-gateway --duration=8h
 ```
 
@@ -114,6 +114,9 @@ kubeconfig once and caches authorization decisions for its lifetime, so
 `local-dev-up` recreates it rather than leaving it running. It also replaces the
 imported foreign tables — only those, and without `CASCADE`, so if a view of
 yours depends on one it stops and tells you rather than dropping your work.
+Postgres tracks that dependency across schemas, so keeping the view elsewhere
+does not exempt it; import your own copy of the tables instead and build on
+that.
 
 ## 2. Get the code
 
