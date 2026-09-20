@@ -23,3 +23,7 @@ e2e/.kind/
 
 # Built artifacts (scripts/package-extension).
 /dist/
+
+# scripts/local-dev writes a rewritten kubeconfig here; it holds cluster
+# credentials and is regenerated on every `make local-dev-up`.
+.local-dev/

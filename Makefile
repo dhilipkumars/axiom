@@ -10,7 +10,7 @@ COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 
 .PHONY: all proto proto-check gateway-build gateway-test gateway-lint gateway-vuln \
         ext-build ext-test ext-lint ext-fmt ext-audit unit lint docs-generate docs-check \
-        version changelog release-check release-notes up down e2e-preload package e2e-tarball e2e-package e2e-install e2e-ping e2e-phase0 e2e-pods e2e-phase1 e2e-configmaps e2e-phase2 e2e-watch e2e-phase3 e2e-crd e2e-phase4 e2e-cluster e2e-phase5 e2e
+        version changelog release-check release-notes up down local-dev-up local-dev-down local-dev-psql e2e-preload package e2e-tarball e2e-package e2e-install e2e-ping e2e-phase0 e2e-pods e2e-phase1 e2e-configmaps e2e-phase2 e2e-watch e2e-phase3 e2e-crd e2e-phase4 e2e-cluster e2e-phase5 e2e
 
 all: lint unit
 
@@ -108,6 +108,27 @@ lint: gateway-lint ext-lint release-check
 ## Local stack / E2E
 up:
 	$(COMPOSE) up -d --build --wait
+
+## Local development against a real cluster
+# One command from a kubectl context to a Postgres that returns real rows.
+# CONTEXT resolves three ways, and `?=` is what makes all three work: a
+# command-line assignment beats everything, an environment variable is left
+# alone, and neither falls back to whatever kubectl is pointed at.
+#
+#   make local-dev-up CONTEXT=kind-mycluster
+#   CONTEXT=kind-mycluster make local-dev-up
+#   make local-dev-up                          # current-context
+CONTEXT ?= $(shell kubectl config current-context 2>/dev/null)
+
+local-dev-up:
+	@./scripts/local-dev up "$(CONTEXT)"
+
+local-dev-down:
+	@./scripts/local-dev down
+
+# psql into the stack this brought up.
+local-dev-psql:
+	@psql "postgresql://axiom:axiom-dev@127.0.0.1:$(or $(AXIOM_PG_PORT),55432)/axiom"
 
 down:
 	$(COMPOSE) down -v --remove-orphans

@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# Brings up an Axiom stack against a local Kubernetes cluster you already have.
+#
+#   scripts/local-dev up [context]
+#   scripts/local-dev down
+#
+# Normally driven by `make local-dev-up` / `make local-dev-down`.
+#
+# What this does that docker compose cannot: decide how a container should
+# reach *this* cluster. A kind kubeconfig names the API server as
+# 127.0.0.1:<port>, which inside a container is the container -- so the gateway
+# joins kind's own Docker network and uses the node's container name instead.
+# That is the same route e2e/lib/kind.sh takes, which CI exercises on every PR,
+# and it behaves identically on macOS and Linux.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CDIR="$ROOT/deploy/compose"
+STATE="$ROOT/.local-dev"
+PGPORT="${AXIOM_PG_PORT:-55432}"
+
+die()  { printf '\nlocal-dev: %s\n\n' "$*" >&2; exit 1; }
+say()  { printf '  %s\n' "$*"; }
+step() { printf '\n==> %s\n' "$*"; }
+
+# Overlays are chosen per cluster, so compose never has to decide anything.
+compose() {
+  local files=(-f "$CDIR/docker-compose.yml" -f "$CDIR/docker-compose.local-dev.yml")
+  [[ "${KIND_NETWORK:-}" == "1" ]] && files+=(-f "$CDIR/docker-compose.local-dev-kind.yml")
+  AXIOM_KUBECONFIG="${AXIOM_KUBECONFIG:-/dev/null}" \
+  AXIOM_PG_PORT="$PGPORT" \
+  docker compose "${files[@]}" "$@"
+}
+
+cmd_down() {
+  step "stopping"
+  # KIND_NETWORK is set so the same overlay set is torn down that was brought
+  # up; an external network absent from the project is harmless to reference.
+  KIND_NETWORK=1 compose down -v --remove-orphans 2>/dev/null \
+    || compose down -v --remove-orphans
+  rm -rf "$STATE"
+  say "stopped"
+}
+
+cmd_up() {
+  command -v kubectl >/dev/null || die "kubectl is not on PATH"
+
+  local ctx="${1:-}"
+  [[ -n "$ctx" ]] || ctx="$(kubectl config current-context 2>/dev/null)" \
+    || die "no context given and no current-context set.
+  Try: make local-dev-up CONTEXT=<name>"
+  [[ -n "$ctx" ]] || die "no context given and no current-context set"
+
+  kubectl config get-contexts "$ctx" >/dev/null 2>&1 || die "context '$ctx' not found. Available:
+$(kubectl config get-contexts -o name | sed 's/^/    /')"
+
+  local server
+  server="$(kubectl config view --minify --context="$ctx" -o jsonpath='{.clusters[0].cluster.server}')"
+
+  step "context"
+  say "name:   $ctx"
+  say "server: $server"
+
+  # An exec: block is a recipe for a credential, not a credential. client-go
+  # runs it -- the gateway uses the same library kubectl does -- so the
+  # requirement travels with the file into a distroless image that has no
+  # shell and no cloud CLI. It fails the same way on macOS as on Linux.
+  if kubectl config view --minify --flatten --context="$ctx" -o jsonpath='{.users[0].user.exec.command}' 2>/dev/null | grep -q .; then
+    die "'$ctx' authenticates with an exec credential plugin, which the gateway cannot run.
+
+  The kubeconfig says 'run this program to get a token' rather than carrying one,
+  and the gateway image is distroless -- no shell, no aws/gcloud/kubelogin. This
+  is not platform-specific; it fails the same way on macOS.
+
+  local-dev targets local clusters -- use kind:
+
+    kind create cluster --name dev && make local-dev-up CONTEXT=kind-dev
+
+  To point Axiom at this cluster for real, deploy the gateway into it rather
+  than running one locally against it: docs/guides/deploying.md. Supporting
+  remote clusters here is tracked in #68."
+  fi
+
+  mkdir -p "$STATE"; chmod 700 "$STATE"
+  local kubeconfig="$STATE/kubeconfig"
+  rm -f "$kubeconfig"
+
+  step "kubeconfig the gateway can use"
+  case "$ctx" in
+    kind-*)
+      local cluster="${ctx#kind-}"
+      command -v kind >/dev/null || die "context '$ctx' looks like kind but the kind binary is not on PATH"
+      # kind writes this itself: the API server addressed as
+      # <cluster>-control-plane:6443, reachable from the kind network.
+      kind get kubeconfig --name "$cluster" --internal > "$kubeconfig" 2>/dev/null \
+        || die "kind has no cluster named '$cluster'"
+      docker network inspect kind >/dev/null 2>&1 \
+        || die "the 'kind' docker network does not exist; is the cluster running?"
+      export KIND_NETWORK=1
+      say "kind cluster '$cluster'; gateway will join the kind network"
+      say "api server: $(kubectl --kubeconfig="$kubeconfig" config view -o jsonpath='{.clusters[0].cluster.server}')"
+      ;;
+    docker-desktop|k3d-*|minikube|rancher-desktop|colima)
+      die "'$ctx' is a local cluster local-dev does not handle yet.
+
+  Only kind is wired up, because it is the one CI exercises and the one this
+  was verified against. Each of the others needs its own Docker network and
+  node address, and shipping a path nobody has run produces a confusing TLS or
+  routing error rather than this message. Tracked in #68.
+
+    kind create cluster --name dev && make local-dev-up CONTEXT=kind-dev"
+      ;;
+    *)
+      case "$server" in
+        *127.0.0.1*|*localhost*)
+          die "'$ctx' points at a host-local address ($server) but is not a cluster
+  local-dev recognises, so it cannot know which Docker network reaches it.
+  Tracked in #68." ;;
+      esac
+      kubectl config view --minify --flatten --context="$ctx" > "$kubeconfig"
+      say "remote cluster with a static credential; used as-is"
+      ;;
+  esac
+  chmod 600 "$kubeconfig"
+
+  step "starting"
+  # --force-recreate on the gateway is load-bearing: compose sees identical
+  # args, image and mount paths and would leave it running, but the gateway
+  # reads the kubeconfig once at startup and SelfAccess caches authorization
+  # decisions for the process lifetime. Without this, switching context or
+  # granting a new kind changes nothing and says nothing.
+  AXIOM_KUBECONFIG="$kubeconfig" compose up -d --build --wait --force-recreate
+
+  step "wiring Postgres to the gateway"
+  local sql out
+  sql="CREATE EXTENSION IF NOT EXISTS axiom;
+CREATE SERVER IF NOT EXISTS k8s FOREIGN DATA WRAPPER axiom_fdw
+  OPTIONS (endpoint 'https://gateway:8443', ca_cert '/certs/ca.crt');
+CREATE USER MAPPING IF NOT EXISTS FOR CURRENT_USER SERVER k8s;
+CREATE SCHEMA IF NOT EXISTS k8s;
+DO \$\$
+DECLARE t text;
+BEGIN
+  FOR t IN
+    SELECT c.relname FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_foreign_table f ON f.ftrelid = c.oid
+     WHERE n.nspname = 'k8s'
+  LOOP
+    EXECUTE format('DROP FOREIGN TABLE k8s.%I', t);
+  END LOOP;
+END \$\$;
+IMPORT FOREIGN SCHEMA k8s FROM SERVER k8s INTO k8s;"
+  if ! out="$(AXIOM_KUBECONFIG="$kubeconfig" compose exec -T postgres \
+              psql -U axiom -d axiom -v ON_ERROR_STOP=1 -q -c "$sql" 2>&1)"; then
+    case "$out" in
+      *"depends on"*|*"cannot drop"*)
+        die "a view or another object depends on the imported tables, so they cannot be
+  replaced. Nothing was dropped.
+
+  Postgres tracks this across schemas, so moving the dependent object elsewhere
+  does not help. Either drop it and recreate it after the refresh, or give it
+  its own tables to build on, which this command will not touch:
+
+    CREATE SCHEMA mine;
+    IMPORT FOREIGN SCHEMA k8s LIMIT TO (pods) FROM SERVER k8s INTO mine;
+
+$out" ;;
+    esac
+    die "the stack started but Postgres could not be wired to the gateway:
+
+$out
+
+  gateway log:
+$(AXIOM_KUBECONFIG="$kubeconfig" compose logs --tail 15 gateway 2>&1 | sed 's/^/    /')"
+  fi
+
+  # The only honest readiness check. The gateway logging "kubernetes client
+  # configured" proves a client was built, not that the API server was ever
+  # reached -- client-go connects lazily on the first request.
+  step "asking the cluster something"
+  if ! out="$(AXIOM_KUBECONFIG="$kubeconfig" compose exec -T postgres \
+              psql -U axiom -d axiom -tAc "SELECT count(*) FROM k8s.pods" 2>&1)"; then
+    die "the import succeeded but the first query did not -- usually the gateway
+  cannot reach the API server:
+
+$out
+
+  gateway log:
+$(AXIOM_KUBECONFIG="$kubeconfig" compose logs --tail 15 gateway 2>&1 | sed 's/^/    /')"
+  fi
+  say "$out pods visible through the gateway"
+
+  step "ready"
+  printf '\n  psql "postgresql://axiom:axiom-dev@127.0.0.1:%s/axiom"\n\n' "$PGPORT"
+  say "or:    make local-dev-psql"
+  say "stop:  make local-dev-down"
+  say ""
+  say "  SELECT namespace, name, phase FROM k8s.pods LIMIT 5;"
+}
+
+case "${1:-}" in
+  up)   shift; cmd_up "${1:-}" ;;
+  down) cmd_down ;;
+  *)    die "usage: local-dev up [context] | local-dev down" ;;
+esac

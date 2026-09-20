@@ -66,6 +66,57 @@ dropped: 14 reaches end of life in November 2026, and neither is where the
 installed base sits. 16 is supported upstream until November 2028. 19 is still
 in beta and is not built here yet.
 
+## Against a cluster you already have
+
+One command from a kind cluster to a Postgres that answers questions about it:
+
+```sh
+make local-dev-up CONTEXT=kind-mycluster   # or as an environment variable
+make local-dev-up                          # or just: current-context
+make local-dev-psql
+make local-dev-down
+```
+
+It mints a throwaway CA and certificate, starts the gateway against that
+cluster, starts Postgres with the extension, imports the schema, and prints the
+`psql` command to connect. `kubectl` is untouched.
+
+**What is supported**
+
+| | |
+|---|---|
+| **kind** | yes — macOS and Linux |
+| docker-desktop, k3d, minikube | refused with a message; tracked in [#68](https://github.com/dhilipkumars/axiom/issues/68) |
+| EKS, GKE, AKS | refused — see below |
+
+**Why kind works the same on both platforms.** A kind kubeconfig names the API
+server as `127.0.0.1:<port>`, which inside a container is the container. Rather
+than rewrite that address, the gateway joins kind's own Docker network and uses
+`kind get kubeconfig --internal`, which addresses the node container directly.
+That is the route `e2e/lib/kind.sh` takes and CI exercises on every PR. Postgres
+stays on the compose network, so nothing binds a host port your own Postgres
+might hold.
+
+**Why a cloud kubeconfig is refused.** EKS, GKE and AKS kubeconfigs carry an
+`exec:` block rather than a credential — *"run this program to get a token"*.
+**client-go** runs it, not `kubectl`, so the requirement travels with the file
+into the gateway's distroless image, which has no shell and no cloud CLI. This
+is not platform-specific; it fails the same way on macOS.
+
+To use Axiom against a real cluster, deploy the gateway *into* it rather than
+running one locally against it — see [Deploying the
+gateway](guides/deploying.md). Supporting remote clusters from `local-dev` is
+tracked in [#68](https://github.com/dhilipkumars/axiom/issues/68).
+
+**Re-running is how you pick up a newly granted kind.** The gateway reads its
+kubeconfig once and caches authorization decisions for its lifetime, so
+`local-dev-up` recreates it rather than leaving it running. It also replaces the
+imported foreign tables — only those, and without `CASCADE`, so if a view of
+yours depends on one it stops and tells you rather than dropping your work.
+Postgres tracks that dependency across schemas, so keeping the view elsewhere
+does not exempt it; import your own copy of the tables instead and build on
+that.
+
 ## 2. Get the code
 
 ```sh
