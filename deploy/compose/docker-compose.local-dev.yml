@@ -49,6 +49,16 @@ services:
     # not be routable.
     ports:
       - "127.0.0.1:${AXIOM_PG_PORT:-55432}:5432"
+    # Named, so the data directory survives the --force-recreate that every
+    # `local-dev up` performs. It survives anyway today -- the postgres image
+    # declares VOLUME /var/lib/postgresql/data and compose reattaches anonymous
+    # volumes rather than discarding them -- but that is inherited from the base
+    # image rather than declared here, and it is what the dependent-object
+    # protection in scripts/local-dev depends on. `local-dev down` still removes
+    # it, because teardown should leave nothing.
+    volumes:
+      - pgdata:/var/lib/postgresql/data
 
 volumes:
   kube:
+  pgdata:

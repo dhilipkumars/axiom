@@ -72,13 +72,13 @@ $(kubectl config get-contexts -o name | sed 's/^/    /')"
   and the gateway image is distroless -- no shell, no aws/gcloud/kubelogin. This
   is not platform-specific; it fails the same way on macOS.
 
-  local-dev targets local clusters. For a remote cluster, give the gateway a
-  ServiceAccount token instead:
+  local-dev targets local clusters -- use kind:
 
-    kubectl --context=$ctx apply -f deploy/k8s/gateway-rbac.yaml
-    kubectl --context=$ctx -n axiom-system create token axiom-gateway --duration=8h
+    kind create cluster --name dev && make local-dev-up CONTEXT=kind-dev
 
-  Tracked in #68."
+  To point Axiom at this cluster for real, deploy the gateway into it rather
+  than running one locally against it: docs/guides/deploying.md. Supporting
+  remote clusters here is tracked in #68."
   fi
 
   mkdir -p "$STATE"; chmod 700 "$STATE"

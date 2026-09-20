@@ -101,13 +101,12 @@ might hold.
 `exec:` block rather than a credential — *"run this program to get a token"*.
 **client-go** runs it, not `kubectl`, so the requirement travels with the file
 into the gateway's distroless image, which has no shell and no cloud CLI. This
-is not platform-specific. For a remote cluster, give the gateway a
-ServiceAccount token instead:
+is not platform-specific; it fails the same way on macOS.
 
-```sh
-kubectl --context=<ctx> apply -f deploy/k8s/gateway-rbac.yaml
-kubectl --context=<ctx> -n axiom-system create token axiom-gateway --duration=8h
-```
+To use Axiom against a real cluster, deploy the gateway *into* it rather than
+running one locally against it — see [Deploying the
+gateway](guides/deploying.md). Supporting remote clusters from `local-dev` is
+tracked in [#68](https://github.com/dhilipkumars/axiom/issues/68).
 
 **Re-running is how you pick up a newly granted kind.** The gateway reads its
 kubeconfig once and caches authorization decisions for its lifetime, so
