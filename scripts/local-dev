@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+# Brings up a local Axiom stack against a Kubernetes context you already have.
+#
+#   scripts/local-dev up [context]
+#   scripts/local-dev down
+#
+# Normally driven by `make local-dev-up` / `make local-dev-down`.
+#
+# What this does that docker compose cannot: turn a context *name* into a
+# kubeconfig a container can actually use. A host kubeconfig for kind, k3d,
+# minikube or Docker Desktop names the API server as 127.0.0.1:<port>, and
+# inside a container 127.0.0.1 is the container. The address has to be
+# rewritten, and whether it needs rewriting depends on the cluster, which is a
+# decision no compose file can make.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+COMPOSE_DIR="$ROOT/deploy/compose"
+STATE="$ROOT/.local-dev"
+COMPOSE=(docker compose -f "$COMPOSE_DIR/docker-compose.yml" -f "$COMPOSE_DIR/docker-compose.local-dev.yml")
+
+die()  { printf '\nlocal-dev: %s\n' "$*" >&2; exit 1; }
+say()  { printf '  %s\n' "$*"; }
+step() { printf '\n==> %s\n' "$*"; }
+
+# Contexts whose name says they are a throwaway local cluster. Anything else
+# needs CONFIRM=1: the gateway runs with *your* credentials, which on a laptop
+# are often cluster-admin, and Axiom's writes are real API calls -- an UPDATE
+# against a "local dev" stack pointed at production is a production write.
+is_local_context() {
+  case "$1" in
+    kind-*|k3d-*|minikube|docker-desktop|rancher-desktop|colima) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+cmd_down() {
+  step "stopping"
+  # The overlay interpolates AXIOM_KUBECONFIG. `down` has no kubeconfig to
+  # offer and does not need one, but compose still substitutes the variable, so
+  # give it something rather than let teardown fail on a missing mount source.
+  AXIOM_KUBECONFIG="${AXIOM_KUBECONFIG:-/dev/null}" "${COMPOSE[@]}" down -v --remove-orphans
+  rm -rf "$STATE"
+  say "stopped; $STATE removed"
+}
+
+cmd_up() {
+  command -v kubectl >/dev/null || die "kubectl is not on PATH"
+  local ctx="${1:-}"
+  if [[ -z "$ctx" ]]; then
+    ctx="$(kubectl config current-context 2>/dev/null)" \
+      || die "no context given and no current-context set. Try: make local-dev-up CONTEXT=<name>"
+    [[ -n "$ctx" ]] || die "no context given and no current-context set"
+  fi
+
+  kubectl config get-contexts "$ctx" >/dev/null 2>&1 \
+    || die "context '$ctx' not found. Available:
+$(kubectl config get-contexts -o name | sed 's/^/    /')"
+
+  local server
+  server="$(kubectl config view --minify --context="$ctx" -o jsonpath='{.clusters[0].cluster.server}')"
+  [[ -n "$server" ]] || die "context '$ctx' has no server address"
+
+  step "context"
+  say "name:   $ctx"
+  say "server: $server"
+
+  if ! is_local_context "$ctx"; then
+    [[ "${CONFIRM:-0}" == "1" ]] || die "'$ctx' does not look like a local cluster.
+  This brings up a gateway holding YOUR credentials, and Axiom's writes are real
+  API calls -- an UPDATE here is an UPDATE there. Re-run with CONFIRM=1 if that
+  is what you meant:
+
+    CONFIRM=1 make local-dev-up CONTEXT=$ctx"
+    say "non-local context accepted (CONFIRM=1)"
+  fi
+
+  mkdir -p "$STATE"
+  chmod 700 "$STATE"
+  local kubeconfig="$STATE/kubeconfig"
+
+  step "kubeconfig for the gateway"
+  # --flatten inlines the certificates and token, so the file the container
+  # mounts is self-contained rather than referencing paths only the host has.
+  kubectl config view --minify --flatten --context="$ctx" > "$kubeconfig"
+  chmod 600 "$kubeconfig"
+
+  # A host-local API server is unreachable from inside a container under the
+  # address the host uses. host.docker.internal resolves to the host from a
+  # container on every Docker platform, so the port stays and only the host
+  # changes -- and tls-server-name keeps certificate verification honest by
+  # asking for the name the API server's certificate actually carries.
+  local host port rewrote=0
+  host="$(sed -E 's#^https?://##; s#[:/].*$##' <<<"$server")"
+  port="$(sed -E 's#^https?://[^:]+:##; s#/.*$##' <<<"$server")"
+  case "$host" in
+    127.0.0.1|localhost|::1|0.0.0.0)
+      kubectl --kubeconfig="$kubeconfig" config set-cluster \
+        "$(kubectl --kubeconfig="$kubeconfig" config view -o jsonpath='{.clusters[0].name}')" \
+        --server="https://host.docker.internal:${port}" >/dev/null
+      kubectl --kubeconfig="$kubeconfig" config set \
+        "clusters.$(kubectl --kubeconfig="$kubeconfig" config view -o jsonpath='{.clusters[0].name}').tls-server-name" \
+        "$host" >/dev/null
+      rewrote=1
+      say "server is host-local; rewritten to https://host.docker.internal:${port}"
+      say "tls-server-name pinned to '$host', so the certificate still has to match"
+      ;;
+    *) say "server is not host-local; used as-is" ;;
+  esac
+
+  step "bringing up the stack"
+  ( cd "$COMPOSE_DIR" && AXIOM_KUBECONFIG="$kubeconfig" "${COMPOSE[@]}" up -d --build --wait )
+
+  step "wiring Postgres to the gateway"
+  # Done here rather than left to the reader: the point of this command is a
+  # database that already answers questions about the cluster. It is also the
+  # only honest readiness check -- the gateway logging "client configured" says
+  # a client was built, not that the API server was ever reached, because
+  # client-go connects lazily on the first request.
+  local sql out
+  # The schema is dropped and rebuilt rather than added to. IMPORT FOREIGN
+  # SCHEMA has no IF NOT EXISTS, so a second `up` against a running stack dies
+  # on the first table it already created -- and re-running this command is the
+  # normal way to pick up a kind newly granted in RBAC. The schema belongs to
+  # this command; anything of your own belongs in another one.
+  sql="CREATE EXTENSION IF NOT EXISTS axiom;
+CREATE SERVER IF NOT EXISTS k8s FOREIGN DATA WRAPPER axiom_fdw
+  OPTIONS (endpoint 'https://gateway:8443', ca_cert '/certs/ca.crt');
+CREATE USER MAPPING IF NOT EXISTS FOR CURRENT_USER SERVER k8s;
+DROP SCHEMA IF EXISTS k8s CASCADE;
+CREATE SCHEMA k8s;
+IMPORT FOREIGN SCHEMA k8s FROM SERVER k8s INTO k8s;"
+  if ! out="$(AXIOM_KUBECONFIG="$kubeconfig" "${COMPOSE[@]}" exec -T postgres \
+              psql -U axiom -d axiom -v ON_ERROR_STOP=1 -q -c "$sql" 2>&1)"; then
+    die "the stack started but Postgres could not be wired to the gateway:
+
+$out
+
+  gateway log:
+$(AXIOM_KUBECONFIG="$kubeconfig" "${COMPOSE[@]}" logs --tail 15 gateway 2>&1 | sed 's/^/    /')"
+  fi
+
+  step "asking the cluster something"
+  if ! out="$(AXIOM_KUBECONFIG="$kubeconfig" "${COMPOSE[@]}" exec -T postgres \
+              psql -U axiom -d axiom -tAc "SELECT count(*) FROM k8s.pods" 2>&1)"; then
+    die "the import succeeded but the first query did not. Usually this means the
+  gateway cannot reach the API server at the rewritten address:
+
+$out
+
+  gateway log:
+$(AXIOM_KUBECONFIG="$kubeconfig" "${COMPOSE[@]}" logs --tail 15 gateway 2>&1 | sed 's/^/    /')"
+  fi
+  say "$out pods visible through the gateway"
+
+  step "ready"
+  say "query it:  make local-dev-psql"
+  say "stop it:   make local-dev-down"
+  say ""
+  say "  SELECT namespace, name, phase FROM k8s.pods LIMIT 5;"
+  [[ "$rewrote" == 1 ]] \
+    && say "" \
+    && say "note: the kubeconfig under .local-dev is rewritten for container use,"  \
+    && say "      not for you -- keep using kubectl as normal."
+  return 0
+}
+case "${1:-}" in
+  up)   shift; cmd_up "${1:-}" ;;
+  down) cmd_down ;;
+  *)    die "usage: local-dev up [context] | local-dev down" ;;
+esac

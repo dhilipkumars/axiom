@@ -66,6 +66,38 @@ dropped: 14 reaches end of life in November 2026, and neither is where the
 installed base sits. 16 is supported upstream until November 2028. 19 is still
 in beta and is not built here yet.
 
+## Against a cluster you already have
+
+The quickest way to a Postgres that answers questions about a real cluster:
+
+```sh
+make local-dev-up CONTEXT=kind-mycluster   # or CONTEXT=... as an environment
+make local-dev-up                          # or just: current-context
+make local-dev-psql
+make local-dev-down
+```
+
+That mints a throwaway CA and server certificate, starts the gateway against
+that context, starts Postgres with the extension, creates the server and
+imports the schema — then tells you how many pods it can see, which is the only
+honest proof the gateway reached the API server. `kubectl` is untouched.
+
+**A host kubeconfig usually does not work inside a container.** kind, k3d,
+minikube and Docker Desktop all name the API server as `127.0.0.1:<port>`, and
+inside a container that is the container. `scripts/local-dev` rewrites the
+address to `host.docker.internal` and pins `tls-server-name` to the original
+host, so the certificate still has to match — the dev stack speaks the same TLS
+the deployed one does, and there is no plaintext path to drift out of test.
+
+**A context that does not look local needs `CONFIRM=1`.** The gateway runs with
+*your* credentials, which on a laptop are often cluster-admin, and Axiom's
+writes are real API calls — an `UPDATE` against a "local dev" stack pointed at
+production is a production write. `kind-*`, `k3d-*`, `minikube`,
+`docker-desktop`, `rancher-desktop` and `colima` proceed without it.
+
+Re-running `local-dev-up` is how you pick up a kind newly granted in RBAC: it
+drops and rebuilds the `k8s` schema, so keep anything of your own elsewhere.
+
 ## 2. Get the code
 
 ```sh
