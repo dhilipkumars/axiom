@@ -2,13 +2,6 @@
 
 Things worth doing that are awkward or impossible with `kubectl`.
 
-The CloudNativePG example at the end was run end to end — create, observe and
-scale — against a kind cluster, confirming from `kubectl` that each change
-Postgres made was real. The read queries are written
-against the column reference in [Foreign table
-columns](../generated/columns.md) rather than run individually — if one does
-not work, that is a bug worth reporting.
-
 These assume you have finished [Getting started](getting-started.md), so server
 `prod` exists and its kinds are imported into schema `k8s`.
 
