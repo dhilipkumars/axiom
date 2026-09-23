@@ -23,6 +23,25 @@ NS="axiom-e2e"
 
 SA="system:serviceaccount:$E2E_GATEWAY_SA_NS:$E2E_GATEWAY_SA"
 can_i() { kubectl_e2e auth can-i "$@" --as="$SA" 2>/dev/null || true; }
+# can_i_group VERB GROUP RESOURCE -> yes/no, from a SubjectAccessReview with
+# the group spelled out. `kubectl auth can-i` resolves the name through
+# discovery, and for a group the cluster does not serve it falls back to
+# checking the whole string as a *core* resource -- answering "no" for any API
+# not installed, however RBAC reads. Grants for APIs that arrive later are
+# exactly what this gate needs to check.
+can_i_group() {
+  local allowed
+  allowed="$(kubectl_e2e create -o jsonpath='{.status.allowed}' -f - 2>/dev/null <<YAML || true
+apiVersion: authorization.k8s.io/v1
+kind: SubjectAccessReview
+spec:
+  user: "$SA"
+  groups: ["system:serviceaccounts", "system:serviceaccounts:$E2E_GATEWAY_SA_NS", "system:authenticated"]
+  resourceAttributes: {verb: "$1", group: "$2", resource: "$3"}
+YAML
+)"
+  [[ "$allowed" == "true" ]] && echo yes || echo no
+}
 
 kind_up
 e2e_on_teardown kind_down
@@ -39,10 +58,15 @@ for r in pods deployments.apps statefulsets.apps daemonsets.apps jobs.batch cron
   [[ "$(can_i list "$r" -A)" == "yes" ]] || fail "gateway SA cannot list $r"
 done
 for r in nodes persistentvolumes storageclasses.storage.k8s.io \
-         customresourcedefinitions.apiextensions.k8s.io clusterroles.rbac.authorization.k8s.io \
-         queue_depth.external.metrics.k8s.io pods.custom.metrics.k8s.io; do
+         customresourcedefinitions.apiextensions.k8s.io clusterroles.rbac.authorization.k8s.io; do
   [[ "$(can_i list "$r")" == "yes" ]] || fail "gateway SA cannot list $r"
 done
+# Not served by this cluster; granted anyway, for the adapter installed later.
+for gr in external.metrics.k8s.io/queue_depth custom.metrics.k8s.io/pods; do
+  [[ "$(can_i_group list "${gr%%/*}" "${gr#*/}")" == "yes" ]] || fail "gateway SA cannot list $gr"
+done
+# The helper must be able to say no, or the loop above proves nothing.
+[[ "$(can_i_group list "" secrets)" == "no" ]] || fail "can_i_group cannot say no: it allowed secrets"
 # Reads are broad; writes are not.
 [[ "$(can_i delete pods -A)" == "no" ]] || fail "gateway SA can delete pods"
 
@@ -63,7 +87,7 @@ YAML
 probe_role_down() { kubectl_e2e delete clusterrole axiom-e2e-probe-read --ignore-not-found >/dev/null 2>&1 || true; }
 e2e_on_teardown probe_role_down
 deadline=$((SECONDS + 60))
-until [[ "$(can_i list gadgets.probe.axiom.test -A)" == "yes" ]]; do
+until [[ "$(can_i_group list probe.axiom.test gadgets)" == "yes" ]]; do
   (( SECONDS < deadline )) || fail "a labelled ClusterRole was not aggregated into the read grant"
   sleep 1
 done
