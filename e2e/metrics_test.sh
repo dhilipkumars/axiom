@@ -117,11 +117,20 @@ got="$(psql_axiom "SELECT string_agg(foreign_table_name, ',' ORDER BY foreign_ta
   || fail "expected pods_core,pods_metrics_k8s_io from the collision rule; got '$got'"
 
 log "metrics reach SQL through the gateway ServiceAccount, and cover the fixture pods"
-want="$(kubectl_e2e top pods -n "$NS" --no-headers 2>/dev/null | awk '{print $1}' | sort | tr '\n' ',')"
-got="$(psql_axiom "SELECT string_agg(name, ',' ORDER BY name) || ','
-                     FROM k8s.pods_metrics_k8s_io WHERE namespace = '$NS';")"
-[[ -n "$want" ]] || fail "kubectl top returned nothing for $NS; the gate cannot compare"
-[[ "$got" == "$want" ]] || fail $'pod metrics mismatch\n--- postgres: '"$got"$'\n--- kubectl:  '"$want"
+# The fixture pods are seconds old, and metrics-server reports a pod only after
+# it has scraped it -- until then `kubectl top` exits non-zero, which under
+# pipefail ended this gate with no message. Wait for every fixture pod to be
+# reported, then compare; SQL is re-read each time since it trails the same way.
+pods="$(kubectl_e2e get pods -n "$NS" --no-headers -o custom-columns=:metadata.name | sort | tr '\n' ',')"
+deadline=$((SECONDS + 180))
+while :; do
+  want="$(kubectl_e2e top pods -n "$NS" --no-headers 2>/dev/null | awk '{print $1}' | sort | tr '\n' ',' || true)"
+  got="$(psql_axiom "SELECT coalesce(string_agg(name, ',' ORDER BY name) || ',', '')
+                       FROM k8s.pods_metrics_k8s_io WHERE namespace = '$NS';")"
+  [[ "$want" == "$pods" && "$got" == "$want" ]] && break
+  (( SECONDS < deadline )) || fail $'pod metrics never covered the fixture pods\n--- pods:     '"$pods"$'\n--- kubectl:  '"$want"$'\n--- postgres: '"$got"
+  sleep 5
+done
 echo "$got"
 
 log "node metrics are present too"
