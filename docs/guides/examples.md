@@ -136,6 +136,119 @@ k8s.core_pods` raises `0A000 foreign tables on pods are read-only` rather than
 evicting anything — deleting a pod by `WHERE` clause is too easy to do by
 accident and too hard to undo.
 
+## Usage and events
+
+Kubernetes forgets. Events expire after about an hour and usage is only ever
+*now*, so the questions worth asking are the ones that combine both with live
+state — which is also what a single `kubectl` invocation cannot do.
+
+Two API groups name their resources the same as the core group, so Axiom
+disambiguates: core pods are `pods_core` once `metrics.k8s.io` is present, and
+events arrive as `events_core` and `events_events_k8s_io`.
+
+### Why is that pod not running?
+
+The pod's live state and the warning that explains it, on one row:
+
+```sql
+SELECT p.name, p.phase, e.reason->>0 AS reason, e.message->>0 AS message
+  FROM k8s.events_core e
+  JOIN k8s.pods p ON p.namespace = e.namespace
+                 AND p.name = e.involved_object->>'name'
+ WHERE e.type->>0 = 'Warning'
+   AND e.involved_object->>'kind' = 'Pod';
+```
+
+### Quantities are strings until you convert them
+
+Kubernetes reports measurements as strings with unit suffixes — `49903n` of
+CPU, `14488Ki` of memory. Postgres cannot compare or sum those, and `>` on
+them is a string comparison that answers wrongly without erroring.
+`axiom_quantity()` converts exactly:
+
+```sql
+SELECT axiom_quantity('100m'),   -- 0.100  cores
+       axiom_quantity('128Mi'),  -- 134217728  bytes
+       axiom_quantity('1M') = axiom_quantity('1Mi');  -- false: M is not Mi
+```
+
+It returns `NULL` rather than raising for anything that is not a quantity, so
+one odd field cannot fail a query that spans a cluster.
+
+### A capacity and risk review of the whole fleet
+
+Per workload: what it actually consumes, what it reserved, whether it is
+bounded at all, and whether anything is failing — usage, spec, the ownership
+chain and events in one statement.
+
+```sql
+WITH usage AS (
+  SELECT m.namespace, m.name AS pod,
+         sum(axiom_quantity(c->'usage'->>'memory')) AS mem_used
+    FROM k8s.pods_metrics_k8s_io m, jsonb_array_elements(m.containers) c
+   GROUP BY 1, 2),
+spec AS (
+  SELECT p.namespace, p.name AS pod,
+         p.metadata->'ownerReferences'->0->>'name' AS rs,
+         sum(axiom_quantity(c->'resources'->'requests'->>'memory')) AS mem_req,
+         bool_or(c->'resources'->'limits' IS NULL) AS no_limits
+    FROM k8s.pods_core p, jsonb_array_elements(p.spec->'containers') c
+   GROUP BY 1, 2, 3),
+owner AS (
+  SELECT r.namespace, r.name AS rs,
+         coalesce(r.metadata->'ownerReferences'->0->>'name', r.name) AS workload
+    FROM k8s.replicasets r),
+warn AS (
+  SELECT e.namespace, e.involved_object->>'name' AS pod,
+         count(*) AS warnings, max(e.reason->>0) AS why
+    FROM k8s.events_core e
+   WHERE e.type->>0 = 'Warning' AND e.involved_object->>'kind' = 'Pod'
+   GROUP BY 1, 2)
+SELECT coalesce(o.workload, s.pod) AS workload,
+       count(*) AS pods,
+       round(sum(u.mem_used) / 1024 / 1024) AS mem_used_mib,
+       round(sum(s.mem_req) / 1024 / 1024) AS mem_requested_mib,
+       CASE WHEN sum(s.mem_req) > 0
+            THEN round(100 * sum(u.mem_used) / sum(s.mem_req)) END AS pct_of_request,
+       bool_or(s.no_limits) AS unbounded,
+       coalesce(sum(w.warnings), 0) AS warnings,
+       max(w.why) AS latest_warning
+  FROM spec s
+  LEFT JOIN usage u ON u.namespace = s.namespace AND u.pod = s.pod
+  LEFT JOIN owner o ON o.namespace = s.namespace AND o.rs = s.rs
+  LEFT JOIN warn  w ON w.namespace = s.namespace AND w.pod = s.pod
+ GROUP BY coalesce(o.workload, s.pod)
+ ORDER BY mem_used_mib DESC NULLS LAST;
+```
+
+```
+        workload        | pods | mem_used_mib | mem_requested_mib | pct_of_request | unbounded | warnings | latest_warning
+------------------------+------+--------------+-------------------+----------------+-----------+----------+----------------
+ api                    |   10 |           86 |                   |                | t         |        0 |
+ web                    |    9 |           79 |                   |                | t         |        0 |
+ axiom-gateway          |    1 |           14 |                64 |             22 | f         |        0 |
+ broken                 |    1 |              |                   |                | t         |        3 | Failed
+```
+
+`api` and `web` consume 165 MiB between them while requesting nothing and
+capping nothing — invisible to the scheduler, unbounded at runtime. The
+gateway reserves 64 MiB and uses 14. `broken` is not running, and why is on
+the same row.
+
+**Keep `usage` on a `LEFT JOIN`.** An inner join drops exactly the workloads
+that have no metrics because they never started — the ones you most want to
+see.
+
+### Requirements
+
+Usage tables need [metrics-server][ms] installed in the cluster; without it
+`metrics.k8s.io` does not exist and the tables are simply absent. The gateway
+also needs `list` on that group — the shipped RBAC grants cluster-wide reads,
+so a group installed later is picked up on the next discovery refresh with no
+RBAC edit.
+
+[ms]: https://github.com/kubernetes-sigs/metrics-server
+
 ## Manage Postgres with Postgres
 
 The clearest demonstration of what Axiom is: one Postgres instance creating,

@@ -58,12 +58,26 @@ this mechanically as possible rather than relying on review discipline alone.
 
 ## 3. No security loopholes — highest security standard
 
-- **Least privilege, always**: the gateway's own k8s RBAC (its `ServiceAccount`)
-  is scoped to exactly the GVKs/verbs/namespaces a given deployment is configured
-  to serve — never a cluster-admin binding for convenience, even in the POC phases.
+- **Least privilege where it changes things**: the gateway's own k8s RBAC (its
+  `ServiceAccount`) grants the *mutating* verbs on exactly the resources a given
+  deployment intends SQL to change, and never a cluster-admin binding — not even
+  in the POC phases. Blast radius lives in the write rules, and they stay
+  enumerated.
+  Reads are the deliberate exception: the shipped default grants `get`/`list`/
+  `watch` cluster-wide, because discovery *is* the product. Axiom offers exactly
+  what this identity may list, so a curated read list is a curated set of tables,
+  and any kind a deployment did not anticipate — including API groups installed
+  later by someone else, such as `metrics.k8s.io` — is absent at the moment
+  someone thinks to ask about it. A wildcard read cannot change cluster state
+  and the API server still enforces it.
+  The cost is explicit: a cluster-wide read includes Secrets, and until
+  per-caller identity lands every Postgres role reaches Kubernetes as this one
+  identity. Deployments that cannot accept that narrow the read rule to an
+  enumerated list; `deploy/k8s/gateway-rbac.yaml` says how, and narrowing
+  removes tables rather than breaking anything.
   Extend this per-caller once Phase 7 auth lands (per-Postgres-role RBAC identity,
-  DESIGN.md §7) — Phase 7 is not "add auth," it's "add the *per-caller* layer" on
-  top of a gateway that was already least-privilege from Phase 0.
+  DESIGN.md §7) — Phase 7 is not "add auth," it's "add the *per-caller* layer,"
+  and it is what makes the cluster-wide read default safe on a shared database.
 - **Every trust boundary gets an explicit control, from Phase 0**:
   - Postgres ↔ gateway: TLS from the first phase that has a real network hop
     (not deferred to "later hardening" as plaintext-then-retrofit) — Phase 7

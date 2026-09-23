@@ -1,18 +1,40 @@
-# Least-privilege identity for the Axiom gateway (docs/RULES.md §3).
-# Phase 1: read-only Pods (`get`, `list`). Phase 2: read-write ConfigMaps
-# (`get`, `list`, `create`, `update`, `delete`). Phase 3: `watch` on both, for
-# the Subscribe stream. Phase 4: the example.com test CRD, plus the discovery
-# and OpenAPI endpoints that schema discovery reads. Nothing is granted ahead
-# of need.
+# Identity for the Axiom gateway.
 #
-# This is what bounds Axiom: the gateway offers what this permits, and the API
-# server enforces it. To change what appears in SQL, change this file and
-# restart the gateway -- it caches what it may access -- then re-import, since
-# foreign tables are catalog objects and do not follow the change themselves.
+# **Reads are cluster-wide by default; writes are not.**
 #
-# The role is named for the identity it belongs to, not for what it grants. It
-# is not read-only: ConfigMaps and the example CRD are writable, because
-# INSERT, UPDATE and DELETE on a foreign table are real Kubernetes writes.
+# The read rule is a wildcard because discovery is the product: Axiom offers
+# exactly what this identity may list, so a curated read list means a curated
+# set of tables, and every kind a user has not thought to add in advance is
+# missing at the moment they think to ask about it. That includes API groups
+# installed later by someone else -- `metrics.k8s.io` from metrics-server,
+# an operator's CRDs -- which a wildcard picks up without anyone editing this
+# file. Read-only is also the verb set where a wildcard is defensible: it
+# cannot change cluster state, and the API server still enforces it.
+#
+# ## What a wildcard read includes, and what to do about it
+#
+# **Secrets.** `resources: ["*"]` covers Secrets, cluster-wide. Until per-caller
+# identity lands (#71), every Postgres role that can query a foreign table
+# reaches Kubernetes as *this* identity -- so with this default, anyone who can
+# `SELECT` can read every Secret in the cluster. That is a deliberate default
+# for a read-oriented tool, not an oversight, but it is the wrong default for a
+# shared or multi-tenant database.
+#
+# To restrict it, replace the wildcard read rule with an enumerated list of the
+# groups and resources you want visible. Axiom degrades correctly: discovery
+# offers only what this permits, so narrowing the role narrows the tables
+# rather than breaking anything.
+#
+# ## Writes stay enumerated
+#
+# INSERT, UPDATE and DELETE on a foreign table are real Kubernetes writes, so
+# the mutating verbs are granted per resource, deliberately. Add a resource
+# here only when you intend SQL to be able to change it. This is where blast
+# radius actually lives, and it is why the wildcard above is read-only.
+#
+# Changing this file requires a gateway restart -- it caches what it may access
+# -- and then a re-import, since foreign tables are catalog objects and do not
+# follow the change themselves.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -29,23 +51,26 @@ kind: ClusterRole
 metadata:
   name: axiom-gateway
 rules:
-  - apiGroups: [""]
-    resources: ["pods"]
+  # Read everything the cluster has, including API groups added after this is
+  # applied. See the header for what this includes and how to narrow it.
+  - apiGroups: ["*"]
+    resources: ["*"]
     verbs: ["get", "list", "watch"]
+
+  # Writes, enumerated. Nothing is mutable through SQL unless it is named here.
   - apiGroups: [""]
     resources: ["configmaps"]
-    verbs: ["get", "list", "watch", "create", "update", "delete"]
-  # Phase 4: the test CRD the e2e gate exercises. A real deployment lists its
-  # own CRDs here; there is deliberately no wildcard.
+    verbs: ["create", "update", "delete"]
+  # The test CRD the e2e gate exercises. A real deployment lists its own here.
   - apiGroups: ["example.com"]
     resources: ["widgets"]
-    verbs: ["get", "list", "watch", "create", "update", "delete"]
+    verbs: ["create", "update", "delete"]
+
   # Schema discovery reads the aggregated discovery and OpenAPI documents.
-  # These are non-resource URLs and grant no access to any object; the
-  # resource rules above remain the only way the gateway reaches data.
-  # Kubernetes binds system:discovery to system:authenticated by default, so
-  # this is usually redundant; it is spelled out so the dependency is visible
-  # rather than inherited by accident.
+  # These are non-resource URLs and grant no access to any object. Kubernetes
+  # binds system:discovery to system:authenticated by default, so this is
+  # usually redundant; it is spelled out so the dependency is visible rather
+  # than inherited by accident.
   - nonResourceURLs: ["/api", "/api/*", "/apis", "/apis/*", "/openapi", "/openapi/*", "/version"]
     verbs: ["get"]
 ---

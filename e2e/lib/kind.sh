@@ -341,3 +341,36 @@ kind_start_gateway() {
     || fail "gateway did not come back"
   kind_wait_gateway_endpoint
 }
+
+# kind_metrics_server: install metrics-server and block until it actually
+# serves data.
+#
+# Two things make this more than an `apply`. kind's kubelets present
+# self-signed serving certificates, so metrics-server refuses to scrape them
+# without `--kubelet-insecure-tls` -- the Deployment rolls out fine and then
+# reports no metrics forever, which reads exactly like a broken gate.
+#
+# And the APIService going Available is not the same as there being data:
+# metrics-server needs a scrape interval to elapse before any pod has a
+# sample. Waiting on `kubectl top` returning a row is the only check that
+# means what a caller needs it to mean.
+kind_metrics_server() {
+  log "installing metrics-server"
+  kubectl_e2e apply -f "https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml" >/dev/null \
+    || fail "apply metrics-server"
+  kubectl_e2e -n kube-system patch deployment metrics-server --type=json \
+    -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]' >/dev/null \
+    || fail "patch metrics-server for kind's self-signed kubelet certificates"
+  kubectl_e2e -n kube-system rollout status deploy/metrics-server --timeout=180s >/dev/null \
+    || fail "metrics-server did not become ready"
+  local deadline=$((SECONDS + 240))
+  while (( SECONDS < deadline )); do
+    if kubectl_e2e top pods -n kube-system --no-headers 2>/dev/null | grep -q .; then
+      log "metrics-server is serving samples"
+      return 0
+    fi
+    sleep 5
+  done
+  kubectl_e2e -n kube-system logs deploy/metrics-server --tail=30 || true
+  fail "metrics-server never produced a sample"
+}
