@@ -132,19 +132,37 @@ change what appears in SQL, change the ClusterRole.
 That is the bound worth having, because the API server enforces it. A kind you
 have not granted cannot be read even if something asks for it.
 
-The bundled ClusterRole in `deploy/k8s/gateway-rbac.yaml` is a **starting
-point, not a recommendation**. It grants Pods, ConfigMaps, and an example
-custom resource. To add Deployments, which later examples on this site use:
+The bundled RBAC in `deploy/k8s/gateway-rbac.yaml` **reads broadly and
+writes narrowly**. Reads cover everything in Kubernetes' `view` role
+(workloads, ConfigMaps, Services, NetworkPolicies, Ingresses, Events), plus
+nodes, storage, CRDs, RBAC objects, `events.k8s.io` and the metrics APIs.
+**Secrets are never readable.** Until per-caller identity lands, anyone who can
+query a foreign table reads as the gateway.
+
+A custom resource appears if its operator ships an `aggregate-to-view` role.
+If it does not, grant read access with a labelled ClusterRole. The gateway's
+read role picks it up automatically:
 
 ```sh
-kubectl patch clusterrole axiom-gateway --type=json -p '[{
-  "op": "add", "path": "/rules/-",
-  "value": {"apiGroups": ["apps"], "resources": ["deployments"],
-            "verbs": ["get", "list", "watch"]}
-}]'
+kubectl apply -f - <<'YAML'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: axiom-read-cnpg
+  labels:
+    axiom.dhilipkumars.github.io/aggregate-to-gateway: "true"
+rules:
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+YAML
 
 kubectl -n axiom-system rollout restart deploy/axiom-gateway
 ```
+
+Name the API group rather than using `"*"` there: a rule that reaches the core
+group with a wildcard grants Secrets. Writes are separate, and granted per
+resource in the `axiom-gateway` ClusterRole.
 
 Restart the gateway after an RBAC change: it caches what it may read, so the
 new grant appears on the next start. Then re-run `IMPORT FOREIGN SCHEMA`, since

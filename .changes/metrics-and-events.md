@@ -15,8 +15,11 @@ wrongly without erroring. The new `axiom_quantity()` converts them exactly —
 `NULL` for anything malformed so one odd field cannot fail a cluster-wide
 query.
 
-The shipped gateway RBAC now grants `get`/`list`/`watch` cluster-wide, so API
-groups installed after Axiom was deployed appear without an RBAC edit.
-Mutating verbs stay enumerated per resource. A cluster-wide read includes
-Secrets: `deploy/k8s/gateway-rbac.yaml` says what that means and how to narrow
-it.
+The shipped gateway RBAC now reads broadly: everything in Kubernetes' `view`
+role (workloads, ConfigMaps, Services, NetworkPolicies, Ingresses, Events),
+plus nodes, storage, CRDs, RBAC objects, `events.k8s.io` and the resource,
+custom and external metrics APIs. **Secrets are excluded, and cannot be
+reached through it.** Custom resources are included when their operator ships
+an `aggregate-to-view` role, or when you label a read-only ClusterRole with
+`axiom.dhilipkumars.github.io/aggregate-to-gateway: "true"`. Mutating verbs
+stay enumerated per resource.

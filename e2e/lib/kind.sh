@@ -40,7 +40,7 @@ kind_down() {
 # kind_up: ensure the cluster exists, apply deploy/k8s/gateway-rbac.yaml, and
 # write $E2E_GATEWAY_KUBECONFIG: the cluster CA + internal API address (reachable
 # from the compose network) + a 1h token for the gateway ServiceAccount. The
-# token grants only what the ClusterRole allows (pods get/list).
+# token grants only what that RBAC allows.
 kind_up() {
   command -v kind >/dev/null || fail "kind is not installed"
   command -v kubectl >/dev/null || fail "kubectl is not installed"
@@ -57,8 +57,9 @@ kind_up() {
   kind get kubeconfig --name "$E2E_KIND_CLUSTER" > "$E2E_ADMIN_KUBECONFIG"
   chmod 0600 "$E2E_ADMIN_KUBECONFIG"
 
-  log "applying least-privilege gateway RBAC"
+  log "applying gateway RBAC"
   kubectl_e2e apply -f "$E2E_ROOT/deploy/k8s/gateway-rbac.yaml" >/dev/null || fail "apply RBAC"
+  kind_wait_rbac_aggregated
 
   log "writing gateway kubeconfig (SA token, internal API address)"
   local ca="$E2E_KUBE_DIR/cluster-ca.crt" token
@@ -215,6 +216,24 @@ check ownership in $tmp"
 # kind_deploy_gateway [SERVE]: apply the Deployment and wait for it to be ready.
 # SERVE is the --serve allowlist; gates need different values, so it is applied
 # with `kubectl set env` after the manifest rather than baked into it.
+# kind_wait_rbac_aggregated: block until the gateway's read role has been
+# filled in by the aggregation controller.
+#
+# `axiom-gateway-read` has no rules of its own; the controller copies them in
+# from every matching ClusterRole, asynchronously, after the apply returns. The
+# gateway caches access answers for its lifetime, so one that starts inside
+# that window caches "no" for pods and keeps it. One permission from each
+# source is checked: pods from Kubernetes' `view`, nodes from the extra role.
+kind_wait_rbac_aggregated() {
+  local sa="system:serviceaccount:$E2E_GATEWAY_SA_NS:$E2E_GATEWAY_SA"
+  local deadline=$((SECONDS + 60))
+  until [[ "$(kubectl_e2e auth can-i list pods --as="$sa" -A 2>/dev/null)" == "yes" &&
+           "$(kubectl_e2e auth can-i list nodes --as="$sa" 2>/dev/null)" == "yes" ]]; do
+    (( SECONDS < deadline )) || fail "axiom-gateway-read was not aggregated within 60s"
+    sleep 1
+  done
+}
+
 kind_deploy_gateway() {
   local serve="${1:-pods,configmaps,widgets.example.com}"
   # Second argument: how long the gateway trusts a cached resource list.
@@ -225,6 +244,16 @@ kind_deploy_gateway() {
   # load is skipped when the node already has it, so this is safe either way.
   kind_load_gateway_image
   kubectl_e2e apply -f "$E2E_ROOT/deploy/k8s/gateway-rbac.yaml" >/dev/null || fail "apply RBAC"
+  kind_wait_rbac_aggregated
+  # A gate asserting that the tables are *exactly* what its own fixture grants
+  # needs that fixture to be the only read grant; the shipped one is broad by
+  # design. Unbound here, after the apply above and before the restart below,
+  # so the fresh Pod never holds the broad answers. The next gate's apply binds
+  # it again.
+  if [[ "${E2E_UNBIND_SHIPPED_READ:-0}" == "1" ]]; then
+    kubectl_e2e delete clusterrolebinding axiom-gateway-read --ignore-not-found >/dev/null \
+      || fail "unbind the shipped read role"
+  fi
   kind_gateway_tls_secret
   log "deploying the gateway in-cluster (serve=$serve, discovery-ttl=$discovery_ttl)"
   # The checked-in manifest pulls a released tag Always, which is right for an

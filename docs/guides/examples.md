@@ -5,42 +5,28 @@ Things worth doing that are awkward or impossible with `kubectl`.
 These assume you have finished [Getting started](getting-started.md), so server
 `prod` exists and its kinds are imported into schema `k8s`.
 
-!!! warning "Most of these need a kind the shipped RBAC does not grant"
+!!! note "Custom resources and writes may need a grant"
 
-    The ClusterRole in `deploy/k8s/gateway-rbac.yaml` grants **pods**,
-    **configmaps** and the example CRD — nothing else. That is the design, not
-    an oversight: what a query can reach is bounded by the gateway's
-    ServiceAccount, and there is deliberately no wildcard.
+    The shipped RBAC in `deploy/k8s/gateway-rbac.yaml` reads broadly, covering
+    workloads, nodes, networking, storage, events and metrics, so most examples
+    below work as imported. It never reads Secrets, and it writes only
+    ConfigMaps and the example CRD.
 
-    Examples below that use `nodes`, `deployments` or a CRD need that kind
-    granted first: grant, restart, re-import.
-
-    **The API group differs per kind**, and getting it wrong fails silently —
-    the gateway's access check rejects the kind, `IMPORT FOREIGN SCHEMA` simply
-    omits it, and the query then says the relation does not exist:
-
-    | Kind | `apiGroups` | Table |
-    |---|---|---|
-    | `nodes`, `pods`, `configmaps` | `[""]` — the core group | `core_nodes`, `core_pods`, `core_configmaps` |
-    | `deployments` | `["apps"]` | `apps_deployments` |
-    | CloudNativePG `clusters` | `["postgresql.cnpg.io"]` | `postgresql_cnpg_io_clusters` |
+    A **custom resource** is readable if its operator ships an
+    `aggregate-to-view` role. Otherwise, label a read-only ClusterRole for its
+    API group `axiom.dhilipkumars.github.io/aggregate-to-gateway: "true"`
+    ([Getting started](getting-started.md#what-the-gateway-can-see) shows one).
+    To make a kind **writable**, add its verbs to the `axiom-gateway`
+    ClusterRole. Either way, restart the gateway and re-import:
 
     ```sh
-    # nodes: core group, so apiGroups is the empty string
-    kubectl patch clusterrole axiom-gateway --type=json -p='[{"op":"add","path":"/rules/-","value":
-      {"apiGroups":[""],"resources":["nodes"],"verbs":["get","list","watch"]}}]'
-
-    # deployments: apps group
-    kubectl patch clusterrole axiom-gateway --type=json -p='[{"op":"add","path":"/rules/-","value":
-      {"apiGroups":["apps"],"resources":["deployments"],"verbs":["get","list","watch"]}}]'
-
     kubectl -n axiom-system rollout restart deploy/axiom-gateway
     kubectl -n axiom-system rollout status deploy/axiom-gateway
     ```
 
     ```sql
     -- foreign tables are catalog objects; they do not follow an RBAC change
-    IMPORT FOREIGN SCHEMA k8s LIMIT TO (core_nodes, apps_deployments) FROM SERVER prod INTO k8s;
+    IMPORT FOREIGN SCHEMA k8s FROM SERVER prod INTO k8s;
     ```
 
 ## Reading
@@ -151,13 +137,17 @@ events arrive as `events_core` and `events_events_k8s_io`.
 The pod's live state and the warning that explains it, on one row:
 
 ```sql
-SELECT p.name, p.phase, e.reason->>0 AS reason, e.message->>0 AS message
+SELECT p.name, p.phase, e.reason #>> '{}' AS reason, e.message #>> '{}' AS message
   FROM k8s.events_core e
-  JOIN k8s.pods p ON p.namespace = e.namespace
-                 AND p.name = e.involved_object->>'name'
- WHERE e.type->>0 = 'Warning'
+  JOIN k8s.pods_core p ON p.namespace = e.namespace
+                      AND p.name = e.involved_object->>'name'
+ WHERE e.type #>> '{}' = 'Warning'
    AND e.involved_object->>'kind' = 'Pod';
 ```
+
+Event fields such as `type` and `reason` arrive as scalar `jsonb`, so
+`#>> '{}'` unwraps them to text. `type = 'Warning'` does not compare text
+with text; it tries to parse `Warning` as JSON and fails.
 
 ### Quantities are strings until you convert them
 
@@ -200,9 +190,9 @@ owner AS (
     FROM k8s.replicasets r),
 warn AS (
   SELECT e.namespace, e.involved_object->>'name' AS pod,
-         count(*) AS warnings, max(e.reason->>0) AS why
+         count(*) AS warnings, max(e.reason #>> '{}') AS why
     FROM k8s.events_core e
-   WHERE e.type->>0 = 'Warning' AND e.involved_object->>'kind' = 'Pod'
+   WHERE e.type #>> '{}' = 'Warning' AND e.involved_object->>'kind' = 'Pod'
    GROUP BY 1, 2)
 SELECT coalesce(o.workload, s.pod) AS workload,
        count(*) AS pods,
@@ -243,9 +233,10 @@ see.
 
 Usage tables need [metrics-server][ms] installed in the cluster; without it
 `metrics.k8s.io` does not exist and the tables are simply absent. The gateway
-also needs `list` on that group — the shipped RBAC grants cluster-wide reads,
-so a group installed later is picked up on the next discovery refresh with no
-RBAC edit.
+also needs `list` on that group. The shipped RBAC grants it, so metrics-server
+installed later is picked up on the next discovery refresh with no RBAC edit.
+Custom and external metrics APIs, from an adapter such as KEDA or
+prometheus-adapter, are granted the same way.
 
 [ms]: https://github.com/kubernetes-sigs/metrics-server
 
@@ -266,8 +257,9 @@ kubectl wait --for=condition=Available deploy/cnpg-controller-manager \
   -n cnpg-system --timeout=240s
 ```
 
-**Then let the gateway see the kind.** What a query can reach is bounded by the
-gateway's RBAC, and nothing grants CNPG by default:
+**Then let the gateway write the kind.** Reads may already be covered, but the
+shipped RBAC grants writes only per resource, and these examples create and
+scale clusters:
 
 ```sh
 kubectl patch clusterrole axiom-gateway --type=json -p='[{"op":"add","path":"/rules/-","value":

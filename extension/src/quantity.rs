@@ -81,6 +81,20 @@ fn split(q: &str) -> Option<(i128, i32, &str, bool)> {
     Some((digits, exponent, suffix, negative))
 }
 
+/// The largest decimal exponent, either sign, that a quantity may carry.
+///
+/// Real quantities span a few dozen orders of magnitude at most. The bound
+/// exists because `render` writes one character per order: unbounded,
+/// `1e2000000000` would ask a backend for two gigabytes, and the argument can
+/// come from any SQL caller, not only from Kubernetes.
+const MAX_EXPONENT: i32 = 64;
+
+fn bounded(exponent: i32) -> Option<i32> {
+    (-MAX_EXPONENT..=MAX_EXPONENT)
+        .contains(&exponent)
+        .then_some(exponent)
+}
+
 /// Renders `digits * 10^exponent` as a decimal string `numeric` parses exactly.
 fn render(digits: i128, exponent: i32, negative: bool) -> String {
     let sign = if negative && digits != 0 { "-" } else { "" };
@@ -110,17 +124,17 @@ pub fn parse(q: &str) -> Option<String> {
     if let Some(power) = binary_power(suffix) {
         let factor = 1024_i128.checked_pow(power)?;
         let scaled = digits.checked_mul(factor)?;
-        return Some(render(scaled, frac_exponent, negative));
+        return Some(render(scaled, bounded(frac_exponent)?, negative));
     }
-    // A bare exponent form, `1e3`, is legal in the Kubernetes grammar.
-    if let Some(exp) = suffix.strip_prefix(['e', 'E']) {
-        let exp: i32 = exp.parse().ok()?;
-        return Some(render(digits, frac_exponent.checked_add(exp)?, negative));
-    }
-    let exponent = decimal_exponent(suffix)?;
+    // SI suffixes before the exponent form, because `E` is both: `1E` is an
+    // exa, `1E3` is a thousand.
+    let exponent = match decimal_exponent(suffix) {
+        Some(e) => e,
+        None => suffix.strip_prefix(['e', 'E'])?.parse().ok()?,
+    };
     Some(render(
         digits,
-        frac_exponent.checked_add(exponent)?,
+        bounded(frac_exponent.checked_add(exponent)?)?,
         negative,
     ))
 }
@@ -165,6 +179,9 @@ mod tests {
         assert_eq!(p("1M").as_deref(), Some("1000000"));
         // The distinction that matters: M is not Mi.
         assert_ne!(p("1M"), p("1Mi"));
+        // `E` is the exa suffix as well as the exponent marker.
+        assert_eq!(p("1E").as_deref(), Some("1000000000000000000"));
+        assert_eq!(p("2P").as_deref(), Some("2000000000000000"));
     }
 
     #[test]
@@ -179,6 +196,20 @@ mod tests {
         assert_eq!(p("1e3").as_deref(), Some("1000"));
         assert_eq!(p("1.5e3").as_deref(), Some("1500"));
         assert_eq!(p("1e-3").as_deref(), Some("0.001"));
+        assert_eq!(p("1E3").as_deref(), Some("1000"));
+        assert_eq!(p("1e+3").as_deref(), Some("1000"));
+    }
+
+    #[test]
+    fn exponents_are_bounded_so_output_size_is_too() {
+        // Each would otherwise render one character per order of magnitude.
+        assert_eq!(p("1e2000000000"), None);
+        assert_eq!(p("1e-2000000000"), None);
+        assert_eq!(p("1e65"), None);
+        assert_eq!(p("1e-2147483648"), None);
+        assert_eq!(p("1e64").as_deref().map(str::len), Some(65));
+        assert_eq!(p("1.5e-63").as_deref().map(str::len), Some(66));
+        assert_eq!(p("1e"), None);
     }
 
     #[test]

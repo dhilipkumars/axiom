@@ -38,7 +38,14 @@ phase5_rbac_down() {
 
 stack_up
 # "*.*" so RBAC is the only bound on what is offered -- the whole point of this gate.
-kind_deploy_gateway "*.*"
+# And the fixture as the only *read* grant, so the exact table set asserted below
+# is a consequence of it rather than of Kubernetes' `view` role, which the
+# shipped RBAC aggregates.
+E2E_UNBIND_SHIPPED_READ=1 kind_deploy_gateway "*.*"
+e2e_on_teardown shipped_read_restore
+shipped_read_restore() {
+  kubectl_e2e apply -f "$E2E_ROOT/deploy/k8s/gateway-rbac.yaml" >/dev/null 2>&1 || true
+}
 
 log "the gateway reports RBAC as its only bound"
 stack_logs "$E2E_SVC_GATEWAY" | grep -q '"bounded_by":"rbac"' \

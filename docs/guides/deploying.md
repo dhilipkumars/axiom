@@ -9,7 +9,8 @@ This is how the gateway is meant to run, and what every end-to-end gate
 exercises. The manifests are in `deploy/k8s/`:
 
 - `gateway-rbac.yaml` — the `axiom-system` namespace, the `axiom-gateway`
-  ServiceAccount, and the ClusterRole that decides what it may read and write.
+  ServiceAccount, and the ClusterRoles that decide what it may read and write:
+  broad reads that never include Secrets, and writes granted per resource.
   This is the only thing that bounds what appears in SQL.
 - `gateway-deployment.yaml` — the Deployment and a `NodePort` Service.
 

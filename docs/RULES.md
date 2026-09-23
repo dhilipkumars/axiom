@@ -63,18 +63,18 @@ this mechanically as possible rather than relying on review discipline alone.
   deployment intends SQL to change, and never a cluster-admin binding — not even
   in the POC phases. Blast radius lives in the write rules, and they stay
   enumerated.
-  Reads are the deliberate exception: the shipped default grants `get`/`list`/
-  `watch` cluster-wide, because discovery *is* the product. Axiom offers exactly
-  what this identity may list, so a curated read list is a curated set of tables,
-  and any kind a deployment did not anticipate — including API groups installed
-  later by someone else, such as `metrics.k8s.io` — is absent at the moment
-  someone thinks to ask about it. A wildcard read cannot change cluster state
-  and the API server still enforces it.
-  The cost is explicit: a cluster-wide read includes Secrets, and until
-  per-caller identity lands every Postgres role reaches Kubernetes as this one
-  identity. Deployments that cannot accept that narrow the read rule to an
-  enumerated list; `deploy/k8s/gateway-rbac.yaml` says how, and narrowing
-  removes tables rather than breaking anything.
+  Reads are deliberately broad, because discovery *is* the product: Axiom
+  offers exactly what this identity may list, so a curated read list is a
+  curated set of tables. The shipped role aggregates Kubernetes' own `view`
+  role plus an explicit list of what `view` leaves out, so workloads,
+  networking, events, metrics and labelled custom resources are all readable,
+  including API groups installed later.
+  **Secrets are never readable.** RBAC has no deny rule, so any
+  `resources: ["*"]` that reaches the core group grants them. The read grant
+  therefore never uses a wildcard there, and the metrics gate asserts that the
+  gateway cannot read Secrets. Until per-caller identity lands, every Postgres
+  role reaches Kubernetes as this one identity, so a Secret this identity
+  could read would be readable by anyone with `SELECT`.
   Extend this per-caller once Phase 7 auth lands (per-Postgres-role RBAC identity,
   DESIGN.md §7) — Phase 7 is not "add auth," it's "add the *per-caller* layer,"
   and it is what makes the cluster-wide read default safe on a shared database.
