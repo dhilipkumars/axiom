@@ -271,11 +271,11 @@ CREATE SERVER kind FOREIGN DATA WRAPPER axiom_fdw
 
 CREATE SCHEMA crds;
 IMPORT FOREIGN SCHEMA "example.com" FROM SERVER kind INTO crds;   -- just the CRD group
-\d crds.widgets                                                   -- columns discovery chose
+\d crds.example_com_widgets                                       -- columns discovery chose
 
 -- The generated DDL carries the resolved identity, which is why no scan needs discovery
 SELECT ftoptions FROM pg_foreign_table ft
-  JOIN pg_class c ON c.oid = ft.ftrelid WHERE c.relname = 'widgets';
+  JOIN pg_class c ON c.oid = ft.ftrelid WHERE c.relname = 'example_com_widgets';
 ```
 
 **Read a CRD through the generic projection.** No Rust knows what a Widget is;
