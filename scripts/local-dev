@@ -216,7 +216,6 @@ $(AXIOM_KUBECONFIG="$kubeconfig" compose logs --tail 15 gateway 2>&1 | sed 's/^/
   say "stop:  make local-dev-down"
   say ""
   say "  SELECT namespace, name, phase FROM k8s.core_pods LIMIT 5;"
-  say "  -- short names such as k8s.pods are views: SELECT * FROM axiom_create_short_names('k8s');"
 }
 
 case "${1:-}" in

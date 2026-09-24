@@ -18,13 +18,25 @@ depends only on its own group and resource.
 The old spelling imports nothing and raises a `WARNING` naming the table you
 probably meant.
 
-**To keep existing queries working**, run this once after re-importing:
+**To keep existing queries working**, rebuild the schema and ask for short
+names. Axiom has no extension upgrade scripts yet (#65), so a new version is a
+fresh `CREATE EXTENSION` anyway. The old tables have to go first: a re-import
+beside them would leave the old `k8s.pods` table in the way of the new
+`k8s.pods` view.
 
 ```sql
+DROP EXTENSION axiom CASCADE;   -- also drops servers, mappings, foreign tables
+CREATE EXTENSION axiom;
+-- recreate the server and user mapping as before, then:
+CREATE SCHEMA IF NOT EXISTS k8s;
+IMPORT FOREIGN SCHEMA k8s FROM SERVER prod INTO k8s;
 SELECT * FROM axiom_create_short_names('k8s');
 ```
 
-It creates views such as `k8s.pods` over the new tables. The core group gets
-the bare plural. Any other plural shared by two groups is reported rather than
-guessed, and `axiom_create_short_name` lets you choose. An existing object is
-never replaced.
+This creates views such as `k8s.pods` over the new tables. The core group gets
+the bare plural. A plural shared by two other groups is reported rather than
+guessed, and you can pick one with `axiom_create_short_name`. An existing
+object is never replaced. Any views of your own that the `CASCADE` dropped can
+be recreated verbatim, since `k8s.pods` exists again. Grant `SELECT` on the
+short name *and* on the table behind it: the views are `security_invoker`, so
+they check the querying role's privileges on both.

@@ -36,7 +36,7 @@
 use pgrx::prelude::*;
 
 extension_sql!(
-    r#"
+    r"
 CREATE FUNCTION axiom_create_short_name(schema_name text, short_name text, target text)
 RETURNS text
 LANGUAGE plpgsql
@@ -141,7 +141,7 @@ $fn$;
 
 COMMENT ON FUNCTION axiom_create_short_names(text, text) IS
     'Creates a view named for each resource plural over the matching axiom foreign table in schema_name. The core group wins a shared plural; any other ambiguity is reported and skipped.';
-"#,
+",
     name = "axiom_short_names",
     requires = ["axiom_fdw_wrapper"],
 );

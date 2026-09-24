@@ -89,7 +89,8 @@ SELECT * FROM axiom_create_short_names('k8s');
 
 Reads and writes through a short name behave exactly as they do on the table.
 Each view uses `security_invoker`, so it checks the caller's privileges, not
-its creator's.
+its creator's. A role therefore needs its grant on both the view and the table
+behind it: `GRANT SELECT ON k8s.pods, k8s.core_pods TO app;`.
 
 A view does not survive dropping the table under it. Refreshing an import
 means `DROP ... CASCADE` and importing again, so call
