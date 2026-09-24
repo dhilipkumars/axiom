@@ -97,7 +97,7 @@ stack_up
 # group, so both halves of both are served: the gate asserts the disambiguated
 # names. Serving only one half of a pair means no collision, and the metrics
 # table keeps the bare name.
-kind_deploy_gateway "pods,nodes,events,pods.metrics.k8s.io,nodes.metrics.k8s.io"
+kind_deploy_gateway "pods,nodes,events,events.events.k8s.io,pods.metrics.k8s.io,nodes.metrics.k8s.io"
 
 log "applying fixture pods and waiting for Ready"
 kind_apply "$here/fixtures/pods.yaml"
