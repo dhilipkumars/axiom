@@ -94,8 +94,10 @@ done
 probe_role_down
 stack_up
 # metrics.k8s.io names its resources `pods` and `nodes`, the same as the core
-# group, so both are served here: the gate asserts the disambiguated names.
-kind_deploy_gateway "pods,events,pods.metrics.k8s.io,nodes.metrics.k8s.io"
+# group, so both halves of both are served: the gate asserts the disambiguated
+# names. Serving only one half of a pair means no collision, and the metrics
+# table keeps the bare name.
+kind_deploy_gateway "pods,nodes,events,pods.metrics.k8s.io,nodes.metrics.k8s.io"
 
 log "applying fixture pods and waiting for Ready"
 kind_apply "$here/fixtures/pods.yaml"
@@ -115,6 +117,12 @@ got="$(psql_axiom "SELECT string_agg(foreign_table_name, ',' ORDER BY foreign_ta
                       AND foreign_table_name LIKE 'pods%';")"
 [[ "$got" == "pods_core,pods_metrics_k8s_io" ]] \
   || fail "expected pods_core,pods_metrics_k8s_io from the collision rule; got '$got'"
+got="$(psql_axiom "SELECT string_agg(foreign_table_name, ',' ORDER BY foreign_table_name)
+                     FROM information_schema.foreign_tables
+                    WHERE foreign_table_schema = 'k8s'
+                      AND foreign_table_name LIKE 'nodes%';")"
+[[ "$got" == "nodes_core,nodes_metrics_k8s_io" ]] \
+  || fail "expected nodes_core,nodes_metrics_k8s_io from the collision rule; got '$got'"
 
 log "metrics reach SQL through the gateway ServiceAccount, and cover the fixture pods"
 # The fixture pods are seconds old, and metrics-server reports a pod only after
