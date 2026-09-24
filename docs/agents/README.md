@@ -13,7 +13,7 @@ scripts/agy-role architect "Review docs/AUTH.md for ..."
 
 | Brief | Model | Use for |
 |---|---|---|
-| [architect.md](./architect.md) | `Gemini 3.8 Flash (Medium)` | design review, adversarial brainstorming |
+| [architect.md](./architect.md) | `Gemini 3.8 Flash (High)` | design review, adversarial brainstorming |
 
 **Only this one role.** Junior-engineer and worker roles were tried and dropped:
 generated code needed correcting both times and reviewing it cost about what
