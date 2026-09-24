@@ -287,7 +287,7 @@ SQL
   kubectl --context "kind-$CLUSTER" -n kube-system wait --for=condition=Ready pod --all --timeout=180s >/dev/null \
     || fail "pg${pg}: kube-system stopped being settled; the comparison would be a coin toss"
   sql_pods="$(docker exec "$CONTAINER" psql -U postgres -tAF'|' -c \
-    "SELECT name, phase, node FROM k8s.pods WHERE namespace='kube-system' ORDER BY name COLLATE \"C\"")"
+    "SELECT name, phase, node FROM k8s.core_pods WHERE namespace='kube-system' ORDER BY name COLLATE \"C\"")"
   kubectl_pods="$(kubectl --context "kind-$CLUSTER" -n kube-system get pods \
     -o jsonpath='{range .items[*]}{.metadata.name}|{.status.phase}|{.spec.nodeName}{"\n"}{end}' \
     | LC_ALL=C sort)"

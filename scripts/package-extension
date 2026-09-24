@@ -143,7 +143,7 @@ this Postgres at one there is nothing to query:
     CREATE SCHEMA k8s;
     IMPORT FOREIGN SCHEMA k8s FROM SERVER prod INTO k8s;
 
-    SELECT name, namespace, phase FROM k8s.pods;
+    SELECT name, namespace, phase FROM k8s.core_pods;
 
 \`endpoint\` has to be an address this database server can reach.
 

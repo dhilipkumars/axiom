@@ -19,11 +19,11 @@ These assume you have finished [Getting started](getting-started.md), so server
     the gateway's access check rejects the kind, `IMPORT FOREIGN SCHEMA` simply
     omits it, and the query then says the relation does not exist:
 
-    | Kind | `apiGroups` |
-    |---|---|
-    | `nodes`, `pods`, `configmaps` | `[""]` — the core group |
-    | `deployments` | `["apps"]` |
-    | CloudNativePG `clusters` | `["postgresql.cnpg.io"]` |
+    | Kind | `apiGroups` | Table |
+    |---|---|---|
+    | `nodes`, `pods`, `configmaps` | `[""]` — the core group | `core_nodes`, `core_pods`, `core_configmaps` |
+    | `deployments` | `["apps"]` | `apps_deployments` |
+    | CloudNativePG `clusters` | `["postgresql.cnpg.io"]` | `postgresql_cnpg_io_clusters` |
 
     ```sh
     # nodes: core group, so apiGroups is the empty string
@@ -40,7 +40,7 @@ These assume you have finished [Getting started](getting-started.md), so server
 
     ```sql
     -- foreign tables are catalog objects; they do not follow an RBAC change
-    IMPORT FOREIGN SCHEMA k8s LIMIT TO (nodes, deployments) FROM SERVER prod INTO k8s;
+    IMPORT FOREIGN SCHEMA k8s LIMIT TO (core_nodes, apps_deployments) FROM SERVER prod INTO k8s;
     ```
 
 ## Reading
@@ -51,8 +51,8 @@ These assume you have finished [Getting started](getting-started.md), so server
 
 ```sql
 SELECT p.namespace, p.name, n.name AS node
-FROM k8s.pods p
-JOIN k8s.nodes n ON n.name = p.node
+FROM k8s.core_pods p
+JOIN k8s.core_nodes n ON n.name = p.node
 WHERE n.status->'conditions' @> '[{"type":"MemoryPressure","status":"True"}]';
 ```
 
@@ -62,7 +62,7 @@ Where are pods failing, and how:
 
 ```sql
 SELECT namespace, phase, count(*)
-FROM k8s.pods
+FROM k8s.core_pods
 WHERE phase <> 'Running'
 GROUP BY namespace, phase
 ORDER BY count(*) DESC;
@@ -75,7 +75,7 @@ object — deployments that never finished rolling out:
 
 ```sql
 SELECT namespace, name, replicas, ready_replicas
-FROM k8s.deployments
+FROM k8s.apps_deployments
 WHERE coalesce(ready_replicas, '0')::int < replicas::int;
 ```
 
@@ -85,7 +85,7 @@ through `raw`:
 
 ```sql
 SELECT namespace, name
-FROM k8s.deployments
+FROM k8s.apps_deployments
 WHERE raw->'spec'->'template'->'spec'->'containers' @> '[{"imagePullPolicy":"Always"}]';
 ```
 
@@ -98,7 +98,7 @@ exactly the kind of nested field `kubectl` cannot filter on:
 
 ```sql
 SELECT namespace, name
-FROM k8s.pods
+FROM k8s.core_pods
 WHERE raw->'status'->'containerStatuses' @>
       '[{"state":{"waiting":{"reason":"CrashLoopBackOff"}}}]';
 ```
@@ -111,10 +111,10 @@ treat it as the shape rather than something to paste:
 
 ```sql
 -- after CREATE SERVER stage ... and IMPORT ... INTO stage
-SELECT 'prod' AS cluster, namespace, name FROM k8s.pods
+SELECT 'prod' AS cluster, namespace, name FROM k8s.core_pods
 WHERE raw->'status'->'containerStatuses' @> '[{"state":{"waiting":{"reason":"CrashLoopBackOff"}}}]'
 UNION ALL
-SELECT 'stage', namespace, name FROM stage.pods
+SELECT 'stage', namespace, name FROM stage.core_pods
 WHERE raw->'status'->'containerStatuses' @> '[{"state":{"waiting":{"reason":"CrashLoopBackOff"}}}]';
 ```
 
@@ -124,15 +124,15 @@ WHERE raw->'status'->'containerStatuses' @> '[{"state":{"waiting":{"reason":"Cra
 a SQL error rather than silently winning.
 
 ```sql
-UPDATE k8s.configmaps
+UPDATE k8s.core_configmaps
    SET data = data || '{"LOG_LEVEL":"debug"}'
  WHERE namespace = 'payments' AND name = 'api';
 
-DELETE FROM k8s.configmaps WHERE namespace = 'staging' AND name = 'stale-flags';
+DELETE FROM k8s.core_configmaps WHERE namespace = 'staging' AND name = 'stale-flags';
 ```
 
 **Pods are read-only at the SQL layer**, whatever RBAC allows. `DELETE FROM
-k8s.pods` raises `0A000 foreign tables on pods are read-only` rather than
+k8s.core_pods` raises `0A000 foreign tables on pods are read-only` rather than
 evicting anything — deleting a pod by `WHERE` clause is too easy to do by
 accident and too hard to undo.
 
@@ -169,7 +169,7 @@ Foreign tables are catalog objects and do not follow an RBAC change, so import
 the kind after restarting:
 
 ```sql
-IMPORT FOREIGN SCHEMA k8s LIMIT TO (clusters) FROM SERVER prod INTO k8s;
+IMPORT FOREIGN SCHEMA k8s LIMIT TO (postgresql_cnpg_io_clusters) FROM SERVER prod INTO k8s;
 ```
 
 That produces the usual shape — the universal columns, the kind's own top-level
@@ -193,7 +193,7 @@ FDW options: (resource 'clusters', "group" 'postgresql.cnpg.io', version 'v1', k
 Now create one:
 
 ```sql
-INSERT INTO k8s.clusters (namespace, name, spec) VALUES (
+INSERT INTO k8s.postgresql_cnpg_io_clusters (namespace, name, spec) VALUES (
   'default', 'demo-db',
   '{"instances": 1, "storage": {"size": "256Mi"}}'::jsonb
 );
@@ -215,7 +215,7 @@ Watch it come up without leaving SQL:
 
 ```sql
 SELECT name, status->>'phase' AS phase, status->>'readyInstances' AS ready
-FROM k8s.clusters WHERE namespace = 'default';
+FROM k8s.postgresql_cnpg_io_clusters WHERE namespace = 'default';
 ```
 
 ### Scale it with an UPDATE
@@ -223,7 +223,7 @@ FROM k8s.clusters WHERE namespace = 'default';
 `spec` is a `jsonb` column, so changing the cluster is a `jsonb_set`:
 
 ```sql
-UPDATE k8s.clusters
+UPDATE k8s.postgresql_cnpg_io_clusters
    SET spec = jsonb_set(spec, '{instances}', '3')
  WHERE namespace = 'default' AND name = 'demo-db';
 ```

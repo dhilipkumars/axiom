@@ -293,6 +293,12 @@ Tasks:
   name, the second `CREATE` fails, and the whole `IMPORT` fails with it. Use the
   bare plural when it is unique and suffix the group only when ambiguous, so one
   collision does not uglify the other 64 names.
+  **Superseded (#80):** suffixing only on collision made a table's name depend
+  on what else the cluster served, so installing metrics-server renamed `pods`
+  to `pods_core`, and CRDs sharing a plural renamed each other. Every name is
+  now `<group>_<plural>` (`core_pods`, `apps_deployments`), a function of the
+  kind alone; short names are opt-in views from `axiom_create_short_names`.
+  `docs/guides/querying.md` has the rule.
 - [x] **`api_version`, `kind` and `metadata` as columns.** These are the only
   three fields guaranteed on every Kubernetes object — `spec` is present on 67%
   of built-in kinds and `status` on 47%, so neither is a safe basis for anything
@@ -314,9 +320,10 @@ rather than working around it; it is also the clearest argument for keeping
 import asks about every kind at once, and RBAC does not change mid-import), so
 a changed ClusterRole needs a restart — the gate asserts that path too.
 
-Disambiguation is a property of the imported *set*, not a permanent rename: once
-one half of the `events` collision is revoked, the survivor reclaims the bare
-`events` name. The gate asserts that as well.
+~~Disambiguation is a property of the imported *set*, not a permanent rename:
+once one half of the `events` collision is revoked, the survivor reclaims the
+bare `events` name.~~ That reclaim was the silent rename #80 reported. The gate
+now asserts the opposite: `core_events` keeps its name across the revocation.
 
 **A pre-existing read bug surfaced here**: `List` served any name filter with a
 point `Get`, which for a namespaced kind with no namespace omits the namespace
@@ -574,7 +581,7 @@ A's identity fetched. Options, to be chosen deliberately:
 
 **3. Kubernetes denies, it does not filter.** A cluster-wide `LIST` by an
 identity without cluster-wide list permission returns 403 — it does not return
-the subset that identity may see. So `SELECT * FROM prod.pods` for a
+the subset that identity may see. So `SELECT * FROM prod.core_pods` for a
 namespace-scoped role fails outright rather than returning that role's
 namespaces. Either that becomes documented behaviour ("add a namespace qual"),
 or the gateway discovers the caller's permitted namespaces and fans out per

@@ -238,8 +238,8 @@ docker exec axiom-postgres psql -U postgres -tAc \
   "SELECT count(*) FROM information_schema.tables WHERE table_schema='k8s'"
 ```
 
-On a cluster created by step 1, expect **exactly 2** — `k8s.pods` and
-`k8s.configmaps`.
+On a cluster created by step 1, expect **exactly 2** — `k8s.core_pods` and
+`k8s.core_configmaps`.
 
 Two things decide that, and only together. The bundled ClusterRole
 `axiom-gateway` grants three kinds: pods, configmaps, and an example
@@ -254,7 +254,7 @@ caches what it may access — then import again.
 
 ```sh
 docker exec axiom-postgres psql -U postgres -c \
-  "SELECT name, namespace, phase, node FROM k8s.pods WHERE namespace='kube-system' ORDER BY name"
+  "SELECT name, namespace, phase, node FROM k8s.core_pods WHERE namespace='kube-system' ORDER BY name"
 ```
 
 **The environment is working when this returns the cluster's `kube-system`

@@ -60,27 +60,30 @@ echo "tables: $got"
 
 can_i() { kubectl_e2e --as="$SA" auth can-i "$1" "$2" -n "$NS" 2>/dev/null || true; }
 can_i_cluster() { kubectl_e2e --as="$SA" auth can-i "$1" "$2" 2>/dev/null || true; }
-# Listable kinds in the apps group, as table names. The fixture grants apps/*,
-# and which kinds that covers depends on the cluster version.
+# Listable kinds in the apps group, as table names (`apps_<plural>`). The
+# fixture grants apps/*, and which kinds that covers depends on the cluster
+# version.
 apps_kinds() {
   kubectl_e2e api-resources --api-group=apps --verbs=list -o name 2>/dev/null |
-    sed 's/\..*//' | sort -u
+    sed 's/\..*//' | sort -u | sed 's/^/apps_/'
 }
+# has_table NAME: whether the comma-separated $got holds exactly that table.
+has_table() { [[ ",$got," == *",$1,"* ]]; }
 
 log "every kind RBAC permits became a table, and nothing else did"
 # Granted explicitly in the fixture.
-for want in configmaps pods widgets events_core events_events_k8s_io; do
-  grep -q "\b$want\b" <<<"$got" || fail "expected a table for '$want', got: $got"
+for want in core_configmaps core_pods example_com_widgets core_events events_k8s_io_events; do
+  has_table "$want" || fail "expected a table for '$want', got: $got"
 done
 # The fixture grants apps/* , so every listable kind in that group must appear.
 # Derived rather than listed: which kinds `apps` holds varies by cluster version,
 # and hardcoding one version's set is what broke this gate in CI before.
 for want in $(apps_kinds); do
-  grep -q "\b$want\b" <<<"$got" || fail "apps/* is granted but '$want' was not offered: $got"
+  has_table "$want" || fail "apps/* is granted but '$want' was not offered: $got"
 done
 # Present in the cluster, allowed by --serve, but NOT granted to the identity.
-for unwanted in secrets nodes namespaces serviceaccounts persistentvolumes; do
-  grep -q "\b$unwanted\b" <<<"$got" && fail "'$unwanted' is not granted by RBAC but was offered: $got"
+for unwanted in core_secrets core_nodes core_namespaces core_serviceaccounts core_persistentvolumes; do
+  has_table "$unwanted" && fail "'$unwanted' is not granted by RBAC but was offered: $got"
 done
 # The set is exactly what the identity may list. That is the five kinds this
 # fixture grants, plus whatever Kubernetes grants every ServiceAccount through
@@ -90,11 +93,11 @@ done
 # property under test is "the tables are exactly the listable kinds", not any
 # particular list. Following RBAC honestly means offering the extras, and that
 # is precisely why --serve survives as optional narrowing.
-want="configmaps,events_core,events_events_k8s_io,pods,widgets"
+want="core_configmaps,core_events,events_k8s_io_events,core_pods,example_com_widgets"
 for k in $(apps_kinds); do want="$want,$k"; done
-for extra in clustertrustbundles; do
+for extra in clustertrustbundles.certificates.k8s.io; do
   if [[ "$(can_i_cluster list "$extra")" == "yes" ]]; then
-    want="$want,$extra"
+    want="$want,certificates_k8s_io_${extra%%.*}"
     log "note: $extra is granted by a built-in binding, not by this fixture, so it is offered"
   fi
 done
@@ -113,43 +116,43 @@ done
 
 # --- the events collision -----------------------------------------------------------
 
-log "the events collision produced two distinct, queryable tables"
-core_kind="$(psql_axiom "SELECT DISTINCT kind FROM $SCHEMA.events_core LIMIT 1;")"
-new_kind="$(psql_axiom "SELECT DISTINCT kind FROM $SCHEMA.events_events_k8s_io LIMIT 1;")"
-[[ "$core_kind" == "Event" ]] || fail "events_core kind column is '$core_kind'"
-[[ "$new_kind" == "Event" ]] || fail "events_events_k8s_io kind column is '$new_kind'"
-core_api="$(psql_axiom "SELECT DISTINCT api_version FROM $SCHEMA.events_core LIMIT 1;")"
-new_api="$(psql_axiom "SELECT DISTINCT api_version FROM $SCHEMA.events_events_k8s_io LIMIT 1;")"
-[[ "$core_api" == "v1" ]] || fail "events_core api_version is '$core_api', want v1"
-[[ "$new_api" == "events.k8s.io/v1" ]] || fail "events_events_k8s_io api_version is '$new_api'"
+log "the two events APIs are two distinct, queryable tables, each named for its group"
+core_kind="$(psql_axiom "SELECT DISTINCT kind FROM $SCHEMA.core_events LIMIT 1;")"
+new_kind="$(psql_axiom "SELECT DISTINCT kind FROM $SCHEMA.events_k8s_io_events LIMIT 1;")"
+[[ "$core_kind" == "Event" ]] || fail "core_events kind column is '$core_kind'"
+[[ "$new_kind" == "Event" ]] || fail "events_k8s_io_events kind column is '$new_kind'"
+core_api="$(psql_axiom "SELECT DISTINCT api_version FROM $SCHEMA.core_events LIMIT 1;")"
+new_api="$(psql_axiom "SELECT DISTINCT api_version FROM $SCHEMA.events_k8s_io_events LIMIT 1;")"
+[[ "$core_api" == "v1" ]] || fail "core_events api_version is '$core_api', want v1"
+[[ "$new_api" == "events.k8s.io/v1" ]] || fail "events_k8s_io_events api_version is '$new_api'"
 echo "core=$core_api  new=$new_api"
-# Neither may hold the bare name: `events` would silently mean one of them.
-grep -q '\bevents\b,' <<<"$got," && fail "a bare 'events' table exists: $got"
+# No table carries a bare plural: every name is qualified by its group.
+has_table events && fail "a bare 'events' table exists: $got"
 
 # --- the universal columns ----------------------------------------------------------
 
 log "api_version, kind and metadata are populated on a built-in and on a CRD"
-got="$(psql_axiom "SELECT api_version || '|' || kind || '|' || (metadata->>'name') FROM $SCHEMA.pods WHERE namespace = 'kube-system' ORDER BY name LIMIT 1;")"
+got="$(psql_axiom "SELECT api_version || '|' || kind || '|' || (metadata->>'name') FROM $SCHEMA.core_pods WHERE namespace = 'kube-system' ORDER BY name LIMIT 1;")"
 [[ "$got" == v1\|Pod\|* ]] || fail "pods universal columns: '$got'"
 echo "pod:    $got"
-got="$(psql_axiom "SELECT api_version || '|' || kind || '|' || (metadata->>'name') FROM $SCHEMA.widgets WHERE namespace = '$NS' AND name = 'sprocket';")"
+got="$(psql_axiom "SELECT api_version || '|' || kind || '|' || (metadata->>'name') FROM $SCHEMA.example_com_widgets WHERE namespace = '$NS' AND name = 'sprocket';")"
 [[ "$got" == "example.com/v1|Widget|sprocket" ]] || fail "widget universal columns: '$got'"
 echo "widget: $got"
 
 log "metadata carries fields no individual column promotes"
-got="$(psql_axiom "SELECT metadata ? 'uid' AND metadata ? 'creationTimestamp' FROM $SCHEMA.widgets WHERE name = 'sprocket';")"
+got="$(psql_axiom "SELECT metadata ? 'uid' AND metadata ? 'creationTimestamp' FROM $SCHEMA.example_com_widgets WHERE name = 'sprocket';")"
 [[ "$got" == "t" ]] || fail "metadata is missing fields it should carry: '$got'"
 
 log "the universal columns are the basis for a query spanning kinds"
 got="$(psql_axiom "SELECT string_agg(kind, ',' ORDER BY kind) FROM (
-  (SELECT kind FROM $SCHEMA.pods WHERE namespace = 'kube-system' LIMIT 1)
-  UNION ALL (SELECT kind FROM $SCHEMA.widgets WHERE namespace = '$NS' LIMIT 1)
-  UNION ALL (SELECT kind FROM $SCHEMA.configmaps WHERE namespace = 'kube-system' LIMIT 1)) u;")"
+  (SELECT kind FROM $SCHEMA.core_pods WHERE namespace = 'kube-system' LIMIT 1)
+  UNION ALL (SELECT kind FROM $SCHEMA.example_com_widgets WHERE namespace = '$NS' LIMIT 1)
+  UNION ALL (SELECT kind FROM $SCHEMA.core_configmaps WHERE namespace = 'kube-system' LIMIT 1)) u;")"
 [[ "$got" == "ConfigMap,Pod,Widget" ]] || fail "cross-kind union gave '$got'"
 echo "union over three kinds: $got"
 
 log "server-managed universal columns are refused on write"
-got="$(psql_axiom "DO \$\$ BEGIN UPDATE $SCHEMA.widgets SET kind = 'Forged' WHERE name = 'sprocket'; RAISE EXCEPTION 'unexpected success';
+got="$(psql_axiom "DO \$\$ BEGIN UPDATE $SCHEMA.example_com_widgets SET kind = 'Forged' WHERE name = 'sprocket'; RAISE EXCEPTION 'unexpected success';
   EXCEPTION WHEN feature_not_supported THEN RAISE NOTICE 'caught %', SQLSTATE; END \$\$;" 2>&1 || true)"
 grep -q "caught 0A000" <<<"$got" || fail "writing kind should raise 0A000, got: $got"
 
@@ -192,12 +195,15 @@ psql_axiom "DROP SCHEMA IF EXISTS narrowed CASCADE;" >/dev/null
 psql_axiom "CREATE SCHEMA narrowed;"
 psql_axiom "IMPORT FOREIGN SCHEMA k8s FROM SERVER $SCHEMA INTO narrowed;"
 got="$(psql_axiom "SELECT string_agg(c.relname, ',' ORDER BY c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'narrowed' AND c.relkind = 'f';")"
-grep -q "events_events_k8s_io" <<<"$got" && fail "events.k8s.io survived an RBAC revocation: $got"
-grep -q "pods" <<<"$got" || fail "revoking events.k8s.io should not have affected pods: $got"
-# With only one `events` left there is no collision, so it reclaims the bare
-# name: disambiguation is a property of the set, not a permanent rename.
-grep -q "\bevents\b" <<<"$got" || fail "the surviving core events should now be plain 'events': $got"
-grep -q "events_core" <<<"$got" && fail "'events_core' should not persist once the collision is gone: $got"
+has_table events_k8s_io_events && fail "events.k8s.io survived an RBAC revocation: $got"
+has_table core_pods || fail "revoking events.k8s.io should not have affected pods: $got"
+# #80's regression test. Core events keep exactly the name they had while
+# events.k8s.io sat beside them: a table's name depends on its own group and
+# plural, never on what else is imported. This used to assert the opposite --
+# that core events reclaimed the bare name `events` -- which is the silent
+# rename #80 reported.
+has_table core_events || fail "core events were renamed when events.k8s.io went away: $got"
+has_table events && fail "core events reclaimed the bare name 'events': $got"
 echo "after revocation: $got"
 
 log "cleanup"

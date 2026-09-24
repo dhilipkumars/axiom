@@ -8,7 +8,7 @@ against what your own database knows is one query instead of a script.
 
 ```sql
 SELECT d.name, d.replicas, d.ready_replicas
-  FROM k8s.deployments d
+  FROM k8s.apps_deployments d
   JOIN service_owners o ON o.service = d.name
  WHERE d.namespace = 'production'
    AND d.ready_replicas::int < d.replicas::int;

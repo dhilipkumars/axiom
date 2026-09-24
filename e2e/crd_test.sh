@@ -65,11 +65,11 @@ psql_axiom "CREATE SCHEMA k8s;"
 psql_axiom "IMPORT FOREIGN SCHEMA k8s FROM SERVER kind INTO k8s;"
 
 got="$(psql_axiom "SELECT string_agg(c.relname, ',' ORDER BY c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'k8s' AND c.relkind = 'f';")"
-[[ "$got" == "configmaps,pods,widgets" ]] || fail "imported tables are '$got', want 'configmaps,pods,widgets'"
+[[ "$got" == "core_configmaps,core_pods,example_com_widgets" ]] || fail "imported tables are '$got', want 'core_configmaps,core_pods,example_com_widgets'"
 echo "imported: $got"
 
 log "generated columns match the CRD's schema (spec/status promoted, metadata scalars, raw)"
-got="$(psql_axiom "SELECT string_agg(a.attname || ' ' || format_type(a.atttypid, NULL), ', ' ORDER BY a.attnum) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'k8s' AND c.relname = 'widgets' AND a.attnum > 0 AND NOT a.attisdropped;")"
+got="$(psql_axiom "SELECT string_agg(a.attname || ' ' || format_type(a.atttypid, NULL), ', ' ORDER BY a.attnum) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'k8s' AND c.relname = 'example_com_widgets' AND a.attnum > 0 AND NOT a.attisdropped;")"
 want="api_version text, kind text, name text, namespace text, uid text, resource_version text, creation_timestamp text, labels jsonb, annotations jsonb, metadata jsonb, spec jsonb, status jsonb, raw jsonb"
 [[ "$got" == "$want" ]] || fail "widgets columns:
   got  $got
@@ -77,7 +77,7 @@ want="api_version text, kind text, name text, namespace text, uid text, resource
 echo "$got"
 
 log "the generated DDL carries the resolved identity, so scans need no discovery"
-got="$(psql_axiom "SELECT array_to_string(ftoptions, ',') FROM pg_foreign_table ft JOIN pg_class c ON c.oid = ft.ftrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'k8s' AND c.relname = 'widgets';")"
+got="$(psql_axiom "SELECT array_to_string(ftoptions, ',') FROM pg_foreign_table ft JOIN pg_class c ON c.oid = ft.ftrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'k8s' AND c.relname = 'example_com_widgets';")"
 for opt in "resource=widgets" "group=example.com" "version=v1" "kind=Widget"; do
   grep -q "$opt" <<<"$got" || fail "widgets options lack $opt: $got"
 done
@@ -86,21 +86,32 @@ echo "$got"
 # --- Phase 1 equivalent: read and qual pushdown -------------------------------------
 
 log "SELECT over the CRD matches kubectl"
-got="$(psql_axiom "SELECT string_agg(name || '|' || coalesce(spec->>'size', '') || '|' || coalesce(spec->>'color', ''), ',' ORDER BY name) FROM k8s.widgets WHERE namespace = '$NS';")"
+got="$(psql_axiom "SELECT string_agg(name || '|' || coalesce(spec->>'size', '') || '|' || coalesce(spec->>'color', ''), ',' ORDER BY name) FROM k8s.example_com_widgets WHERE namespace = '$NS';")"
 want="$(kubectl_e2e -n "$NS" get widgets -o jsonpath='{range .items[*]}{.metadata.name}|{.spec.size}|{.spec.color},{end}' | sed 's/,$//' | tr ',' '\n' | sort | paste -sd, -)"
 [[ "$got" == "$want" ]] || fail "SQL '$got' != kubectl '$want'"
 echo "$got"
 
+log "short names are views created on request, and read the same rows"
+# #80: imported names carry their group so they never change with the cluster;
+# a short name is the caller's opt-in.
+got="$(psql_axiom "SELECT string_agg(short_name || '|' || status, ',' ORDER BY short_name) FROM axiom_create_short_names('k8s');")"
+[[ "$got" == "configmaps|created,pods|created,widgets|created" ]] \
+  || fail "axiom_create_short_names gave '$got'"
+via_view="$(psql_axiom "SELECT string_agg(name, ',' ORDER BY name) FROM k8s.widgets WHERE namespace = '$NS';")"
+direct="$(psql_axiom "SELECT string_agg(name, ',' ORDER BY name) FROM k8s.example_com_widgets WHERE namespace = '$NS';")"
+[[ -n "$direct" && "$via_view" == "$direct" ]] || fail "short name read '$via_view', table read '$direct'"
+echo "k8s.widgets -> k8s.example_com_widgets: $via_view"
+
 log "promoted metadata columns and status are readable"
-got="$(psql_axiom "SELECT labels->>'tier' || '|' || (status->>'phase') || '|' || (status->>'ready') FROM k8s.widgets WHERE namespace = '$NS' AND name = 'sprocket';")"
+got="$(psql_axiom "SELECT labels->>'tier' || '|' || (status->>'phase') || '|' || (status->>'ready') FROM k8s.example_com_widgets WHERE namespace = '$NS' AND name = 'sprocket';")"
 [[ "$got" == "backend|Running|true" ]] || fail "sprocket metadata/status is '$got', want 'backend|Running|true'"
-uid="$(psql_axiom "SELECT uid FROM k8s.widgets WHERE namespace = '$NS' AND name = 'sprocket';")"
+uid="$(psql_axiom "SELECT uid FROM k8s.example_com_widgets WHERE namespace = '$NS' AND name = 'sprocket';")"
 [[ "$uid" == "$(kubectl_e2e -n "$NS" get widget sprocket -o jsonpath='{.metadata.uid}')" ]] || fail "uid column disagrees with kubectl"
 
 log "namespace and name quals are pushed down to the gateway, not filtered locally"
 gw_lists() { psql_axiom "SELECT list_calls FROM axiom_gateway_stats('kind');"; }
 before="$(gw_lists)"
-psql_axiom "SELECT count(*) FROM k8s.widgets WHERE namespace = '$NS' AND name = 'cog';" >/dev/null
+psql_axiom "SELECT count(*) FROM k8s.example_com_widgets WHERE namespace = '$NS' AND name = 'cog';" >/dev/null
 stack_logs "$E2E_SVC_GATEWAY" | grep '"msg":"list"' | tail -1 | grep -q "\"name\":\"cog\"" \
   || fail "name qual was not pushed down"
 stack_logs "$E2E_SVC_GATEWAY" | grep '"msg":"list"' | tail -1 | grep -q "\"namespace\":\"$NS\"" \
@@ -109,44 +120,44 @@ after="$(gw_lists)"
 [[ "$after" -gt "$before" ]] || fail "the scan issued no List at all"
 
 log "a nonexistent widget is an empty result, not an error"
-got="$(psql_axiom "SELECT count(*) FROM k8s.widgets WHERE namespace = '$NS' AND name = 'nosuchwidget';")"
+got="$(psql_axiom "SELECT count(*) FROM k8s.example_com_widgets WHERE namespace = '$NS' AND name = 'nosuchwidget';")"
 [[ "$got" == "0" ]] || fail "count for a missing widget is '$got'"
 
 # --- Phase 2 equivalent: the write path ---------------------------------------------
 
 log "INSERT creates the Widget in the cluster"
-uid="$(psql_axiom "INSERT INTO k8s.widgets (name, namespace, spec) VALUES ('flange', '$NS', '{\"size\":11,\"color\":\"green\"}') RETURNING uid;")"
+uid="$(psql_axiom "INSERT INTO k8s.example_com_widgets (name, namespace, spec) VALUES ('flange', '$NS', '{\"size\":11,\"color\":\"green\"}') RETURNING uid;")"
 [[ -n "$uid" ]] || fail "INSERT RETURNING gave no uid"
 want="$(kubectl_e2e -n "$NS" get widget flange -o jsonpath='{.metadata.uid}|{.spec.size}|{.spec.color}')"
 [[ "$want" == "$uid|11|green" ]] || fail "cluster shows '$want', want '$uid|11|green'"
 echo "created uid=$uid"
 
 log "duplicate INSERT is unique_violation (23505)"
-got="$(psql_axiom "DO \$\$ BEGIN INSERT INTO k8s.widgets (name, namespace, spec) VALUES ('flange', '$NS', '{}'); RAISE EXCEPTION 'unexpected success';
+got="$(psql_axiom "DO \$\$ BEGIN INSERT INTO k8s.example_com_widgets (name, namespace, spec) VALUES ('flange', '$NS', '{}'); RAISE EXCEPTION 'unexpected success';
   EXCEPTION WHEN unique_violation THEN RAISE NOTICE 'caught %', SQLSTATE; END \$\$;" 2>&1 || true)"
 grep -q "caught 23505" <<<"$got" || fail "expected 23505, got: $got"
 
 log "UPDATE of a top-level column changes only that field"
 kubectl_e2e -n "$NS" label widget flange tier=frontend --overwrite >/dev/null
-psql_axiom "UPDATE k8s.widgets SET spec = spec || '{\"color\":\"orange\"}' WHERE namespace = '$NS' AND name = 'flange';"
+psql_axiom "UPDATE k8s.example_com_widgets SET spec = spec || '{\"color\":\"orange\"}' WHERE namespace = '$NS' AND name = 'flange';"
 want="$(kubectl_e2e -n "$NS" get widget flange -o jsonpath='{.spec.size}|{.spec.color}|{.metadata.labels.tier}')"
 [[ "$want" == "11|orange|frontend" ]] || fail "cluster shows '$want', want '11|orange|frontend' (size and label untouched)"
 
 log "UPDATE of labels writes metadata, not a top-level field"
-psql_axiom "UPDATE k8s.widgets SET labels = labels || '{\"env\":\"test\"}' WHERE namespace = '$NS' AND name = 'flange';"
+psql_axiom "UPDATE k8s.example_com_widgets SET labels = labels || '{\"env\":\"test\"}' WHERE namespace = '$NS' AND name = 'flange';"
 want="$(kubectl_e2e -n "$NS" get widget flange -o jsonpath='{.metadata.labels.env}|{.metadata.labels.tier}')"
 [[ "$want" == "test|frontend" ]] || fail "labels are '$want', want 'test|frontend'"
 
 log "UPDATE through raw changes the object even when the typed column is untouched"
-psql_axiom "UPDATE k8s.widgets SET raw = jsonb_set(raw, '{spec,size}', '42') WHERE namespace = '$NS' AND name = 'flange';"
+psql_axiom "UPDATE k8s.example_com_widgets SET raw = jsonb_set(raw, '{spec,size}', '42') WHERE namespace = '$NS' AND name = 'flange';"
 want="$(kubectl_e2e -n "$NS" get widget flange -o jsonpath='{.spec.size}|{.spec.color}')"
 [[ "$want" == "42|orange" ]] || fail "cluster shows '$want' after raw jsonb_set, want '42|orange'"
 
 log "renaming is feature_not_supported (0A000); server-managed columns are refused"
-got="$(psql_axiom "DO \$\$ BEGIN UPDATE k8s.widgets SET name = 'renamed' WHERE namespace = '$NS' AND name = 'flange'; RAISE EXCEPTION 'unexpected success';
+got="$(psql_axiom "DO \$\$ BEGIN UPDATE k8s.example_com_widgets SET name = 'renamed' WHERE namespace = '$NS' AND name = 'flange'; RAISE EXCEPTION 'unexpected success';
   EXCEPTION WHEN feature_not_supported THEN RAISE NOTICE 'caught %', SQLSTATE; END \$\$;" 2>&1 || true)"
 grep -q "caught 0A000" <<<"$got" || fail "renaming should raise 0A000, got: $got"
-got="$(psql_axiom "DO \$\$ BEGIN UPDATE k8s.widgets SET uid = 'forged' WHERE namespace = '$NS' AND name = 'flange'; RAISE EXCEPTION 'unexpected success';
+got="$(psql_axiom "DO \$\$ BEGIN UPDATE k8s.example_com_widgets SET uid = 'forged' WHERE namespace = '$NS' AND name = 'flange'; RAISE EXCEPTION 'unexpected success';
   EXCEPTION WHEN feature_not_supported THEN RAISE NOTICE 'caught %', SQLSTATE; END \$\$;" 2>&1 || true)"
 grep -q "caught 0A000" <<<"$got" || fail "writing uid should raise 0A000, got: $got"
 
@@ -157,7 +168,7 @@ log "a concurrent kubectl change between read and write is serialization_failure
 # once *before* the scan, and the read would then see the patched object.
 ( sleep 2; kubectl_e2e -n "$NS" patch widget flange --type merge -p '{"spec":{"color":"outofband"}}' >/dev/null ) &
 patcher=$!
-got="$(psql_axiom "DO \$\$ BEGIN UPDATE k8s.widgets SET spec = spec || '{\"from_sql\":\"yes\"}' WHERE namespace = '$NS' AND name = 'flange' AND pg_sleep(6 + length(name) * 0) IS NOT NULL;
+got="$(psql_axiom "DO \$\$ BEGIN UPDATE k8s.example_com_widgets SET spec = spec || '{\"from_sql\":\"yes\"}' WHERE namespace = '$NS' AND name = 'flange' AND pg_sleep(6 + length(name) * 0) IS NOT NULL;
   RAISE EXCEPTION 'unexpected success'; EXCEPTION WHEN serialization_failure THEN RAISE NOTICE 'caught % %', SQLSTATE, SQLERRM; END \$\$;" 2>&1 || true)"
 wait $patcher
 grep -q "caught 40001" <<<"$got" || fail "expected 40001 serialization_failure, got: $got"
@@ -167,7 +178,7 @@ want="$(kubectl_e2e -n "$NS" get widget flange -o jsonpath='{.spec.color}')"
 echo "conflict surfaced as 40001, concurrent change preserved"
 
 log "DELETE removes it from the cluster"
-psql_axiom "DELETE FROM k8s.widgets WHERE namespace = '$NS' AND name = 'flange';"
+psql_axiom "DELETE FROM k8s.example_com_widgets WHERE namespace = '$NS' AND name = 'flange';"
 kubectl_e2e -n "$NS" get widget flange >/dev/null 2>&1 && fail "widget still exists after DELETE"
 echo "flange is gone"
 
@@ -270,7 +281,7 @@ psql_axiom "DROP SCHEMA IF EXISTS late CASCADE;" >/dev/null
 psql_axiom "CREATE SCHEMA late;"
 psql_axiom "IMPORT FOREIGN SCHEMA k8s FROM SERVER kind INTO late;" 2>&1 | grep -v '^$' || true
 got="$(psql_axiom "SELECT string_agg(c.relname, ',' ORDER BY c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'late' AND c.relkind = 'f';")"
-[[ "$got" == "configmaps,pods,widgets" ]] || fail "import after CRD creation gave '$got', want 'configmaps,pods,widgets'"
+[[ "$got" == "core_configmaps,core_pods,example_com_widgets" ]] || fail "import after CRD creation gave '$got', want 'core_configmaps,core_pods,example_com_widgets'"
 grep -q "gizmos" <<<"$got" && fail "gizmos is outside --serve but was offered anyway"
 echo "gizmos correctly withheld: the allowlist, not discovery, bounds what is served"
 
@@ -308,8 +319,23 @@ psql_axiom "DROP SCHEMA IF EXISTS onlyw CASCADE;" >/dev/null
 psql_axiom "CREATE SCHEMA onlyw;"
 psql_axiom "IMPORT FOREIGN SCHEMA \"example.com\" FROM SERVER kind INTO onlyw;"
 got="$(psql_axiom "SELECT string_agg(c.relname, ',' ORDER BY c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'onlyw' AND c.relkind = 'f';")"
-[[ "$got" == "widgets" ]] || fail "group-scoped import gave '$got', want 'widgets'"
+[[ "$got" == "example_com_widgets" ]] || fail "group-scoped import gave '$got', want 'example_com_widgets'"
 echo "example.com import: $got"
+
+psql_axiom "DROP SCHEMA IF EXISTS limited CASCADE;" >/dev/null
+psql_axiom "CREATE SCHEMA limited;"
+psql_axiom "IMPORT FOREIGN SCHEMA k8s LIMIT TO (example_com_widgets) FROM SERVER kind INTO limited;"
+got="$(psql_axiom "SELECT string_agg(c.relname, ',' ORDER BY c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'limited' AND c.relkind = 'f';")"
+[[ "$got" == "example_com_widgets" ]] || fail "LIMIT TO by table name gave '$got'"
+# The spelling from before names carried their group imports nothing -- Postgres
+# filters LIMIT TO by table name -- so it has to say what was probably meant.
+psql_axiom "DROP SCHEMA limited CASCADE;" >/dev/null
+psql_axiom "CREATE SCHEMA limited;"
+out="$(psql_axiom "IMPORT FOREIGN SCHEMA k8s LIMIT TO (widgets) FROM SERVER kind INTO limited;" 2>&1)"
+grep -q 'did you mean example_com_widgets?' <<<"$out" \
+  || fail "LIMIT TO (widgets) should suggest example_com_widgets; got: $out"
+psql_axiom "DROP SCHEMA limited CASCADE;" >/dev/null
+echo "LIMIT TO names tables, and a bare plural gets a hint"
 
 log "a CRD deleted from the cluster stops being offered once the cache expires"
 # The opposite direction from "a new CRD needs no restart", which is covered

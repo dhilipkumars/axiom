@@ -141,6 +141,17 @@ CREATE SCHEMA IF NOT EXISTS k8s;
 DO \$\$
 DECLARE t text;
 BEGIN
+  -- Short names are views over the imported tables, created below; drop the
+  -- ones axiom made so the tables can be replaced. Anything else depending on
+  -- them still stops the refresh, which is the point.
+  FOR t IN
+    SELECT c.relname FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'k8s' AND c.relkind = 'v'
+       AND starts_with(coalesce(obj_description(c.oid, 'pg_class'), ''), 'axiom short name for ')
+  LOOP
+    EXECUTE format('DROP VIEW k8s.%I', t);
+  END LOOP;
   FOR t IN
     SELECT c.relname FROM pg_class c
       JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -150,7 +161,15 @@ BEGIN
     EXECUTE format('DROP FOREIGN TABLE k8s.%I', t);
   END LOOP;
 END \$\$;
-IMPORT FOREIGN SCHEMA k8s FROM SERVER k8s INTO k8s;"
+IMPORT FOREIGN SCHEMA k8s FROM SERVER k8s INTO k8s;
+DO \$\$
+BEGIN
+  -- Guarded: the data volume outlives rebuilds, so an existing database can
+  -- hold an extension from before these functions existed.
+  IF to_regprocedure('axiom_create_short_names(text,text)') IS NOT NULL THEN
+    PERFORM axiom_create_short_names('k8s');
+  END IF;
+END \$\$;"
   if ! out="$(AXIOM_KUBECONFIG="$kubeconfig" compose exec -T postgres \
               psql -U axiom -d axiom -v ON_ERROR_STOP=1 -q -c "$sql" 2>&1)"; then
     case "$out" in
@@ -163,7 +182,7 @@ IMPORT FOREIGN SCHEMA k8s FROM SERVER k8s INTO k8s;"
   its own tables to build on, which this command will not touch:
 
     CREATE SCHEMA mine;
-    IMPORT FOREIGN SCHEMA k8s LIMIT TO (pods) FROM SERVER k8s INTO mine;
+    IMPORT FOREIGN SCHEMA k8s LIMIT TO (core_pods) FROM SERVER k8s INTO mine;
 
 $out" ;;
     esac
@@ -180,7 +199,7 @@ $(AXIOM_KUBECONFIG="$kubeconfig" compose logs --tail 15 gateway 2>&1 | sed 's/^/
   # reached -- client-go connects lazily on the first request.
   step "asking the cluster something"
   if ! out="$(AXIOM_KUBECONFIG="$kubeconfig" compose exec -T postgres \
-              psql -U axiom -d axiom -tAc "SELECT count(*) FROM k8s.pods" 2>&1)"; then
+              psql -U axiom -d axiom -tAc "SELECT count(*) FROM k8s.core_pods" 2>&1)"; then
     die "the import succeeded but the first query did not -- usually the gateway
   cannot reach the API server:
 
@@ -196,7 +215,8 @@ $(AXIOM_KUBECONFIG="$kubeconfig" compose logs --tail 15 gateway 2>&1 | sed 's/^/
   say "or:    make local-dev-psql"
   say "stop:  make local-dev-down"
   say ""
-  say "  SELECT namespace, name, phase FROM k8s.pods LIMIT 5;"
+  say "  SELECT namespace, name, phase FROM k8s.core_pods LIMIT 5;"
+  say "  -- short names such as k8s.pods are views: SELECT * FROM axiom_create_short_names('k8s');"
 }
 
 case "${1:-}" in

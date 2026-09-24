@@ -283,21 +283,21 @@ SELECT ftoptions FROM pg_foreign_table ft
 
 ```sql
 SELECT name, spec->>'size', spec->>'color', status->>'phase', labels
-  FROM k8s.widgets WHERE namespace = 'axiom-e2e' ORDER BY name;
+  FROM k8s.example_com_widgets WHERE namespace = 'axiom-e2e' ORDER BY name;
 
-EXPLAIN SELECT name FROM k8s.widgets WHERE namespace = 'axiom-e2e';  -- plans without contacting the gateway
+EXPLAIN SELECT name FROM k8s.example_com_widgets WHERE namespace = 'axiom-e2e';  -- plans without contacting the gateway
 ```
 
 **Write to it**, and watch the guardrails:
 
 ```sql
-INSERT INTO k8s.widgets (name, namespace, spec)
+INSERT INTO k8s.example_com_widgets (name, namespace, spec)
   VALUES ('manual', 'axiom-e2e', '{"size":1,"color":"teal"}');
-UPDATE k8s.widgets SET spec = spec || '{"color":"pink"}' WHERE name = 'manual';
+UPDATE k8s.example_com_widgets SET spec = spec || '{"color":"pink"}' WHERE name = 'manual';
 
-UPDATE k8s.widgets SET uid = 'forged' WHERE name = 'manual';   -- 0A000: server-managed
-UPDATE k8s.widgets SET name = 'renamed' WHERE name = 'manual'; -- 0A000: identity is immutable
-DELETE FROM k8s.widgets WHERE name = 'manual';
+UPDATE k8s.example_com_widgets SET uid = 'forged' WHERE name = 'manual';   -- 0A000: server-managed
+UPDATE k8s.example_com_widgets SET name = 'renamed' WHERE name = 'manual'; -- 0A000: identity is immutable
+DELETE FROM k8s.example_com_widgets WHERE name = 'manual';
 ```
 
 Built-in kinds need no `group`/`version`/`kind`, so the Phase 1-3 spellings
@@ -506,16 +506,21 @@ gateway serves": the literal `k8s`, and **the server's own name** — so
 `IMPORT FOREIGN SCHEMA prod FROM SERVER prod INTO prod` reads naturally under
 the one-schema-per-cluster model. `core` and `v1` both mean the core group,
 whose real name is the empty string and cannot be typed as a schema name.
-Anything else is an API group, such as `example.com`. `LIMIT TO` and `EXCEPT` filter by plural
-name. Options: `cache_mode` (applied to every generated table the API server
-will actually watch) and `prefix` (prepended to each table name, so two
-clusters can be imported into one schema).
+Anything else is an API group, such as `example.com`. `LIMIT TO` and `EXCEPT` take
+generated table names, prefix included. Options: `cache_mode` (applied to every
+generated table the API server will actually watch) and `prefix` (prepended to
+each table name, so two clusters can be imported into one schema).
 
 ```sql
 IMPORT FOREIGN SCHEMA "example.com" FROM SERVER kind INTO crds;
-IMPORT FOREIGN SCHEMA k8s LIMIT TO (pods, configmaps) FROM SERVER kind INTO k8s
+IMPORT FOREIGN SCHEMA k8s LIMIT TO (prod_core_pods, prod_core_configmaps) FROM SERVER kind INTO k8s
   OPTIONS (cache_mode 'watch', prefix 'prod_');
 ```
+
+The gateway filters by plural, so a `LIMIT TO` is narrowed to the plurals its
+names decode to, and every kind is requested if any name will not decode. A
+wrong decode would silently drop a table the user named; a wide request only
+costs a round trip. `import::plural_from_table_name` owns that decoding.
 
 A kind whose name cannot be a safe SQL identifier is skipped with a `WARNING`
 naming it, rather than failing the whole import; the same applies to individual
@@ -540,11 +545,15 @@ everything. It defaults to `*.*`, meaning "narrow nothing". Use it to hide
 kinds the identity could otherwise read. A kind outside it is reported exactly
 as a kind the cluster does not have, so it cannot be enumerated by probing.
 
-**Table names** are the plural, disambiguated by group only where two kinds
-collide. `events` exists in both the core group and `events.k8s.io`, so a
-whole-cluster import yields `events_core` and `events_events_k8s_io` and no
-bare `events`. Handing the bare name to one of them would make `events` mean
-whichever the rule happened to favour.
+**Table names** are `<group>_<plural>`, with the core group spelled `core`:
+`core_events` and `events_k8s_io_events`. A name is a function of its own
+group and plural, never of the rest of the import. The earlier rule suffixed a
+group only on collision, so installing metrics-server renamed `pods` to
+`pods_core` (#80). The encoding (`.` to `_`, `-` to `__`) is injective, and the
+63-byte limit is met by shortening the group behind a digest of the kind's own
+name. `import::table_name` owns the rule, and its unit tests check injectivity
+exhaustively over short DNS names. Short names are opt-in views, created by
+`axiom_create_short_names` (`extension/src/short_names.rs`).
 
 **The background worker and the shared cache** both require the library to be
 preloaded, and neither can be set up after startup, so `CREATE EXTENSION`
