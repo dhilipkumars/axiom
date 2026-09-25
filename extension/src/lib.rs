@@ -556,6 +556,25 @@ mod tests {
     const PODS_TABLE: &str = "CREATE FOREIGN TABLE k8s_pods (name text, namespace text, phase text, node text, raw jsonb) \
         SERVER gw OPTIONS (resource 'pods')";
 
+    // --- what an unprivileged role can reach (#86) ----------------------------
+
+    #[pg_test(error = "permission denied for function axiom_watch_status")]
+    fn watch_status_is_not_callable_by_every_role() {
+        // It lists every watched server, resource and namespace regardless of
+        // the caller's table grants, so an agent role must not be able to.
+        Spi::run("CREATE ROLE nobody_special").expect("role");
+        Spi::run("SET ROLE nobody_special").expect("set role");
+        Spi::run("SELECT * FROM axiom_watch_status()").expect("should fail");
+    }
+
+    #[pg_test]
+    fn watch_status_can_be_granted_to_a_monitoring_role() {
+        Spi::run("CREATE ROLE monitor").expect("role");
+        Spi::run("GRANT EXECUTE ON FUNCTION axiom_watch_status() TO monitor").expect("grant");
+        Spi::run("SET ROLE monitor").expect("set role");
+        Spi::run("SELECT * FROM axiom_watch_status()").expect("a granted role can call it");
+    }
+
     // --- short names over group-qualified tables (#80) --------------------------
 
     /// `CREATE FOREIGN TABLE` for an axiom kind in schema `s`, with just the

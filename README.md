@@ -13,6 +13,7 @@
 [Getting started](https://dhilipkumars.github.io/axiom/guides/getting-started/) &nbsp;·&nbsp;
 [Querying](https://dhilipkumars.github.io/axiom/guides/querying/) &nbsp;·&nbsp;
 [Deploying](https://dhilipkumars.github.io/axiom/guides/deploying/) &nbsp;·&nbsp;
+[AI agent access](https://dhilipkumars.github.io/axiom/guides/agent-access/) &nbsp;·&nbsp;
 [Roadmap](ROADMAP.md)
 
 Axiom makes Kubernetes resources — built-in kinds and CRDs alike — look like

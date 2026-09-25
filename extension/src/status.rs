@@ -59,6 +59,19 @@ fn axiom_watch_status() -> TableIterator<
     }))
 }
 
+// Not callable by every role. The rows name each watched server, resource and
+// namespace, with object counts and resource versions, and none of that is
+// filtered by the caller's table grants -- so a role granted a single view
+// could otherwise enumerate what the cluster is being watched for. A DBA grants
+// it to whoever monitors Axiom, the way Postgres restricts its own pg_stat_*
+// detail. axiom_gateway_stats needs no revoke: it checks USAGE on the named
+// server itself.
+extension_sql!(
+    "REVOKE EXECUTE ON FUNCTION axiom_watch_status() FROM PUBLIC;",
+    name = "axiom_watch_status_not_public",
+    requires = [axiom_watch_status],
+);
+
 /// Counters for one gateway process: how much work it has done since it
 /// started, and when that was.
 ///

@@ -28,7 +28,7 @@ source "$here/lib/kind.sh"
 
 # PLAN.md order. A later gate is only meaningful if the earlier ones passed,
 # so the run stops at the first failure (docs/RULES.md §4, regression gate).
-ALL_GATES=(preload ping pods configmaps watch crd cluster metrics)
+ALL_GATES=(preload ping pods configmaps watch crd cluster metrics agent)
 GATES=("${@:-}")
 [[ -z "${GATES[*]}" ]] && GATES=("${ALL_GATES[@]}")
 

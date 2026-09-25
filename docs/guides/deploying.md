@@ -151,3 +151,6 @@ The counters are per-process and reset when the Pod restarts.
 ```sql
 SELECT * FROM axiom_watch_status();
 ```
+
+It is not callable by every role (see [Querying](querying.md)), so grant it to
+your monitoring role.
