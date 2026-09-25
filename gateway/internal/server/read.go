@@ -108,17 +108,31 @@ func clampLimit(requested int32) int32 {
 // What this does not do is bound the *fetch*: client-go decodes the whole
 // requested page before its size can be measured. maxPageSize is what bounds
 // that, which is why it is modest.
+//
+// mayShrink is asked only once a page has proved too large, so the common
+// path costs nothing; see shrinkPermission for when it answers yes.
 func (s *Server) fetchBoundedPage(
 	ctx context.Context,
 	gvk schema.GroupVersionKind,
 	namespace, name string,
 	limit int32,
 	continueToken string,
-	mayShrink bool,
+	mayShrink func() bool,
 ) ([]*axiomv1.Object, *unstructured.UnstructuredList, int, int32, error) {
+	shrunk := false
 	for {
 		list, err := s.k8s.List(ctx, gvk, namespace, name, int64(limit), continueToken)
 		if err != nil {
+			// An API server that rejects a continuation at a smaller limit
+			// than it began with is within its rights: the List contract asks
+			// for identical parameters. Say what happened rather than
+			// surfacing a bare BadRequest that names nothing (docs/RULES.md §1).
+			if shrunk && continueToken != "" && (apierrors.IsBadRequest(err) || apierrors.IsInvalid(err)) {
+				return nil, nil, 0, 0, status.Errorf(codes.ResourceExhausted,
+					"a page of %s is over the %d byte limit for one response, and the API "+
+						"server refused a smaller page size part-way through the listing: %v",
+					gvk.Kind, maxPageBytes, err)
+			}
 			return nil, nil, 0, 0, toGRPC(err)
 		}
 		objs := make([]*axiomv1.Object, 0, len(list.Items))
@@ -131,9 +145,10 @@ func (s *Server) fetchBoundedPage(
 			size += len(po.GetJson())
 			objs = append(objs, po)
 		}
-		if size <= maxPageBytes || limit <= 1 || !mayShrink {
+		if size <= maxPageBytes || limit <= 1 || !mayShrink() {
 			return objs, list, size, limit, nil
 		}
+		shrunk = true
 		// Round up, so 3 becomes 2 rather than 1. Halving downwards
 		// overshoots on small limits and buys an extra round trip for a page
 		// that would have fit. Still strictly decreasing while limit > 1, so
@@ -143,6 +158,34 @@ func (s *Server) fetchBoundedPage(
 			slog.String("gvk", gvk.String()),
 			slog.Int("bytes", size),
 			slog.Int("new_limit", int(limit)))
+	}
+}
+
+// shrinkPermission answers fetchBoundedPage's question: may this page be asked
+// for again with a smaller limit?
+//
+// A first page always may: nothing has reached the caller, and there is no
+// continuation whose parameters could disagree. A continuation may when the
+// kind is served by kube-apiserver itself -- a built-in group or a CRD. Its
+// continue token records a key and a snapshot, not an object count, so a
+// smaller limit resumes at the same place in the same snapshot and no object
+// is duplicated or skipped (#85). An aggregated API server may do anything
+// with a token, so there the limit stays fixed, which is also the answer when
+// the client cannot tell.
+//
+// This relies on kube-apiserver's behaviour rather than the List contract,
+// which asks for identical parameters on every page. The e2e suite exercises
+// it against a real API server, and a server that starts refusing it gets a
+// clear ResourceExhausted from fetchBoundedPage rather than a bare error.
+func (s *Server) shrinkPermission(ctx context.Context, gvk schema.GroupVersionKind, continueToken string) func() bool {
+	return func() bool {
+		if continueToken == "" {
+			return true
+		}
+		local, ok := s.k8s.(interface {
+			ServedLocally(context.Context, schema.GroupVersion) bool
+		})
+		return ok && local.ServedLocally(ctx, gvk.GroupVersion())
 	}
 }
 
@@ -314,33 +357,33 @@ func (s *Server) List(ctx context.Context, req *axiomv1.ListRequest) (*axiomv1.L
 	if err := validName("name", req.GetName()); err != nil {
 		return nil, err
 	}
-	// The page size is chosen once, on the first page, and carried through the
-	// rest of the walk in the gateway's own cursor. Only the first page may be
-	// shrunk to fit the byte budget.
+	// The page size is chosen on the first page and carried through the rest
+	// of the walk in the gateway's own cursor, since the caller sends the same
+	// request for every page. A continuation may shrink it further where the
+	// API server allows (shrinkPermission), and the smaller size is carried
+	// from then on.
 	//
-	// Kubernetes documents a continuation as requiring the same query
-	// parameters, and client-go's own pager never varies the limit mid-walk:
-	// it keeps one and restarts from scratch when a token expires. Shrinking
-	// against a live token risks rejection by a conforming or aggregated API
-	// server, and the caller cannot carry the choice either, since it sends
-	// the same request for every page.
+	// Restarting the walk is not an option once a page has gone out: its rows
+	// are already with the SQL executor, and a ForeignScan cannot take them
+	// back. That is why client-go's pager, which restarts, is no model here.
 	cur, err := decodeCursor(req.GetContinueToken())
 	if err != nil {
 		return nil, err
 	}
-	limit, mayShrink := cur.Limit, false
+	limit := cur.Limit
 	if cur.Continue == "" {
-		limit, mayShrink = clampLimit(req.GetLimit()), true
+		limit = clampLimit(req.GetLimit())
 	}
 
 	objs, list, size, effective, err := s.fetchBoundedPage(ctx, gvk, req.GetNamespace(), req.GetName(),
-		limit, cur.Continue, mayShrink)
+		limit, cur.Continue, s.shrinkPermission(ctx, gvk, cur.Continue))
 	if err != nil {
 		return nil, err
 	}
 	// Over budget with nothing left to give. Either one object is too large to
-	// send, or this is a continuation whose limit is fixed, or the backing API
-	// ignored the limit entirely -- the Kubernetes List contract permits that.
+	// send, or this is a continuation of an aggregated API whose limit is
+	// fixed, or the backing API ignored the limit entirely -- the Kubernetes
+	// List contract permits that.
 	// Say so, rather than letting the transport reject the message with a size
 	// error that names nothing (docs/RULES.md §1).
 	if size > maxPageBytes {
@@ -353,10 +396,9 @@ func (s *Server) List(ctx context.Context, req *axiomv1.ListRequest) (*axiomv1.L
 	resp := &axiomv1.ListResponse{
 		Objects:         objs,
 		ResourceVersion: list.GetResourceVersion(),
-		// The *effective* limit, not the requested one. A first page that had
-		// to shrink proved the requested size too large, and a continuation
-		// cannot shrink, so recording the original would guarantee the next
-		// page fails.
+		// The *effective* limit, not the requested one. A page that had to
+		// shrink proved the larger size too large, so recording it would make
+		// the next page start over from a size already known to fail.
 		ContinueToken: encodeCursor(list.GetContinue(), effective),
 	}
 	s.log.LogAttrs(ctx, slog.LevelInfo, "list",

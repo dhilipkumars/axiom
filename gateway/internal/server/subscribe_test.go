@@ -318,8 +318,8 @@ func TestSubscribeListsEveryPageBeforeSyncing(t *testing.T) {
 	if len(c.limits) < 3 {
 		t.Fatalf("expected at least 3 pages, saw %d calls", len(c.limits))
 	}
-	// The limit stays put across a continuation: Kubernetes treats a resumed
-	// list as requiring the same query parameters.
+	// The limit stays put across a continuation when every page fits: it only
+	// changes when a page proves too large for one response.
 	for i, l := range c.limits {
 		if l != c.limits[0] {
 			t.Errorf("limit changed mid-walk: call %d used %d, first used %d", i, l, c.limits[0])
@@ -330,4 +330,65 @@ func TestSubscribeListsEveryPageBeforeSyncing(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// localPagingSubClient is a pagingSubClient whose kind kube-apiserver serves
+// itself, so an oversized continuation may be re-requested smaller.
+type localPagingSubClient struct{ *pagingSubClient }
+
+func (localPagingSubClient) ServedLocally(context.Context, schema.GroupVersion) bool { return true }
+
+// #85 on the watch path: a watch-mode table's initial listing pages through the
+// same byte-bounded fetch, so a later page larger than the first must shrink
+// there too, and still deliver every object exactly once before SYNCED.
+func TestSubscribeShrinksALaterPageThatOutgrowsTheFirst(t *testing.T) {
+	t.Parallel()
+	var items []unstructured.Unstructured
+	for i := range defaultPageSize {
+		items = append(items, padded(fmt.Sprintf("a-small-%03d", i), 8))
+	}
+	for i := range 4 {
+		items = append(items, padded(fmt.Sprintf("b-large-%d", i), 3<<19))
+	}
+	c := localPagingSubClient{&pagingSubClient{items: items}}
+	srv := New("t", nil, c, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := newRecorder(ctx)
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.Subscribe(&axiomv1.SubscribeRequest{
+			Gvk: &axiomv1.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}, Namespace: "default",
+		}, rec)
+	}()
+
+	seen := map[string]int{}
+	for synced := false; !synced; {
+		select {
+		case err := <-done:
+			t.Fatalf("#85: the initial listing failed before SYNCED: %v", err)
+		default:
+		}
+		ev := rec.next(t)
+		switch ev.GetType() {
+		case axiomv1.SubscribeResponse_TYPE_ADDED:
+			seen[ev.GetObject().GetName()]++
+		case axiomv1.SubscribeResponse_TYPE_SYNCED:
+			synced = true
+		default:
+			t.Fatalf("unexpected event before SYNCED: %v", ev.GetType())
+		}
+	}
+	if len(seen) != len(items) {
+		t.Errorf("saw %d distinct objects, want %d", len(seen), len(items))
+	}
+	for name, n := range seen {
+		if n != 1 {
+			t.Errorf("%s delivered %d times, want once", name, n)
+		}
+	}
+	if len(c.limits) < 3 || c.limits[len(c.limits)-1] >= int64(defaultPageSize) {
+		t.Errorf("limits were %v; the oversized continuation should have shrunk", c.limits)
+	}
 }
