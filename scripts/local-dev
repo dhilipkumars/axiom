@@ -126,9 +126,9 @@ $(kubectl config get-contexts -o name | sed 's/^/    /')"
   step "starting"
   # --force-recreate on the gateway is load-bearing: compose sees identical
   # args, image and mount paths and would leave it running, but the gateway
-  # reads the kubeconfig once at startup and SelfAccess caches authorization
-  # decisions for the process lifetime. Without this, switching context or
-  # granting a new kind changes nothing and says nothing.
+  # reads the kubeconfig once at startup and SelfAccess caches what it is
+  # allowed for the process lifetime. Without this, switching context or
+  # revoking a grant changes nothing and says nothing.
   AXIOM_KUBECONFIG="$kubeconfig" compose up -d --build --wait --force-recreate
 
   step "wiring Postgres to the gateway"

@@ -24,6 +24,7 @@ pub mod options;
 pub mod ping;
 pub mod proto;
 pub mod quals;
+pub mod quantity;
 pub mod resource;
 pub mod schema;
 pub mod shmem;

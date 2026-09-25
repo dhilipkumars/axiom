@@ -9,7 +9,8 @@ This is how the gateway is meant to run, and what every end-to-end gate
 exercises. The manifests are in `deploy/k8s/`:
 
 - `gateway-rbac.yaml` — the `axiom-system` namespace, the `axiom-gateway`
-  ServiceAccount, and the ClusterRole that decides what it may read and write.
+  ServiceAccount, and the ClusterRoles that decide what it may read and write:
+  broad reads that never include Secrets, and writes granted per resource.
   This is the only thing that bounds what appears in SQL.
 - `gateway-deployment.yaml` — the Deployment and a `NodePort` Service.
 
@@ -123,7 +124,8 @@ intend to believe.
 ## Operational notes
 
 **Restarting** the gateway is safe at any time, and is required after an RBAC
-change: access decisions are cached for the process lifetime. A kind removed
+grant is revoked or narrowed: what the gateway is allowed is cached for the
+process lifetime. A new grant needs no restart; the next import sees it. A kind removed
 from the cluster needs no restart — resource lists expire after
 `-discovery-ttl`, five minutes by default, and a re-import then reflects the
 cluster.

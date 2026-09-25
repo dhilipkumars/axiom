@@ -1,18 +1,66 @@
-# Least-privilege identity for the Axiom gateway (docs/RULES.md §3).
-# Phase 1: read-only Pods (`get`, `list`). Phase 2: read-write ConfigMaps
-# (`get`, `list`, `create`, `update`, `delete`). Phase 3: `watch` on both, for
-# the Subscribe stream. Phase 4: the example.com test CRD, plus the discovery
-# and OpenAPI endpoints that schema discovery reads. Nothing is granted ahead
-# of need.
+# Identity for the Axiom gateway.
 #
-# This is what bounds Axiom: the gateway offers what this permits, and the API
-# server enforces it. To change what appears in SQL, change this file and
-# restart the gateway -- it caches what it may access -- then re-import, since
-# foreign tables are catalog objects and do not follow the change themselves.
+# **Reads are broad; Secrets are not among them; writes are enumerated.**
 #
-# The role is named for the identity it belongs to, not for what it grants. It
-# is not read-only: ConfigMaps and the example CRD are writable, because
-# INSERT, UPDATE and DELETE on a foreign table are real Kubernetes writes.
+# Discovery is the product: Axiom offers exactly what this identity may list,
+# so the read grant decides which tables exist. It is wide on purpose --
+# workloads, config, networking, storage, events, metrics, RBAC objects and
+# custom resources -- and it excludes Secrets on purpose. Until per-caller
+# identity lands (#71) every Postgres role reaches Kubernetes as *this*
+# identity, so anything readable here is readable by anyone who can `SELECT`.
+#
+# ## Why there is no wildcard
+#
+# RBAC has no deny rule. `resources: ["*"]` in any rule that covers the core
+# group grants Secrets, and there is no way to subtract them afterwards. So the
+# read grant is assembled from two sources instead:
+#
+#   1. **Kubernetes' own `view` role**, by aggregating every ClusterRole labelled
+#      `rbac.authorization.k8s.io/aggregate-to-view: "true"`. Upstream maintains
+#      that set and deliberately leaves Secrets out of it. It covers workloads,
+#      ConfigMaps, Services, NetworkPolicies, Ingresses, core Events and more --
+#      and, because operators and metrics-server label their own read roles
+#      that way, it picks up `metrics.k8s.io` and many operators' custom
+#      resources as they are installed, without an edit here.
+#   2. **`axiom-gateway-read-extra` below**, for what `view` leaves out because
+#      it is cluster-scoped or newer: nodes, persistent volumes, storage, CRDs
+#      themselves, RBAC objects, admission config, `events.k8s.io` and the
+#      custom and external metrics APIs.
+#
+# ## Custom resources that do not appear
+#
+# An operator that does not ship an `aggregate-to-view` role is not visible
+# until something grants it. Grant it read-only, with this label, and it is
+# folded into the gateway's read role automatically:
+#
+#   apiVersion: rbac.authorization.k8s.io/v1
+#   kind: ClusterRole
+#   metadata:
+#     name: axiom-read-widgets
+#     labels:
+#       axiom.dhilipkumars.github.io/aggregate-to-gateway: "true"
+#   rules:
+#     - apiGroups: ["example.com"]
+#       resources: ["*"]
+#       verbs: ["get", "list", "watch"]
+#
+# A named group with `resources: ["*"]` is fine; only a rule that reaches the
+# core group can grant Secrets.
+#
+# Aggregation trusts whoever may label ClusterRoles -- the same trust
+# Kubernetes' own `view` role places in them. A role labelled either way that
+# grants Secrets would reach this identity too.
+#
+# ## Writes stay enumerated
+#
+# INSERT, UPDATE and DELETE on a foreign table are real Kubernetes writes, so
+# the mutating verbs are granted per resource, in the `axiom-gateway` role.
+# Add a resource there only when you intend SQL to be able to change it.
+#
+# A new grant is seen on the next import: the gateway re-asks about any kind it
+# was denied. A revoked or narrowed grant needs a gateway restart, because what
+# it was allowed is cached for its lifetime. Either way re-import afterwards,
+# since foreign tables are catalog objects and do not follow the change.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -29,23 +77,22 @@ kind: ClusterRole
 metadata:
   name: axiom-gateway
 rules:
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list", "watch"]
+  # Writes, enumerated. Nothing is mutable through SQL unless it is named here.
+  # Each also carries the read verbs, because UPDATE and DELETE read the row
+  # first: a writable resource must not depend on aggregation to be readable.
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]
-  # Phase 4: the test CRD the e2e gate exercises. A real deployment lists its
-  # own CRDs here; there is deliberately no wildcard.
+  # The test CRD the e2e gate exercises. A real deployment lists its own here.
   - apiGroups: ["example.com"]
     resources: ["widgets"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]
+
   # Schema discovery reads the aggregated discovery and OpenAPI documents.
-  # These are non-resource URLs and grant no access to any object; the
-  # resource rules above remain the only way the gateway reaches data.
-  # Kubernetes binds system:discovery to system:authenticated by default, so
-  # this is usually redundant; it is spelled out so the dependency is visible
-  # rather than inherited by accident.
+  # These are non-resource URLs and grant no access to any object. Kubernetes
+  # binds system:discovery to system:authenticated by default, so this is
+  # usually redundant; it is spelled out so the dependency is visible rather
+  # than inherited by accident.
   - nonResourceURLs: ["/api", "/api/*", "/apis", "/apis/*", "/openapi", "/openapi/*", "/version"]
     verbs: ["get"]
 ---
@@ -57,6 +104,81 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: axiom-gateway
+subjects:
+  - kind: ServiceAccount
+    name: axiom-gateway
+    namespace: axiom-system
+---
+# The read grant. Its rules are filled in by the aggregation controller from
+# every ClusterRole matching a selector below, and rewritten whenever one of
+# them changes; `rules` is left out so `kubectl apply` does not fight it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: axiom-gateway-read
+aggregationRule:
+  clusterRoleSelectors:
+    - matchLabels:
+        rbac.authorization.k8s.io/aggregate-to-view: "true"
+    - matchLabels:
+        axiom.dhilipkumars.github.io/aggregate-to-gateway: "true"
+---
+# What `view` leaves out. Every resource is named: no rule here reaches the core
+# group with a wildcard, which is what keeps Secrets out.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: axiom-gateway-read-extra
+  labels:
+    axiom.dhilipkumars.github.io/aggregate-to-gateway: "true"
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "persistentvolumes", "podtemplates"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  # Usage. Named groups, so a wildcard over their resources grants nothing else.
+  # metrics-server also aggregates metrics.k8s.io into `view`; this does not
+  # depend on it.
+  - apiGroups: ["metrics.k8s.io", "custom.metrics.k8s.io", "external.metrics.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "csidrivers", "csinodes", "csistoragecapacities", "volumeattachments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingressclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["node.k8s.io"]
+    resources: ["runtimeclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apiregistration.k8s.io"]
+    resources: ["apiservices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["mutatingwebhookconfigurations", "validatingwebhookconfigurations",
+                "validatingadmissionpolicies", "validatingadmissionpolicybindings"]
+    verbs: ["get", "list", "watch"]
+  # Policy, not credentials: who may do what is queryable, which is the point.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: axiom-gateway-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: axiom-gateway-read
 subjects:
   - kind: ServiceAccount
     name: axiom-gateway

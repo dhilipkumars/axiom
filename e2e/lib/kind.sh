@@ -40,7 +40,7 @@ kind_down() {
 # kind_up: ensure the cluster exists, apply deploy/k8s/gateway-rbac.yaml, and
 # write $E2E_GATEWAY_KUBECONFIG: the cluster CA + internal API address (reachable
 # from the compose network) + a 1h token for the gateway ServiceAccount. The
-# token grants only what the ClusterRole allows (pods get/list).
+# token grants only what that RBAC allows.
 kind_up() {
   command -v kind >/dev/null || fail "kind is not installed"
   command -v kubectl >/dev/null || fail "kubectl is not installed"
@@ -57,8 +57,9 @@ kind_up() {
   kind get kubeconfig --name "$E2E_KIND_CLUSTER" > "$E2E_ADMIN_KUBECONFIG"
   chmod 0600 "$E2E_ADMIN_KUBECONFIG"
 
-  log "applying least-privilege gateway RBAC"
+  log "applying gateway RBAC"
   kubectl_e2e apply -f "$E2E_ROOT/deploy/k8s/gateway-rbac.yaml" >/dev/null || fail "apply RBAC"
+  kind_wait_rbac_aggregated
 
   log "writing gateway kubeconfig (SA token, internal API address)"
   local ca="$E2E_KUBE_DIR/cluster-ca.crt" token
@@ -212,6 +213,25 @@ check ownership in $tmp"
   rm -rf "$tmp"
 }
 
+# kind_wait_rbac_aggregated: block until the gateway's read role has been
+# filled in by the aggregation controller.
+#
+# `axiom-gateway-read` has no rules of its own; the controller copies them in
+# from every matching ClusterRole, asynchronously, after the apply returns. The
+# gateway re-asks about a kind it was denied, so it would recover by itself,
+# but a gate asserting what the gateway sees must not start inside that window.
+# One permission from each source is checked: pods from Kubernetes' `view`,
+# nodes from the extra role.
+kind_wait_rbac_aggregated() {
+  local sa="system:serviceaccount:$E2E_GATEWAY_SA_NS:$E2E_GATEWAY_SA"
+  local deadline=$((SECONDS + 60))
+  until [[ "$(kubectl_e2e auth can-i list pods --as="$sa" -A 2>/dev/null)" == "yes" &&
+           "$(kubectl_e2e auth can-i list nodes --as="$sa" 2>/dev/null)" == "yes" ]]; do
+    (( SECONDS < deadline )) || fail "axiom-gateway-read was not aggregated within 60s"
+    sleep 1
+  done
+}
+
 # kind_deploy_gateway [SERVE]: apply the Deployment and wait for it to be ready.
 # SERVE is the --serve allowlist; gates need different values, so it is applied
 # with `kubectl set env` after the manifest rather than baked into it.
@@ -225,6 +245,16 @@ kind_deploy_gateway() {
   # load is skipped when the node already has it, so this is safe either way.
   kind_load_gateway_image
   kubectl_e2e apply -f "$E2E_ROOT/deploy/k8s/gateway-rbac.yaml" >/dev/null || fail "apply RBAC"
+  kind_wait_rbac_aggregated
+  # A gate asserting that the tables are *exactly* what its own fixture grants
+  # needs that fixture to be the only read grant; the shipped one is broad by
+  # design. Unbound here, after the apply above and before the restart below,
+  # so the fresh Pod never holds the broad answers. The next gate's apply binds
+  # it again.
+  if [[ "${E2E_UNBIND_SHIPPED_READ:-0}" == "1" ]]; then
+    kubectl_e2e delete clusterrolebinding axiom-gateway-read --ignore-not-found >/dev/null \
+      || fail "unbind the shipped read role"
+  fi
   kind_gateway_tls_secret
   log "deploying the gateway in-cluster (serve=$serve, discovery-ttl=$discovery_ttl)"
   # The checked-in manifest pulls a released tag Always, which is right for an
@@ -340,4 +370,37 @@ kind_start_gateway() {
   kubectl_e2e -n "$E2E_GATEWAY_SA_NS" rollout status deploy/axiom-gateway --timeout=120s >/dev/null \
     || fail "gateway did not come back"
   kind_wait_gateway_endpoint
+}
+
+# kind_metrics_server: install metrics-server and block until it actually
+# serves data.
+#
+# Two things make this more than an `apply`. kind's kubelets present
+# self-signed serving certificates, so metrics-server refuses to scrape them
+# without `--kubelet-insecure-tls` -- the Deployment rolls out fine and then
+# reports no metrics forever, which reads exactly like a broken gate.
+#
+# And the APIService going Available is not the same as there being data:
+# metrics-server needs a scrape interval to elapse before any pod has a
+# sample. Waiting on `kubectl top` returning a row is the only check that
+# means what a caller needs it to mean.
+kind_metrics_server() {
+  log "installing metrics-server"
+  kubectl_e2e apply -f "https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml" >/dev/null \
+    || fail "apply metrics-server"
+  kubectl_e2e -n kube-system patch deployment metrics-server --type=json \
+    -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]' >/dev/null \
+    || fail "patch metrics-server for kind's self-signed kubelet certificates"
+  kubectl_e2e -n kube-system rollout status deploy/metrics-server --timeout=180s >/dev/null \
+    || fail "metrics-server did not become ready"
+  local deadline=$((SECONDS + 240))
+  while (( SECONDS < deadline )); do
+    if kubectl_e2e top pods -n kube-system --no-headers 2>/dev/null | grep -q .; then
+      log "metrics-server is serving samples"
+      return 0
+    fi
+    sleep 5
+  done
+  kubectl_e2e -n kube-system logs deploy/metrics-server --tail=30 || true
+  fail "metrics-server never produced a sample"
 }

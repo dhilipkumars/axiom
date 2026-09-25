@@ -235,20 +235,24 @@ Verify:
 
 ```sh
 docker exec axiom-postgres psql -U postgres -tAc \
-  "SELECT count(*) FROM information_schema.tables WHERE table_schema='k8s'"
+  "SELECT string_agg(table_name, ',' ORDER BY table_name) FROM information_schema.tables
+    WHERE table_schema='k8s' AND table_name IN ('core_pods','core_configmaps','apps_deployments','networking_k8s_io_networkpolicies','core_secrets')"
 ```
 
-On a cluster created by step 1, expect **exactly 2** — `k8s.core_pods` and
-`k8s.core_configmaps`.
+Expect **`apps_deployments,core_configmaps,core_pods,networking_k8s_io_networkpolicies`**,
+with no `core_secrets`.
 
-Two things decide that, and only together. The bundled ClusterRole
-`axiom-gateway` grants three kinds: pods, configmaps, and an example
-`widgets` custom resource. A stock kind cluster has no widgets CRD, so only
-two of the three resolve. **If you are on a cluster that does have that CRD
-installed, expect 3** — that is correct, not a failure.
+The bundled RBAC reads broadly: everything in Kubernetes' `view` role plus
+nodes, storage, CRDs, RBAC objects, events and metrics. The whole schema holds
+several dozen tables, and the exact count depends on the Kubernetes version,
+so check for these four rather than for a number. Secrets are never granted,
+and their absence is part of the check.
 
-To get more kinds, grant them in the ClusterRole and restart the gateway — it
-caches what it may access — then import again.
+Custom resources appear when their operator ships an `aggregate-to-view`
+role, or once a read-only ClusterRole for them is labelled
+`axiom.dhilipkumars.github.io/aggregate-to-gateway: "true"`. A new grant is
+seen on the next import; after revoking one, restart the gateway (it caches
+what it is allowed). Either way, import again.
 
 ## Step 6 — success criterion
 
@@ -309,6 +313,9 @@ rm -rf ~/axiom-quickstart
   without touching an existing Postgres.
 - **Every image is published for amd64 and arm64** from v0.1.1 on, so nothing runs under emulation and no `--platform` flag is needed. Versions before that are amd64-only.
 - **What a query can reach is bounded by the gateway's RBAC**, not the SQL
-  user's. To expose more kinds, change the ClusterRole and restart the gateway,
-  then re-import — foreign tables are catalog objects and do not follow the
-  change.
+  user's. Reads are broad by default and never include Secrets. To expose a
+  custom resource, label a read-only ClusterRole
+  `axiom.dhilipkumars.github.io/aggregate-to-gateway: "true"`; to make one
+  writable, grant its verbs in the `axiom-gateway` ClusterRole. Then re-import —
+  foreign tables are catalog objects and do not follow the change. Only
+  revoking a grant needs a gateway restart.

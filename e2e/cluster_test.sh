@@ -38,7 +38,14 @@ phase5_rbac_down() {
 
 stack_up
 # "*.*" so RBAC is the only bound on what is offered -- the whole point of this gate.
-kind_deploy_gateway "*.*"
+# And the fixture as the only *read* grant, so the exact table set asserted below
+# is a consequence of it rather than of Kubernetes' `view` role, which the
+# shipped RBAC aggregates.
+E2E_UNBIND_SHIPPED_READ=1 kind_deploy_gateway "*.*"
+e2e_on_teardown shipped_read_restore
+shipped_read_restore() {
+  kubectl_e2e apply -f "$E2E_ROOT/deploy/k8s/gateway-rbac.yaml" >/dev/null 2>&1 || true
+}
 
 log "the gateway reports RBAC as its only bound"
 stack_logs "$E2E_SVC_GATEWAY" | grep -q '"bounded_by":"rbac"' \
@@ -186,9 +193,9 @@ log "revoking a kind's RBAC removes it from the next import"
 kubectl_e2e patch clusterrole axiom-gateway-phase5 --type=json \
   -p '[{"op":"replace","path":"/rules/1/resources","value":["nothing"]}]' >/dev/null \
   || fail "failed to revoke events.k8s.io"
-# The gateway caches access answers for its lifetime by design: an import asks
-# about every kind at once and RBAC does not change mid-import. Restarting is
-# how an operator picks up a changed ClusterRole.
+# The gateway caches what it is allowed for its lifetime by design: an import
+# asks about every kind at once and RBAC does not change mid-import. Restarting
+# is how an operator picks up a revoked grant.
 kind_restart_gateway
 stack_wait_for_log "$E2E_SVC_GATEWAY" '"msg":"gateway listening"' 60 >/dev/null
 psql_axiom "DROP SCHEMA IF EXISTS narrowed CASCADE;" >/dev/null
