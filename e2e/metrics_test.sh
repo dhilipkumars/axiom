@@ -274,7 +274,7 @@ SELECT t.customer || '|' || (sum(axiom_quantity(c->'usage'->>'memory')) > 0)
   JOIN k8s.metrics_k8s_io_pods m ON m.namespace = t.namespace,
        jsonb_array_elements(m.containers) c
  GROUP BY t.customer;")"
-[[ "$got" == "Acme|t" ]] || fail "memory per customer gave '$got'"
+[[ "$got" == "Acme|true" ]] || fail "memory per customer gave '$got'"
 psql_axiom "DROP TABLE tenants;" >/dev/null
 
 log "PASS"
