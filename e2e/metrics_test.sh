@@ -94,9 +94,8 @@ done
 probe_role_down
 stack_up
 # metrics.k8s.io names its resources `pods` and `nodes`, the same as the core
-# group, so both halves of both are served: the gate asserts the disambiguated
-# names. Serving only one half of a pair means no collision, and the metrics
-# table keeps the bare name.
+# group, so both of each pair are served: the gate asserts that each keeps a
+# name of its own (#80) and that the short name `pods` still means core pods.
 kind_deploy_gateway "pods,nodes,events,events.events.k8s.io,pods.metrics.k8s.io,nodes.metrics.k8s.io"
 
 log "applying fixture pods and waiting for Ready"
@@ -110,19 +109,25 @@ psql_axiom "CREATE SERVER kind FOREIGN DATA WRAPPER axiom_fdw OPTIONS (endpoint 
 psql_axiom "CREATE SCHEMA IF NOT EXISTS k8s;"
 psql_axiom "IMPORT FOREIGN SCHEMA k8s FROM SERVER kind INTO k8s;"
 
-log "the colliding names are disambiguated, not dropped"
+log "same-plural kinds each keep a name of their own"
+# #80: installing metrics-server used to rename core `pods` to `core_pods`.
+# Every table is now named for its group, whatever else is served.
 got="$(psql_axiom "SELECT string_agg(foreign_table_name, ',' ORDER BY foreign_table_name)
                      FROM information_schema.foreign_tables
                     WHERE foreign_table_schema = 'k8s'
-                      AND foreign_table_name LIKE 'pods%';")"
-[[ "$got" == "pods_core,pods_metrics_k8s_io" ]] \
-  || fail "expected pods_core,pods_metrics_k8s_io from the collision rule; got '$got'"
-got="$(psql_axiom "SELECT string_agg(foreign_table_name, ',' ORDER BY foreign_table_name)
-                     FROM information_schema.foreign_tables
-                    WHERE foreign_table_schema = 'k8s'
-                      AND foreign_table_name LIKE 'nodes%';")"
-[[ "$got" == "nodes_core,nodes_metrics_k8s_io" ]] \
-  || fail "expected nodes_core,nodes_metrics_k8s_io from the collision rule; got '$got'"
+                      AND foreign_table_name IN ('core_pods', 'metrics_k8s_io_pods',
+                                                 'core_nodes', 'metrics_k8s_io_nodes',
+                                                 'core_events', 'events_k8s_io_events');")"
+[[ "$got" == "core_events,core_nodes,core_pods,events_k8s_io_events,metrics_k8s_io_nodes,metrics_k8s_io_pods" ]] \
+  || fail "expected each same-plural kind under its own group-qualified name; got '$got'"
+
+log "the short name pods means core pods, with metrics-server installed"
+got="$(psql_axiom "SELECT string_agg(short_name || '>' || coalesce(target, '-'), ',' ORDER BY short_name)
+                     FROM axiom_create_short_names('k8s');")"
+for want in 'pods>core_pods' 'nodes>core_nodes' 'events>core_events'; do
+  [[ ",$got," == *",$want,"* ]] || fail "short names should include $want; got '$got'"
+done
+echo "$got"
 
 log "metrics reach SQL through the gateway ServiceAccount, and cover the fixture pods"
 # The fixture pods are seconds old, and metrics-server reports a pod only after
@@ -134,7 +139,7 @@ deadline=$((SECONDS + 180))
 while :; do
   want="$(kubectl_e2e top pods -n "$NS" --no-headers 2>/dev/null | awk '{print $1}' | sort | tr '\n' ',' || true)"
   got="$(psql_axiom "SELECT coalesce(string_agg(name, ',' ORDER BY name) || ',', '')
-                       FROM k8s.pods_metrics_k8s_io WHERE namespace = '$NS';")"
+                       FROM k8s.metrics_k8s_io_pods WHERE namespace = '$NS';")"
   [[ "$want" == "$pods" && "$got" == "$want" ]] && break
   (( SECONDS < deadline )) || fail $'pod metrics never covered the fixture pods\n--- pods:     '"$pods"$'\n--- kubectl:  '"$want"$'\n--- postgres: '"$got"
   sleep 5
@@ -142,8 +147,8 @@ done
 echo "$got"
 
 log "node metrics are present too"
-got="$(psql_axiom "SELECT count(*) FROM k8s.nodes_metrics_k8s_io;")"
-[[ "$got" -ge 1 ]] || fail "expected at least one node in nodes_metrics_k8s_io, got '$got'"
+got="$(psql_axiom "SELECT count(*) FROM k8s.metrics_k8s_io_nodes;")"
+[[ "$got" -ge 1 ]] || fail "expected at least one node in metrics_k8s_io_nodes, got '$got'"
 
 log "axiom_quantity turns quantity strings into numbers that compare and sum"
 # Exactness, not approximation: 100m is 0.1, and Mi is 1024-based, not 1000.
@@ -156,12 +161,12 @@ got="$(psql_axiom "SELECT coalesce(axiom_quantity('nonsense')::text, 'NULL');")"
 
 log "the numbers are usable: real memory usage summed across the fixture pods"
 got="$(psql_axiom "SELECT sum(axiom_quantity(c->'usage'->>'memory')) > 0
-                     FROM k8s.pods_metrics_k8s_io m, jsonb_array_elements(m.containers) c
+                     FROM k8s.metrics_k8s_io_pods m, jsonb_array_elements(m.containers) c
                     WHERE m.namespace = '$NS';")"
 [[ "$got" == "t" ]] || fail "summed memory usage was not positive: '$got'"
 
 log "events reach SQL from both API groups"
-for t in events_core events_events_k8s_io; do
+for t in core_events events_k8s_io_events; do
   psql_axiom "SELECT 1 FROM k8s.$t LIMIT 1;" >/dev/null || fail "$t is not queryable"
 done
 
@@ -177,8 +182,8 @@ deadline=$((SECONDS + 90))
 while :; do
   got="$(psql_axiom "
     SELECT p.name || '|' || (e.reason #>> '{}')
-      FROM k8s.events_core e
-      JOIN k8s.pods_core p ON p.namespace = e.namespace
+      FROM k8s.core_events e
+      JOIN k8s.core_pods p ON p.namespace = e.namespace
                           AND p.name = e.involved_object->>'name'
      WHERE e.type #>> '{}' = 'Warning'
        AND e.involved_object->>'kind' = 'Pod'
@@ -196,10 +201,10 @@ psql_axiom "
   WITH usage AS (
     SELECT m.namespace, m.name AS pod,
            sum(axiom_quantity(c->'usage'->>'memory')) AS mem_used
-      FROM k8s.pods_metrics_k8s_io m, jsonb_array_elements(m.containers) c
+      FROM k8s.metrics_k8s_io_pods m, jsonb_array_elements(m.containers) c
      GROUP BY 1,2)
   SELECT count(*)
-    FROM k8s.pods_core p
+    FROM k8s.core_pods p
     LEFT JOIN usage u ON u.namespace = p.namespace AND u.pod = p.name
    WHERE p.namespace = '$NS';" >/dev/null || fail "the cross-source join failed"
 

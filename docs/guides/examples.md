@@ -128,9 +128,9 @@ Kubernetes forgets. Events expire after about an hour and usage is only ever
 *now*, so the questions worth asking are the ones that combine both with live
 state — which is also what a single `kubectl` invocation cannot do.
 
-Two API groups name their resources the same as the core group, so Axiom
-disambiguates: core pods are `pods_core` once `metrics.k8s.io` is present, and
-events arrive as `events_core` and `events_events_k8s_io`.
+Two API groups reuse the core group's names. Every table is named for its
+group, so core pods are `core_pods` and their usage is `metrics_k8s_io_pods`,
+and events arrive as `core_events` and `events_k8s_io_events`.
 
 ### Why is that pod not running?
 
@@ -138,8 +138,8 @@ The pod's live state and the warning that explains it, on one row:
 
 ```sql
 SELECT p.name, p.phase, e.reason #>> '{}' AS reason, e.message #>> '{}' AS message
-  FROM k8s.events_core e
-  JOIN k8s.pods_core p ON p.namespace = e.namespace
+  FROM k8s.core_events e
+  JOIN k8s.core_pods p ON p.namespace = e.namespace
                       AND p.name = e.involved_object->>'name'
  WHERE e.type #>> '{}' = 'Warning'
    AND e.involved_object->>'kind' = 'Pod';
@@ -175,23 +175,23 @@ chain and events in one statement.
 WITH usage AS (
   SELECT m.namespace, m.name AS pod,
          sum(axiom_quantity(c->'usage'->>'memory')) AS mem_used
-    FROM k8s.pods_metrics_k8s_io m, jsonb_array_elements(m.containers) c
+    FROM k8s.metrics_k8s_io_pods m, jsonb_array_elements(m.containers) c
    GROUP BY 1, 2),
 spec AS (
   SELECT p.namespace, p.name AS pod,
          p.metadata->'ownerReferences'->0->>'name' AS rs,
          sum(axiom_quantity(c->'resources'->'requests'->>'memory')) AS mem_req,
          bool_or(c->'resources'->'limits' IS NULL) AS no_limits
-    FROM k8s.pods_core p, jsonb_array_elements(p.spec->'containers') c
+    FROM k8s.core_pods p, jsonb_array_elements(p.spec->'containers') c
    GROUP BY 1, 2, 3),
 owner AS (
   SELECT r.namespace, r.name AS rs,
          coalesce(r.metadata->'ownerReferences'->0->>'name', r.name) AS workload
-    FROM k8s.replicasets r),
+    FROM k8s.apps_replicasets r),
 warn AS (
   SELECT e.namespace, e.involved_object->>'name' AS pod,
          count(*) AS warnings, max(e.reason #>> '{}') AS why
-    FROM k8s.events_core e
+    FROM k8s.core_events e
    WHERE e.type #>> '{}' = 'Warning' AND e.involved_object->>'kind' = 'Pod'
    GROUP BY 1, 2)
 SELECT coalesce(o.workload, s.pod) AS workload,

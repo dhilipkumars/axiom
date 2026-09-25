@@ -236,10 +236,11 @@ Verify:
 ```sh
 docker exec axiom-postgres psql -U postgres -tAc \
   "SELECT string_agg(table_name, ',' ORDER BY table_name) FROM information_schema.tables
-    WHERE table_schema='k8s' AND table_name IN ('pods','configmaps','deployments','networkpolicies','secrets')"
+    WHERE table_schema='k8s' AND table_name IN ('core_pods','core_configmaps','apps_deployments','networking_k8s_io_networkpolicies','core_secrets')"
 ```
 
-Expect **`configmaps,deployments,networkpolicies,pods`**, with no `secrets`.
+Expect **`apps_deployments,core_configmaps,core_pods,networking_k8s_io_networkpolicies`**,
+with no `core_secrets`.
 
 The bundled RBAC reads broadly: everything in Kubernetes' `view` role plus
 nodes, storage, CRDs, RBAC objects, events and metrics. The whole schema holds

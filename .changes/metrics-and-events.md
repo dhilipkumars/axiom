@@ -3,8 +3,8 @@ kind: added
 ---
 
 **Usage and events are queryable, and their numbers behave like numbers.**
-`metrics.k8s.io` reaches SQL as `pods_metrics_k8s_io` and
-`nodes_metrics_k8s_io` alongside the events tables, so consumption, live spec
+`metrics.k8s.io` reaches SQL as `metrics_k8s_io_pods` and
+`metrics_k8s_io_nodes` alongside the events tables, so consumption, live spec
 and failure reasons can be joined in one statement — a capacity and risk
 review of a whole fleet as a single query.
 
