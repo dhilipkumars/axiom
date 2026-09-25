@@ -17,12 +17,8 @@ These assume you have finished [Getting started](getting-started.md), so server
     API group `axiom.dhilipkumars.github.io/aggregate-to-gateway: "true"`
     ([Getting started](getting-started.md#what-the-gateway-can-see) shows one).
     To make a kind **writable**, add its verbs to the `axiom-gateway`
-    ClusterRole. Either way, restart the gateway and re-import:
-
-    ```sh
-    kubectl -n axiom-system rollout restart deploy/axiom-gateway
-    kubectl -n axiom-system rollout status deploy/axiom-gateway
-    ```
+    ClusterRole. Neither needs a gateway restart; only revoking a grant does.
+    Either way, re-import:
 
     ```sql
     -- foreign tables are catalog objects; they do not follow an RBAC change
@@ -265,13 +261,11 @@ scale clusters:
 kubectl patch clusterrole axiom-gateway --type=json -p='[{"op":"add","path":"/rules/-","value":
   {"apiGroups":["postgresql.cnpg.io"],"resources":["clusters"],
    "verbs":["get","list","watch","create","update","delete"]}}]'
-
-kubectl -n axiom-system rollout restart deploy/axiom-gateway
-kubectl -n axiom-system rollout status deploy/axiom-gateway
 ```
 
-Foreign tables are catalog objects and do not follow an RBAC change, so import
-the kind after restarting:
+The gateway sees a new grant on the next import, with no restart. Foreign
+tables are catalog objects and do not follow an RBAC change, so import the
+kind now:
 
 ```sql
 IMPORT FOREIGN SCHEMA k8s LIMIT TO (postgresql_cnpg_io_clusters) FROM SERVER prod INTO k8s;

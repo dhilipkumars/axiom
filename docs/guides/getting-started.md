@@ -156,8 +156,6 @@ rules:
     resources: ["*"]
     verbs: ["get", "list", "watch"]
 YAML
-
-kubectl -n axiom-system rollout restart deploy/axiom-gateway
 ```
 
 Name the API group rather than using `"*"` there: a rule that reaches the core
@@ -510,8 +508,8 @@ DROP SCHEMA probe CASCADE;
 ```
 
 If the kind is absent there, the import is not the cause: it is RBAC. Grant
-it, restart the gateway so it re-reads what it may access, and re-import into
-the real schema.
+it and re-import into the real schema; the gateway re-checks a kind it was
+denied, so no restart is needed.
 
 A kind that has been *removed* from the cluster is the mirror case, and needs
 no intervention: resource lists expire after `-discovery-ttl`, five minutes by

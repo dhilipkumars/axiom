@@ -316,6 +316,6 @@ rm -rf ~/axiom-quickstart
   user's. Reads are broad by default and never include Secrets. To expose a
   custom resource, label a read-only ClusterRole
   `axiom.dhilipkumars.github.io/aggregate-to-gateway: "true"`; to make one
-  writable, grant its verbs in the `axiom-gateway` ClusterRole. Then restart the
-  gateway and re-import — foreign tables are catalog objects and do not follow
-  the change.
+  writable, grant its verbs in the `axiom-gateway` ClusterRole. Then re-import —
+  foreign tables are catalog objects and do not follow the change. Only
+  revoking a grant needs a gateway restart.
