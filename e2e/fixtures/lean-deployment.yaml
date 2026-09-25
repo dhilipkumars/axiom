@@ -1,0 +1,48 @@
+# A Deployment that reserves far more memory than it uses, for the metrics
+# gate's find-and-fix query. `pause` idles at a few hundred KiB against a 64Mi
+# request, so it is always well under any sensible utilisation threshold.
+#
+# Named `lean`, not `web`: pods.yaml holds bare pods labelled app=web, and a
+# ReplicaSet whose selector matched them would adopt them.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lean
+  namespace: axiom-e2e
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: lean }
+  template:
+    metadata:
+      labels: { app: lean }
+    spec:
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.10
+          resources:
+            requests: { memory: 64Mi }
+---
+# SQL may annotate Deployments in this gate, and only here: the shipped RBAC
+# grants writes per resource and deliberately not this one.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: axiom-e2e-deployment-write
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: axiom-e2e-deployment-write
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: axiom-e2e-deployment-write
+subjects:
+  - kind: ServiceAccount
+    name: axiom-gateway
+    namespace: axiom-system

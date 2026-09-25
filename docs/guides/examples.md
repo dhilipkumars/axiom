@@ -225,6 +225,93 @@ the same row.
 that have no metrics because they never started — the ones you most want to
 see.
 
+### Find it and fix it in one statement
+
+The review above produces a list. A write turns it into an action: annotate
+every Deployment that uses under a fifth of the memory it requests, so the
+finding sits on the object itself where `kubectl describe` and every other tool
+will see it.
+
+The shipped RBAC grants writes per resource and not this one, so grant it
+first:
+
+```sh
+kubectl patch clusterrole axiom-gateway --type=json -p='[{"op":"add","path":"/rules/-","value":
+  {"apiGroups":["apps"],"resources":["deployments"],"verbs":["get","list","watch","update"]}}]'
+```
+
+```sql
+WITH used AS (
+  SELECT m.namespace, m.name AS pod, sum(axiom_quantity(c->'usage'->>'memory')) AS bytes
+    FROM k8s.metrics_k8s_io_pods m, jsonb_array_elements(m.containers) c
+   GROUP BY 1, 2),
+requested AS (
+  SELECT p.namespace, p.name AS pod,
+         r.metadata->'ownerReferences'->0->>'name' AS deployment,
+         sum(axiom_quantity(c->'resources'->'requests'->>'memory')) AS bytes
+    FROM k8s.core_pods p
+    JOIN k8s.apps_replicasets r
+      ON r.namespace = p.namespace AND r.name = p.metadata->'ownerReferences'->0->>'name',
+         jsonb_array_elements(p.spec->'containers') c
+   GROUP BY 1, 2, 3),
+ratio AS (
+  SELECT q.namespace, q.deployment, round(100 * sum(u.bytes) / sum(q.bytes)) AS pct
+    FROM requested q JOIN used u USING (namespace, pod)
+   GROUP BY 1, 2
+  HAVING sum(q.bytes) > 0)
+UPDATE k8s.apps_deployments d
+   SET annotations = coalesce(d.annotations, '{}')
+                     || jsonb_build_object('axiom/memory-used-pct', r.pct::text)
+  FROM ratio r
+ WHERE d.namespace = r.namespace AND d.name = r.deployment AND r.pct < 20
+RETURNING d.namespace, d.name, r.pct;
+```
+
+```sh
+kubectl get deploy lean -o jsonpath='{.metadata.annotations.axiom/memory-used-pct}'
+```
+
+Each row is a real Kubernetes update, carrying the `resourceVersion` it read,
+so a Deployment that changed in the meantime fails the statement with `40001`
+rather than being overwritten. Annotating changes no pod template, so nothing
+rolls. Rewriting `resources.requests` instead would right-size the workload in
+the same statement, and would also restart every pod it touched. That is why
+the example annotates.
+
+### Join the cluster to your own data
+
+Axiom runs inside your application's Postgres, so live cluster state joins to
+your business tables directly. There is no export and no copy going stale. With
+a table mapping namespaces to customers:
+
+```sql
+CREATE TABLE tenants (namespace text PRIMARY KEY, customer text, plan text);
+```
+
+Which customers are hit by a failing pod right now, and why:
+
+```sql
+SELECT t.customer, t.plan, p.name AS pod, e.reason #>> '{}' AS reason
+  FROM tenants t
+  JOIN k8s.core_pods p ON p.namespace = t.namespace
+  JOIN k8s.core_events e ON e.namespace = p.namespace
+                        AND e.involved_object->>'name' = p.name
+ WHERE e.type #>> '{}' = 'Warning'
+   AND e.involved_object->>'kind' = 'Pod';
+```
+
+Memory in use per customer, which is the start of a chargeback report:
+
+```sql
+SELECT t.customer,
+       round(sum(axiom_quantity(c->'usage'->>'memory')) / 1024 / 1024) AS mem_mib
+  FROM tenants t
+  JOIN k8s.metrics_k8s_io_pods m ON m.namespace = t.namespace,
+       jsonb_array_elements(m.containers) c
+ GROUP BY t.customer
+ ORDER BY mem_mib DESC;
+```
+
 ### Requirements
 
 Usage tables need [metrics-server][ms] installed in the cluster; without it

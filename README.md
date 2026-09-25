@@ -43,9 +43,9 @@ either system pretending to be the other.
 ## Questions that need a query language
 
 *More, including creating and scaling a CloudNativePG cluster from SQL, in
-[Examples](https://dhilipkumars.github.io/axiom/guides/examples/). Which kinds
-you can query is bounded by the gateway's RBAC — `nodes` and `deployments` below
-need granting, which the examples page shows how to do.*
+[Examples](https://dhilipkumars.github.io/axiom/guides/examples/). What you can
+query is bounded by the gateway's RBAC. The shipped role reads broadly and never
+reads Secrets; writes are granted per resource.*
 
 *Tables are named for their API group — `core_pods`, `apps_deployments`,
 `postgresql_cnpg_io_clusters` — so a name never changes because something else
@@ -107,6 +107,59 @@ DELETE FROM k8s.core_configmaps WHERE namespace = 'staging' AND name = 'stale-fl
 
 Pods are deliberately read-only at the SQL layer, whatever RBAC allows — a
 `DELETE` with a `WHERE` clause is too easy to get wrong and too hard to undo.
+
+**Find it and fix it in one statement.** Which deployments use less than a
+fifth of the memory they reserve? This reads live usage from metrics-server,
+joins it to each pod's spec, follows ownership from pod to ReplicaSet to
+Deployment, and writes the answer back onto the Deployment as an annotation. A
+tool that can only read would stop at the list:
+
+```sql
+WITH used AS (
+  SELECT m.namespace, m.name AS pod, sum(axiom_quantity(c->'usage'->>'memory')) AS bytes
+    FROM k8s.metrics_k8s_io_pods m, jsonb_array_elements(m.containers) c
+   GROUP BY 1, 2),
+requested AS (
+  SELECT p.namespace, p.name AS pod,
+         r.metadata->'ownerReferences'->0->>'name' AS deployment,
+         sum(axiom_quantity(c->'resources'->'requests'->>'memory')) AS bytes
+    FROM k8s.core_pods p
+    JOIN k8s.apps_replicasets r
+      ON r.namespace = p.namespace AND r.name = p.metadata->'ownerReferences'->0->>'name',
+         jsonb_array_elements(p.spec->'containers') c
+   GROUP BY 1, 2, 3),
+ratio AS (
+  SELECT q.namespace, q.deployment, round(100 * sum(u.bytes) / sum(q.bytes)) AS pct
+    FROM requested q JOIN used u USING (namespace, pod)
+   GROUP BY 1, 2
+  HAVING sum(q.bytes) > 0)
+UPDATE k8s.apps_deployments d
+   SET annotations = coalesce(d.annotations, '{}')
+                     || jsonb_build_object('axiom/memory-used-pct', r.pct::text)
+  FROM ratio r
+ WHERE d.namespace = r.namespace AND d.name = r.deployment AND r.pct < 20
+RETURNING d.namespace, d.name, r.pct;
+```
+
+`axiom_quantity()` is what makes that arithmetic possible. Kubernetes reports
+`49903n` of CPU and `14488Ki` of memory as strings, and it turns them into exact
+numbers. Annotating a Deployment needs `update` on `deployments` in the
+gateway's ClusterRole, which the shipped one deliberately does not grant.
+
+**Join the cluster to your own data.** Axiom runs inside your application's
+Postgres, so live cluster state joins to your business tables directly, with no
+export and no copy going stale. Which customers are hit by a failing pod right
+now?
+
+```sql
+SELECT t.customer, t.plan, p.name AS pod, e.reason #>> '{}' AS reason
+  FROM tenants t
+  JOIN k8s.core_pods p ON p.namespace = t.namespace
+  JOIN k8s.core_events e ON e.namespace = p.namespace
+                        AND e.involved_object->>'name' = p.name
+ WHERE e.type #>> '{}' = 'Warning'
+   AND e.involved_object->>'kind' = 'Pod';
+```
 
 **Find crash-looping pods.** `CrashLoopBackOff` is a container waiting reason,
 not a pod phase — so it lives in a nested field `kubectl` cannot filter on:

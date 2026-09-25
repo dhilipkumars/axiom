@@ -96,10 +96,14 @@ stack_up
 # metrics.k8s.io names its resources `pods` and `nodes`, the same as the core
 # group, so both of each pair are served: the gate asserts that each keeps a
 # name of its own (#80) and that the short name `pods` still means core pods.
-kind_deploy_gateway "pods,nodes,events,events.events.k8s.io,pods.metrics.k8s.io,nodes.metrics.k8s.io"
+kind_deploy_gateway "pods,nodes,events,events.events.k8s.io,pods.metrics.k8s.io,nodes.metrics.k8s.io,deployments.apps,replicasets.apps"
 
-log "applying fixture pods and waiting for Ready"
+log "applying fixture pods and a deployment, and waiting for Ready"
 kind_apply "$here/fixtures/pods.yaml"
+kind_apply "$here/fixtures/lean-deployment.yaml"
+lean_down() { kubectl_e2e delete -f "$here/fixtures/lean-deployment.yaml" --ignore-not-found --wait=false >/dev/null 2>&1 || true; }
+e2e_on_teardown lean_down
+kubectl_e2e -n "$NS" rollout status deploy/lean --timeout=120s >/dev/null || fail "deployment lean did not roll out"
 kind_wait_pods "$NS"
 
 log "defining the server and importing"
@@ -207,5 +211,70 @@ psql_axiom "
     FROM k8s.core_pods p
     LEFT JOIN usage u ON u.namespace = p.namespace AND u.pod = p.name
    WHERE p.namespace = '$NS';" >/dev/null || fail "the cross-source join failed"
+
+log "find and fix in one statement: annotate deployments using under 20% of the memory they request"
+# The README's query, verbatim apart from the namespace filter. It reads live
+# usage and live spec, walks pod -> ReplicaSet -> Deployment, and writes the
+# answer back as a real Kubernetes update, which no read-only tool can do.
+got="$(psql_axiom "
+WITH used AS (
+  SELECT m.namespace, m.name AS pod, sum(axiom_quantity(c->'usage'->>'memory')) AS bytes
+    FROM k8s.metrics_k8s_io_pods m, jsonb_array_elements(m.containers) c
+   GROUP BY 1, 2),
+requested AS (
+  SELECT p.namespace, p.name AS pod,
+         r.metadata->'ownerReferences'->0->>'name' AS deployment,
+         sum(axiom_quantity(c->'resources'->'requests'->>'memory')) AS bytes
+    FROM k8s.core_pods p
+    JOIN k8s.apps_replicasets r
+      ON r.namespace = p.namespace AND r.name = p.metadata->'ownerReferences'->0->>'name',
+         jsonb_array_elements(p.spec->'containers') c
+   GROUP BY 1, 2, 3),
+ratio AS (
+  SELECT q.namespace, q.deployment, round(100 * sum(u.bytes) / sum(q.bytes)) AS pct
+    FROM requested q JOIN used u USING (namespace, pod)
+   GROUP BY 1, 2
+  HAVING sum(q.bytes) > 0)
+UPDATE k8s.apps_deployments d
+   SET annotations = coalesce(d.annotations, '{}')
+                     || jsonb_build_object('axiom/memory-used-pct', r.pct::text)
+  FROM ratio r
+ WHERE d.namespace = r.namespace AND d.name = r.deployment AND r.pct < 20
+   AND d.namespace = '$NS'
+RETURNING d.name || '|' || r.pct;")" || fail "the find-and-fix UPDATE failed"
+echo "$got"
+[[ "$got" == lean\|* ]] || fail "expected the UPDATE to annotate lean; RETURNING gave '$got'"
+pct="${got#lean|}"
+annotation="$(kubectl_e2e -n "$NS" get deploy lean -o jsonpath='{.metadata.annotations.axiom/memory-used-pct}')"
+[[ "$annotation" == "$pct" ]] \
+  || fail "the annotation on deploy/lean is '$annotation', want '$pct' from RETURNING"
+echo "deploy/lean annotated axiom/memory-used-pct=$annotation"
+
+log "the cluster joins to the application's own tables"
+# Axiom lives in the application's Postgres, so live cluster state joins to
+# business data in one query, with no export and no copy that goes stale.
+psql_axiom "DROP TABLE IF EXISTS tenants;
+            CREATE TABLE tenants (namespace text PRIMARY KEY, customer text, plan text);
+            INSERT INTO tenants VALUES ('$NS', 'Acme', 'enterprise');" >/dev/null
+got="$(psql_axiom "
+SELECT t.customer || '|' || t.plan || '|' || p.name || '|' || (e.reason #>> '{}')
+  FROM tenants t
+  JOIN k8s.core_pods p ON p.namespace = t.namespace
+  JOIN k8s.core_events e ON e.namespace = p.namespace
+                        AND e.involved_object->>'name' = p.name
+ WHERE e.type #>> '{}' = 'Warning'
+   AND e.involved_object->>'kind' = 'Pod'
+   AND p.name = 'broken'
+ LIMIT 1;")"
+[[ "$got" == "Acme|enterprise|broken|"?* ]] || fail "customer join to failing pods gave '$got'"
+echo "$got"
+got="$(psql_axiom "
+SELECT t.customer || '|' || (sum(axiom_quantity(c->'usage'->>'memory')) > 0)
+  FROM tenants t
+  JOIN k8s.metrics_k8s_io_pods m ON m.namespace = t.namespace,
+       jsonb_array_elements(m.containers) c
+ GROUP BY t.customer;")"
+[[ "$got" == "Acme|t" ]] || fail "memory per customer gave '$got'"
+psql_axiom "DROP TABLE tenants;" >/dev/null
 
 log "PASS"
