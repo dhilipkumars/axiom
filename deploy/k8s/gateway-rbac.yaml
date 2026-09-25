@@ -57,9 +57,10 @@
 # the mutating verbs are granted per resource, in the `axiom-gateway` role.
 # Add a resource there only when you intend SQL to be able to change it.
 #
-# Changing RBAC requires a gateway restart -- it caches what it may access --
-# and then a re-import, since foreign tables are catalog objects and do not
-# follow the change themselves.
+# A new grant is seen on the next import: the gateway re-asks about any kind it
+# was denied. A revoked or narrowed grant needs a gateway restart, because what
+# it was allowed is cached for its lifetime. Either way re-import afterwards,
+# since foreign tables are catalog objects and do not follow the change.
 apiVersion: v1
 kind: Namespace
 metadata:

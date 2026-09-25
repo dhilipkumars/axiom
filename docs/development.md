@@ -109,7 +109,7 @@ gateway](guides/deploying.md). Supporting remote clusters from `local-dev` is
 tracked in [#68](https://github.com/dhilipkumars/axiom/issues/68).
 
 **Re-running is how you pick up a newly granted kind.** The gateway reads its
-kubeconfig once and caches authorization decisions for its lifetime, so
+kubeconfig once and caches what it is allowed for its lifetime, so
 `local-dev-up` recreates it rather than leaving it running. It also replaces the
 imported foreign tables — only those, and without `CASCADE`, so if a view of
 yours depends on one it stops and tells you rather than dropping your work.
@@ -534,10 +534,12 @@ the served set follows; there is no second list to keep in step.
 Two consequences worth knowing. Kubernetes grants some kinds to every
 ServiceAccount through its own default bindings, so a few things appear that
 your ClusterRole never mentions — `clustertrustbundles` is bound to the
-`system:serviceaccounts` group, for instance. And access answers are cached for
+`system:serviceaccounts` group, for instance. And allowed answers are cached for
 the gateway's lifetime, because an import asks about every kind at once and
-RBAC does not change mid-import, so restart the gateway to pick up a changed
-ClusterRole.
+RBAC does not change mid-import, so restart the gateway after revoking a grant.
+Denials are not cached: the shipped read role is aggregated asynchronously, so
+a gateway that started before it was filled in would otherwise keep "no" for
+pods, and re-asking also lets a new grant appear without a restart.
 
 The `--serve` flag remains as optional narrowing, a comma list of
 `plural[.group]` entries where `*.group` covers a group and `*.*` covers

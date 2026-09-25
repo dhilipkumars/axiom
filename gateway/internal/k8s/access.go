@@ -37,16 +37,23 @@ type AccessChecker interface {
 //
 // SSAR is granted to every authenticated identity by the built-in
 // `system:basic-user` ClusterRole, so this needs no permission beyond what the
-// gateway already has. Answers are cached for the process lifetime: an import
-// asks about every served kind at once, and RBAC does not change mid-import.
-// A gateway restart picks up a changed ClusterRole.
+// gateway already has.
+//
+// Allowed answers are cached for the process lifetime: an import asks about
+// every served kind at once, and RBAC does not change mid-import. Denials are
+// not cached. The shipped read role is an aggregated ClusterRole that the
+// controller fills in asynchronously after it is applied, so a gateway that
+// starts inside that window would otherwise cache "no" for pods and keep it
+// until restarted. Re-asking costs one review per denied kind per import, and
+// it also means a newly granted kind -- a labelled ClusterRole for a CRD, say --
+// appears without a restart. A revoked grant still needs one.
 type SelfAccess struct {
 	client authv1client.SelfSubjectAccessReviewInterface
 
 	reviews atomic.Uint64
 
 	mu     sync.Mutex
-	cached map[schema.GroupVersionResource]bool
+	cached map[schema.GroupVersionResource]bool // allowed answers only
 }
 
 // AccessReviews reports the number of SelfSubjectAccessReview calls issued to the
@@ -98,10 +105,11 @@ func (s *SelfAccess) CanList(ctx context.Context, gvr schema.GroupVersionResourc
 		return false, fmt.Errorf("access review for %s was not evaluated: %s", gvr.String(), e)
 	}
 	allowed := got.Status.Allowed
-
-	s.mu.Lock()
-	s.cached[gvr] = allowed
-	s.mu.Unlock()
+	if allowed {
+		s.mu.Lock()
+		s.cached[gvr] = true
+		s.mu.Unlock()
+	}
 	return allowed, nil
 }
 

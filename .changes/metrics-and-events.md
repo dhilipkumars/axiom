@@ -23,3 +23,7 @@ reached through it.** Custom resources are included when their operator ships
 an `aggregate-to-view` role, or when you label a read-only ClusterRole with
 `axiom.dhilipkumars.github.io/aggregate-to-gateway: "true"`. Mutating verbs
 stay enumerated per resource.
+
+A new RBAC grant, such as a labelled ClusterRole for a CRD, now appears on the
+next import without restarting the gateway. Revoking a grant still needs a
+restart.

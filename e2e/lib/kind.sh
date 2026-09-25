@@ -213,17 +213,15 @@ check ownership in $tmp"
   rm -rf "$tmp"
 }
 
-# kind_deploy_gateway [SERVE]: apply the Deployment and wait for it to be ready.
-# SERVE is the --serve allowlist; gates need different values, so it is applied
-# with `kubectl set env` after the manifest rather than baked into it.
 # kind_wait_rbac_aggregated: block until the gateway's read role has been
 # filled in by the aggregation controller.
 #
 # `axiom-gateway-read` has no rules of its own; the controller copies them in
 # from every matching ClusterRole, asynchronously, after the apply returns. The
-# gateway caches access answers for its lifetime, so one that starts inside
-# that window caches "no" for pods and keeps it. One permission from each
-# source is checked: pods from Kubernetes' `view`, nodes from the extra role.
+# gateway re-asks about a kind it was denied, so it would recover by itself,
+# but a gate asserting what the gateway sees must not start inside that window.
+# One permission from each source is checked: pods from Kubernetes' `view`,
+# nodes from the extra role.
 kind_wait_rbac_aggregated() {
   local sa="system:serviceaccount:$E2E_GATEWAY_SA_NS:$E2E_GATEWAY_SA"
   local deadline=$((SECONDS + 60))
@@ -234,6 +232,9 @@ kind_wait_rbac_aggregated() {
   done
 }
 
+# kind_deploy_gateway [SERVE]: apply the Deployment and wait for it to be ready.
+# SERVE is the --serve allowlist; gates need different values, so it is applied
+# with `kubectl set env` after the manifest rather than baked into it.
 kind_deploy_gateway() {
   local serve="${1:-pods,configmaps,widgets.example.com}"
   # Second argument: how long the gateway trusts a cached resource list.

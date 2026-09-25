@@ -250,9 +250,9 @@ and their absence is part of the check.
 
 Custom resources appear when their operator ships an `aggregate-to-view`
 role, or once a read-only ClusterRole for them is labelled
-`axiom.dhilipkumars.github.io/aggregate-to-gateway: "true"`. Restart the
-gateway after any RBAC change (it caches what it may access), then import
-again.
+`axiom.dhilipkumars.github.io/aggregate-to-gateway: "true"`. A new grant is
+seen on the next import; after revoking one, restart the gateway (it caches
+what it is allowed). Either way, import again.
 
 ## Step 6 — success criterion
 

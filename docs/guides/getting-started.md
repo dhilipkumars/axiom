@@ -164,9 +164,10 @@ Name the API group rather than using `"*"` there: a rule that reaches the core
 group with a wildcard grants Secrets. Writes are separate, and granted per
 resource in the `axiom-gateway` ClusterRole.
 
-Restart the gateway after an RBAC change: it caches what it may read, so the
-new grant appears on the next start. Then re-run `IMPORT FOREIGN SCHEMA`, since
-foreign tables are catalog objects and do not follow the change on their own.
+A new grant is seen on the next import, with no restart. Revoking one does need
+a restart, because the gateway caches what it is allowed. Either way, re-run
+`IMPORT FOREIGN SCHEMA`, since foreign tables are catalog objects and do not
+follow the change on their own.
 
 Grant only the verbs you want available. A kind granted `get`, `list` and
 `watch` is readable and cacheable but not writable, and the generated table

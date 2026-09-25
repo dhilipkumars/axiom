@@ -124,7 +124,8 @@ intend to believe.
 ## Operational notes
 
 **Restarting** the gateway is safe at any time, and is required after an RBAC
-change: access decisions are cached for the process lifetime. A kind removed
+grant is revoked or narrowed: what the gateway is allowed is cached for the
+process lifetime. A new grant needs no restart; the next import sees it. A kind removed
 from the cluster needs no restart — resource lists expire after
 `-discovery-ttl`, five minutes by default, and a re-import then reflects the
 cluster.

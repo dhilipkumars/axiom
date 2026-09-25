@@ -86,20 +86,55 @@ func TestSelfAccessReportsAllowedAndDenied(t *testing.T) {
 	}
 }
 
-func TestSelfAccessCachesBothAnswers(t *testing.T) {
+func TestSelfAccessCachesAllowedButRechecksDenied(t *testing.T) {
 	t.Parallel()
-	// A denial must be cached too: an import asks about every kind, and
-	// re-asking the denied ones would double the round-trips for no benefit.
-	for _, answer := range []bool{true, false} {
-		a, _, calls := ssarClient(t, allow(answer))
-		for range 4 {
-			if _, err := a.CanList(context.Background(), podsGVR); err != nil {
-				t.Fatal(err)
-			}
+	// An allowed answer is asked once for the process lifetime.
+	a, _, calls := ssarClient(t, allow(true))
+	for range 4 {
+		if _, err := a.CanList(context.Background(), podsGVR); err != nil {
+			t.Fatal(err)
 		}
-		if got := calls.Load(); got != 1 {
-			t.Errorf("allowed=%v: issued %d reviews for 4 calls, want 1", answer, got)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("allowed: issued %d reviews for 4 calls, want 1", got)
+	}
+
+	// A denial is asked every time. The shipped read role is aggregated, and
+	// a gateway that starts before the controller fills it in must not keep
+	// that "no" for its lifetime.
+	a, _, calls = ssarClient(t, allow(false))
+	for range 4 {
+		if _, err := a.CanList(context.Background(), podsGVR); err != nil {
+			t.Fatal(err)
 		}
+	}
+	if got := calls.Load(); got != 4 {
+		t.Errorf("denied: issued %d reviews for 4 calls, want 4", got)
+	}
+}
+
+func TestSelfAccessAGrantArrivingLaterIsSeen(t *testing.T) {
+	t.Parallel()
+	// The race itself: the first review says no, as it would before the
+	// aggregation controller has filled in the role, and a later one says yes.
+	var granted atomic.Bool
+	a, _, calls := ssarClient(t, func(in *authv1.SelfSubjectAccessReview) (*authv1.SelfSubjectAccessReview, error) {
+		return allow(granted.Load())(in)
+	})
+	ctx := context.Background()
+	if ok, err := a.CanList(ctx, podsGVR); err != nil || ok {
+		t.Fatalf("before the grant: ok=%v err=%v, want false", ok, err)
+	}
+	granted.Store(true)
+	if ok, err := a.CanList(ctx, podsGVR); err != nil || !ok {
+		t.Fatalf("after the grant: ok=%v err=%v, want true", ok, err)
+	}
+	// And once allowed, it is cached like any other allowed answer.
+	if _, err := a.CanList(ctx, podsGVR); err != nil {
+		t.Fatal(err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("issued %d reviews, want 2", got)
 	}
 }
 
