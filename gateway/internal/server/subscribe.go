@@ -75,18 +75,17 @@ func (s *Server) Subscribe(req *axiomv1.SubscribeRequest, stream axiomv1.Gateway
 			count int
 			token string
 		)
-		// One limit for the whole walk. A continue token may only be used
-		// with identical query parameters apart from continue itself (see
-		// ListOptions.Continue), so the size is settled on the first page and
-		// then carried, rather than renegotiated per page.
+		// The limit is settled on the first page and carried, shrinking
+		// further on a continuation only where the API server allows it
+		// (shrinkPermission).
 		pageLimit := int32(defaultPageSize)
 		for {
 			// The same byte-bounded fetch the unary List uses. Paging by count
 			// alone would leave the memory spike in place for exactly the
 			// kinds that cause it: 200 ConfigMaps of a megabyte each is 200
 			// MiB materialised before the first event goes out.
-			// Only the first page may shrink; after that the token fixes it.
-			_, list, _, effective, err := s.fetchBoundedPage(ctx, gvk, ns, "", pageLimit, token, token == "")
+			_, list, _, effective, err := s.fetchBoundedPage(ctx, gvk, ns, "", pageLimit, token,
+				s.shrinkPermission(ctx, gvk, token))
 			if err != nil {
 				return err
 			}

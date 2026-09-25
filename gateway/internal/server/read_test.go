@@ -410,3 +410,160 @@ func TestListReportsASingleObjectOverTheBudget(t *testing.T) {
 		t.Errorf("error should explain that paging cannot help: %v", err)
 	}
 }
+
+// localPagingClient is a pagingClient whose kind kube-apiserver serves itself,
+// so a continuation may be re-requested at a smaller limit.
+type localPagingClient struct {
+	*pagingClient
+	asked int
+}
+
+func (l *localPagingClient) ServedLocally(context.Context, schema.GroupVersion) bool {
+	l.asked++
+	return true
+}
+
+// unevenPages is four tiny objects then four of 1.5 MiB: at a limit of 4 the
+// first page fits and the second is 6 MiB, over the budget. This is #85's
+// shape -- CRDs whose sizes vary by orders of magnitude across a collection.
+func unevenPages() []unstructured.Unstructured {
+	items := make([]unstructured.Unstructured, 0, 8)
+	for i := range 4 {
+		items = append(items, padded(fmt.Sprintf("a-small-%d", i), 8))
+	}
+	for i := range 4 {
+		items = append(items, padded(fmt.Sprintf("b-large-%d", i), 3<<19))
+	}
+	return items
+}
+
+// walk lists to the end with the same request each time, as the extension
+// does, and returns every object's name in the order received.
+func walk(t *testing.T, s *Server, limit int32) ([]string, error) {
+	t.Helper()
+	gvk := &axiomv1.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}
+	var names []string
+	token := ""
+	for {
+		resp, err := s.List(context.Background(), &axiomv1.ListRequest{Gvk: gvk, Limit: limit, ContinueToken: token})
+		if err != nil {
+			return names, err
+		}
+		size := 0
+		for _, o := range resp.GetObjects() {
+			names = append(names, o.GetName())
+			size += len(o.GetJson())
+		}
+		if size > maxPageBytes {
+			t.Fatalf("a page of %d bytes went out, over the %d budget", size, maxPageBytes)
+		}
+		if token = resp.GetContinueToken(); token == "" {
+			return names, nil
+		}
+	}
+}
+
+func TestListShrinksALaterPageThatOutgrowsTheFirst(t *testing.T) {
+	t.Parallel()
+	items := unevenPages()
+	lc := &localPagingClient{pagingClient: &pagingClient{items: items}}
+	names, err := walk(t, New("test", nil, lc, nil), 4)
+	if err != nil {
+		t.Fatalf("#85: a later page larger than the first failed the listing: %v", err)
+	}
+
+	// Every object exactly once, in order: a shrunk continuation resumed where
+	// the token pointed, neither repeating nor skipping.
+	if len(names) != len(items) {
+		t.Fatalf("got %d objects, want %d: %v", len(names), len(items), names)
+	}
+	for i, it := range items {
+		if names[i] != it.GetName() {
+			t.Fatalf("object %d is %s, want %s: %v", i, names[i], it.GetName(), names)
+		}
+	}
+	// Page one at 4; page two tried at 4 and shrank; the smaller size then
+	// carried through the cursor rather than resetting to 4 on page three.
+	lim := lc.limits
+	if lim[0] != 4 || lim[1] != 4 || lim[2] >= 4 {
+		t.Fatalf("limits were %v; want 4, 4, then smaller", lim)
+	}
+	if last := lim[len(lim)-1]; last != lim[2] {
+		t.Errorf("limits were %v: the shrunk size did not carry to the next page", lim)
+	}
+	if lc.asked == 0 {
+		t.Error("never asked whether the kind is served locally")
+	}
+}
+
+func TestListDoesNotAskAboutAggregationWhenPagesFit(t *testing.T) {
+	t.Parallel()
+	items := make([]unstructured.Unstructured, 7)
+	for i := range items {
+		items[i] = padded(fmt.Sprintf("cm-%d", i), 8)
+	}
+	lc := &localPagingClient{pagingClient: &pagingClient{items: items}}
+	if _, err := walk(t, New("test", nil, lc, nil), 3); err != nil {
+		t.Fatal(err)
+	}
+	if lc.asked != 0 {
+		t.Errorf("asked about aggregation %d times on a listing that never needed to shrink", lc.asked)
+	}
+}
+
+func TestListKeepsAnAggregatedContinuationFixed(t *testing.T) {
+	t.Parallel()
+	// A client that cannot vouch for local serving -- an aggregated API, or
+	// one whose APIService could not be read -- keeps today's behaviour: the
+	// oversized continuation is reported, not re-requested.
+	pc := &pagingClient{items: unevenPages()}
+	_, err := walk(t, New("test", nil, pc, nil), 4)
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("err = %v, want ResourceExhausted", err)
+	}
+	if !strings.Contains(err.Error(), "cannot be split further") {
+		t.Errorf("the existing explanation changed: %v", err)
+	}
+	if len(pc.limits) != 2 || pc.limits[1] != 4 {
+		t.Errorf("limits were %v; an aggregated continuation must not be re-requested smaller", pc.limits)
+	}
+}
+
+// refusingClient is kube-apiserver's future self, if it ever starts enforcing
+// the List contract's identical-parameters rule on continuations.
+type refusingClient struct{ *localPagingClient }
+
+func (r *refusingClient) List(ctx context.Context, gvk schema.GroupVersionKind, ns, name string, limit int64, cont string) (*unstructured.UnstructuredList, error) {
+	if cont != "" && len(r.limits) > 0 && limit < r.limits[0] {
+		r.limits = append(r.limits, limit)
+		return nil, apierrors.NewBadRequest("continue token was issued for a different limit")
+	}
+	return r.localPagingClient.List(ctx, gvk, ns, name, limit, cont)
+}
+
+func TestListExplainsAContinuationRefusedAtASmallerLimit(t *testing.T) {
+	t.Parallel()
+	rc := &refusingClient{&localPagingClient{pagingClient: &pagingClient{items: unevenPages()}}}
+	_, err := walk(t, New("test", nil, rc, nil), 4)
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("err = %v, want ResourceExhausted rather than a bare InvalidArgument", err)
+	}
+	if !strings.Contains(err.Error(), "refused a smaller page size") {
+		t.Errorf("the error does not say what happened: %v", err)
+	}
+}
+
+func TestListStillReportsAnObjectTooLargeOnAContinuation(t *testing.T) {
+	t.Parallel()
+	// Shrinking a continuation bottoms out at one object, as it does on page
+	// one: a single object over the budget cannot be helped.
+	items := []unstructured.Unstructured{padded("small", 8), padded("huge", 5<<20)}
+	lc := &localPagingClient{pagingClient: &pagingClient{items: items}}
+	_, err := walk(t, New("test", nil, lc, nil), 1)
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("err = %v, want ResourceExhausted", err)
+	}
+	if last := lc.limits[len(lc.limits)-1]; last != 1 {
+		t.Errorf("limits were %v; should have bottomed out at 1", lc.limits)
+	}
+}

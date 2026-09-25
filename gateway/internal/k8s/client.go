@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -93,6 +94,10 @@ var ErrNoCluster = errors.New("gateway has no cluster credentials configured")
 type Dynamic struct {
 	dyn dynamic.Interface
 	Mapper
+
+	// local holds the group-versions ServedLocally has confirmed, as
+	// schema.GroupVersion keys. Only positive answers are kept; see there.
+	local sync.Map
 }
 
 // OpenAPIFetches implements StatsReporter by delegating to Mapper if supported.
@@ -117,6 +122,46 @@ func (c *Dynamic) AccessReviews() uint64 {
 		return sr.AccessReviews()
 	}
 	return 0
+}
+
+// apiServicesGVR is where the aggregation layer records which server backs
+// each group-version.
+var apiServicesGVR = schema.GroupVersionResource{
+	Group: "apiregistration.k8s.io", Version: "v1", Resource: "apiservices",
+}
+
+// ServedLocally reports whether gv is served by kube-apiserver itself -- a
+// built-in group, or a CRD -- rather than by an aggregated API server such as
+// metrics-server.
+//
+// The distinction decides whether a list continuation may be re-requested
+// with a smaller limit. kube-apiserver resumes a continuation from the key and
+// snapshot its token records, so a smaller limit picks up at the same place;
+// an aggregated server can do anything with the token. The answer comes from
+// the group-version's APIService object, named `<version>.<group>` (`v1.` for
+// the core group): kube-apiserver registers one without `spec.service` for
+// every group it serves itself, and aggregation sets `spec.service`.
+//
+// Only a positive answer is cached. Any failure -- no APIService yet for a CRD
+// just created, or a Forbidden while the gateway's aggregated read role is
+// still being filled in -- means "not known to be local" for this call alone
+// and is asked again next time, because caching it would keep a continuation
+// from ever shrinking until the gateway restarted. A failure never fails the
+// caller: "not local" is the behaviour every page had before this existed.
+func (c *Dynamic) ServedLocally(ctx context.Context, gv schema.GroupVersion) bool {
+	if _, ok := c.local.Load(gv); ok {
+		return true
+	}
+	svc, err := c.dyn.Resource(apiServicesGVR).Get(ctx, gv.Version+"."+gv.Group, metav1.GetOptions{})
+	if err != nil {
+		return false
+	}
+	backend, found, err := unstructured.NestedFieldNoCopy(svc.Object, "spec", "service")
+	if err != nil || (found && backend != nil) {
+		return false
+	}
+	c.local.Store(gv, struct{}{})
+	return true
 }
 
 // NewDynamic wraps an existing dynamic client (real or fake) and the Mapper

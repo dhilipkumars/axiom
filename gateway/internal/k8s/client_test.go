@@ -336,3 +336,82 @@ func TestListMissIsAnEmptyResultNotAnError(t *testing.T) {
 		t.Errorf("got %v, want nothing", got.Items)
 	}
 }
+
+// apiService builds an APIService; a nil service means kube-apiserver serves
+// the group-version itself.
+func apiService(name string, service map[string]any) *unstructured.Unstructured {
+	spec := map[string]any{"groupPriorityMinimum": int64(1000), "versionPriority": int64(15)}
+	if service != nil {
+		spec["service"] = service
+	}
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "apiregistration.k8s.io/v1",
+		"kind":       "APIService",
+		"metadata":   map[string]any{"name": name},
+		"spec":       spec,
+	}}
+}
+
+func apiServiceClient(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
+	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{apiServicesGVR: "APIServiceList"}, objs...)
+}
+
+func TestServedLocallyReadsTheAPIService(t *testing.T) {
+	t.Parallel()
+	dyn := apiServiceClient(
+		apiService("v1.", nil),
+		apiService("v1.example.com", nil),
+		apiService("v1beta1.metrics.k8s.io", map[string]any{"name": "metrics-server", "namespace": "kube-system"}),
+	)
+	c := NewDynamic(dyn, NewStaticMapper())
+	ctx := context.Background()
+	for _, tc := range []struct {
+		gv   schema.GroupVersion
+		want bool
+	}{
+		{schema.GroupVersion{Version: "v1"}, true},                                // core, named `v1.`
+		{schema.GroupVersion{Group: "example.com", Version: "v1"}, true},          // a CRD group
+		{schema.GroupVersion{Group: "metrics.k8s.io", Version: "v1beta1"}, false}, // aggregated
+		{schema.GroupVersion{Group: "nosuch.io", Version: "v1"}, false},           // no APIService
+	} {
+		if got := c.ServedLocally(ctx, tc.gv); got != tc.want {
+			t.Errorf("ServedLocally(%v) = %v, want %v", tc.gv, got, tc.want)
+		}
+	}
+}
+
+func TestServedLocallyCachesOnlyAYes(t *testing.T) {
+	t.Parallel()
+	dyn := apiServiceClient()
+	gets := 0
+	forbid := true
+	dyn.PrependReactor("get", "apiservices", func(k8stesting.Action) (bool, runtime.Object, error) {
+		gets++
+		if forbid {
+			// As while the gateway's aggregated read role is still being filled in.
+			return true, nil, apierrors.NewForbidden(apiServicesGVR.GroupResource(), "v1.example.com", errors.New("not yet"))
+		}
+		return true, apiService("v1.example.com", nil), nil
+	})
+	c := NewDynamic(dyn, NewStaticMapper())
+	ctx := context.Background()
+	gv := schema.GroupVersion{Group: "example.com", Version: "v1"}
+
+	if c.ServedLocally(ctx, gv) {
+		t.Fatal("a Forbidden lookup answered yes")
+	}
+	forbid = false
+	if !c.ServedLocally(ctx, gv) {
+		t.Fatal("a failed lookup was cached: the grant arriving later was never seen")
+	}
+	before := gets
+	for range 3 {
+		if !c.ServedLocally(ctx, gv) {
+			t.Fatal("a cached yes went away")
+		}
+	}
+	if gets != before {
+		t.Errorf("a confirmed yes was looked up again %d times", gets-before)
+	}
+}

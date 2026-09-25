@@ -159,4 +159,37 @@ kubectl_e2e -n "$NS" get configmap after-idle >/dev/null 2>&1 \
 echo "wrote and read back across a 45s idle gap"
 kubectl_e2e -n "$NS" delete configmap after-idle >/dev/null 2>&1 || true
 
+log "a later page larger than the first shrinks instead of failing the listing (#85)"
+# Tiny ConfigMaps named a-*, then large ones named b-*. A namespaced list comes
+# back in name order, so at the extension's page size of 200 the first page is
+# all tiny and the second is about 9 MiB -- over the 4 MiB response budget. Only
+# a real kube-apiserver shows that a continuation re-requested at a smaller
+# limit resumes where its token points; the unit tests' fake cannot.
+PAGE_NS="axiom-paging"
+kubectl_e2e delete namespace "$PAGE_NS" --ignore-not-found --wait=true >/dev/null
+kubectl_e2e create namespace "$PAGE_NS" >/dev/null
+paging_down() { kubectl_e2e delete namespace "$PAGE_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true; }
+e2e_on_teardown paging_down
+for i in $(seq -w 0 199); do
+  printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: a-%s}\ndata: {k: v}\n---\n' "$i"
+done | kubectl_e2e -n "$PAGE_NS" create -f - >/dev/null || fail "create the small ConfigMaps"
+blob="$(mktemp)"
+head -c 921600 /dev/zero | tr '\0' 'x' > "$blob"
+for i in $(seq -w 0 9); do
+  # create, not apply: apply's last-applied annotation would double the size
+  # past the 1 MiB object limit.
+  kubectl_e2e -n "$PAGE_NS" create configmap "b-$i" --from-file=blob="$blob" >/dev/null \
+    || fail "create large ConfigMap b-$i"
+done
+rm -f "$blob"
+want="$(kubectl_e2e -n "$PAGE_NS" get configmaps --no-headers | wc -l | tr -d ' ')"
+got="$(psql_axiom "SELECT count(*) || '|' || count(DISTINCT raw->'metadata'->>'uid')
+                     FROM k8s_configmaps WHERE namespace = '$PAGE_NS';")" \
+  || fail "#85: listing a namespace whose second page outgrows the first failed"
+[[ "$got" == "$want|$want" ]] \
+  || fail "SQL saw '$got' (count|distinct uids), kubectl sees $want: an object was lost or repeated"
+stack_logs "$E2E_SVC_GATEWAY" | grep '"msg":"list_page_shrunk"' | grep -q ConfigMap \
+  || fail "the gateway never logged list_page_shrunk, so this did not exercise a shrunk continuation"
+echo "$want ConfigMaps, each exactly once, across a shrunk continuation"
+
 log "CONFIGMAPS E2E PASSED"
