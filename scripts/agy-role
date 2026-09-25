@@ -12,7 +12,8 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-timeout=600s
+# Whole-PR reviews needed more than 600s even at Medium effort; High runs longer.
+timeout=900s
 
 usage() { echo "usage: $(basename "$0") architect [--timeout DUR] <task>" >&2; exit 2; }
 [[ $# -lt 2 ]] && usage
@@ -26,7 +27,7 @@ brief="$here/docs/agents/${role}.md"
 # Effort is part of the model name; --effort is rejected for these models.
 # Brainstorming only -- see CLAUDE.md for why the other roles were dropped.
 case "$role" in
-  architect) model="Gemini 3.8 Flash (Medium)" ;;
+  architect) model="Gemini 3.8 Flash (High)" ;;
   *) echo "only the architect role is supported; see CLAUDE.md" >&2; exit 2 ;;
 esac
 
