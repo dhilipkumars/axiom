@@ -1434,8 +1434,21 @@ unsafe extern "C-unwind" fn import_foreign_schema(
         let except = (*stmt).list_type == pg_sys::ImportForeignSchemaType::FDW_IMPORT_SCHEMA_EXCEPT;
 
         let group = import::group_filter(&remote_schema, &server_name);
+        // `LIMIT TO` and `EXCEPT` name tables, and Postgres filters the returned
+        // DDL by those names itself. The gateway filters by plural, so a
+        // `LIMIT TO` is narrowed to the plurals its names were made from --
+        // unless any name cannot be decoded, when every kind is asked for. A
+        // wider request costs a round-trip; a wrong one would silently drop a
+        // table the user named.
         let plurals: Vec<String> = if limit_to {
-            requested.clone()
+            let mut p: Vec<String> = requested
+                .iter()
+                .map(|t| import::plural_from_table_name(t, &opts.prefix))
+                .collect::<Option<Vec<_>>>()
+                .unwrap_or_default();
+            p.sort();
+            p.dedup();
+            p
         } else {
             Vec::new()
         };
@@ -1444,17 +1457,25 @@ unsafe extern "C-unwind" fn import_foreign_schema(
             Err(e) => raise_import("list_kinds", &server_opts, &e),
         };
 
-        // Decide every table name up front: a plural is only unique within an
-        // API group, so the name a kind gets depends on the rest of the set.
-        let selected: Vec<ImportKind> = kinds
+        let offered: Vec<ImportKind> = kinds.iter().filter_map(import_kind_from_wire).collect();
+        let offered_names = import::assign_table_names(&offered, &opts.prefix);
+        let clause = if limit_to { "LIMIT TO" } else { "EXCEPT" };
+        if limit_to || except {
+            for msg in import::unmatched_table_list(clause, &requested, &offered, &offered_names) {
+                pgrx::warning!("axiom: {msg}");
+            }
+        }
+        let (selected, table_names): (Vec<&ImportKind>, Vec<&String>) = offered
             .iter()
-            .filter_map(import_kind_from_wire)
-            .filter(|k| !(except && requested.contains(&k.plural)))
-            .collect();
-        let table_names = import::assign_table_names(&selected, &opts.prefix);
+            .zip(&offered_names)
+            .filter(|(_, table)| {
+                let named = requested.contains(*table);
+                !((limit_to && !named) || (except && named))
+            })
+            .unzip();
 
         let mut statements = Vec::with_capacity(selected.len());
-        for (kind, table) in selected.iter().zip(&table_names) {
+        for (kind, table) in selected.into_iter().zip(table_names) {
             if table.is_empty() {
                 pgrx::warning!(
                     "axiom: skipping {}: no usable table name is available for it",

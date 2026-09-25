@@ -28,6 +28,74 @@ sounds. Scope your queries by namespace where you can.
 generated DDL carries the kind's fully resolved identity, so planning needs no
 discovery.
 
+## Table names
+
+`IMPORT FOREIGN SCHEMA` names every table **`<group>_<plural>`**, with the
+core API group spelled `core`:
+
+| API group | Resource | Table |
+|---|---|---|
+| (core) | `pods` | `core_pods` |
+| `apps` | `deployments` | `apps_deployments` |
+| `events.k8s.io` | `events` | `events_k8s_io_events` |
+| `metrics.k8s.io` | `pods` | `metrics_k8s_io_pods` |
+| `postgresql.cnpg.io` | `clusters` | `postgresql_cnpg_io_clusters` |
+
+A name depends on its own group and resource and nothing else, so it does not
+change when something else is installed in the cluster. A plural is only
+unique within its group, and real clusters reuse them: metrics-server serves
+`pods` and `nodes` beside the core ones, and CloudNativePG and Cluster API both
+define `clusters`. If a name depended on what else was present, installing any
+of those would rename a table your queries and views depend on.
+
+In a group name `.` becomes `_` and `-` becomes `__`, so two groups can never
+produce the same name. A name that would exceed Postgres's 63-byte identifier
+limit keeps its resource whole and shortens the group, with a digest of the
+full name between them:
+`dbforpostg_aeb7bb51_flexibleserveractivedirectoryadministrators`.
+
+**`LIMIT TO` and `EXCEPT` take these table names**, because Postgres matches
+them against the tables an import generates. Naming a resource instead
+imports nothing, with a `WARNING` suggesting the table you probably meant:
+
+```sql
+IMPORT FOREIGN SCHEMA k8s LIMIT TO (core_pods, apps_deployments) FROM SERVER prod INTO k8s;
+```
+
+### Short names
+
+If you would rather type `pods`, ask for short names. Each one is a view over
+the qualified table:
+
+```sql
+SELECT * FROM axiom_create_short_names('k8s');
+
+ short_name  |      target      | status
+-------------+------------------+---------
+ deployments | apps_deployments | created
+ pods        | core_pods        | created
+```
+
+- **The core group gets the bare plural.** `pods` means `core_pods` even with
+  `metrics_k8s_io_pods` beside it, so running this again gives the same answer.
+- **Any other shared plural is skipped and reported**, never guessed. Choose
+  one yourself:
+  `SELECT axiom_create_short_name('k8s', 'clusters', 'postgresql_cnpg_io_clusters');`
+- **An existing name is never repointed or replaced.** A short name keeps
+  pointing where it was created to point, and an object you created yourself
+  is left alone.
+- With two servers in one schema (through the `prefix` import option), their
+  core kinds share a plural too. Pass `server_name => 'prod'` to choose.
+
+Reads and writes through a short name behave exactly as they do on the table.
+Each view uses `security_invoker`, so it checks the caller's privileges, not
+its creator's. A role therefore needs its grant on both the view and the table
+behind it: `GRANT SELECT ON k8s.pods, k8s.core_pods TO app;`.
+
+A view does not survive dropping the table under it. Refreshing an import
+means `DROP ... CASCADE` and importing again, so call
+`axiom_create_short_names` again afterwards.
+
 ## Columns
 
 Every table has the same universal columns, then the kind's own top-level
@@ -38,7 +106,7 @@ full rules; the parts that matter in practice:
 comparison is an explicit cast:
 
 ```sql
-SELECT name FROM k8s.deployments
+SELECT name FROM k8s.apps_deployments
  WHERE ready_replicas::int < replicas::int;
 ```
 
@@ -51,7 +119,7 @@ which is usually what you want.
 promotes:
 
 ```sql
-SELECT name, raw->'spec'->'containers'->0->>'image' FROM k8s.pods
+SELECT name, raw->'spec'->'containers'->0->>'image' FROM k8s.core_pods
  WHERE namespace = 'default';
 ```
 
@@ -63,9 +131,9 @@ same name produce no column at all rather than an arbitrary winner.
 a query spanning kinds possible:
 
 ```sql
-SELECT kind, name, namespace FROM k8s.pods
+SELECT kind, name, namespace FROM k8s.core_pods
 UNION ALL
-SELECT kind, name, namespace FROM k8s.configmaps
+SELECT kind, name, namespace FROM k8s.core_configmaps
 ORDER BY kind, name;
 ```
 
@@ -76,10 +144,10 @@ delete. Writes are never served from cache and never batched: each statement is
 one RPC.
 
 ```sql
-INSERT INTO k8s.configmaps (name, namespace, data)
+INSERT INTO k8s.core_configmaps (name, namespace, data)
   VALUES ('app', 'default', '{"LOG_LEVEL":"info"}');
 
-UPDATE k8s.configmaps SET data = data || '{"LOG_LEVEL":"debug"}'
+UPDATE k8s.core_configmaps SET data = data || '{"LOG_LEVEL":"debug"}'
  WHERE namespace = 'default' AND name = 'app';
 ```
 

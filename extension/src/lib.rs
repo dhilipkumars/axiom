@@ -27,6 +27,7 @@ pub mod quals;
 pub mod resource;
 pub mod schema;
 pub mod shmem;
+pub mod short_names;
 pub mod status;
 #[cfg(test)]
 mod stub_gateway_tests;
@@ -553,6 +554,177 @@ mod tests {
         OPTIONS (endpoint 'https://127.0.0.1:1', rpc_timeout_secs '1')";
     const PODS_TABLE: &str = "CREATE FOREIGN TABLE k8s_pods (name text, namespace text, phase text, node text, raw jsonb) \
         SERVER gw OPTIONS (resource 'pods')";
+
+    // --- short names over group-qualified tables (#80) --------------------------
+
+    /// `CREATE FOREIGN TABLE` for an axiom kind in schema `s`, with just the
+    /// columns a view needs.
+    fn short_name_table(table: &str, server: &str, opts: &str) {
+        Spi::run(&format!(
+            "CREATE FOREIGN TABLE s.{table} (name text, namespace text, raw jsonb) \
+             SERVER {server} OPTIONS ({opts})"
+        ))
+        .expect("foreign table");
+    }
+
+    /// `axiom_create_short_names('s', ...)` as one comparable string.
+    fn short_names(args: &str) -> String {
+        Spi::get_one::<String>(&format!(
+            "SELECT string_agg(short_name || '|' || coalesce(target, '') || '|' || status, \
+             ';' ORDER BY short_name) FROM axiom_create_short_names({args})"
+        ))
+        .expect("spi")
+        .unwrap_or_default()
+    }
+
+    fn short_name_fixture() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run("CREATE SCHEMA s").expect("schema");
+        short_name_table("core_pods", "gw", "resource 'pods'");
+        short_name_table(
+            "metrics_k8s_io_pods",
+            "gw",
+            "resource 'pods', group 'metrics.k8s.io', version 'v1beta1', kind 'PodMetrics'",
+        );
+        short_name_table(
+            "apps_deployments",
+            "gw",
+            "resource 'deployments', group 'apps', version 'v1', kind 'Deployment'",
+        );
+    }
+
+    #[pg_test]
+    fn short_names_give_the_core_group_the_bare_plural() {
+        short_name_fixture();
+        assert_eq!(
+            short_names("'s'"),
+            "deployments|apps_deployments|created;pods|core_pods|created"
+        );
+        // A view over the right table, checked against the caller's privileges.
+        assert_eq!(
+            Spi::get_one::<String>(
+                "SELECT c.relname::text FROM pg_depend d \
+                 JOIN pg_rewrite rw ON rw.oid = d.objid \
+                 JOIN pg_class c ON c.oid = d.refobjid \
+                 WHERE rw.ev_class = 's.pods'::regclass AND c.relname <> 'pods' LIMIT 1"
+            ),
+            Ok(Some("core_pods".to_owned()))
+        );
+        assert_eq!(
+            Spi::get_one::<bool>(
+                "SELECT 'security_invoker=true' = ANY(reloptions) FROM pg_class \
+                 WHERE oid = 's.pods'::regclass"
+            ),
+            Ok(Some(true))
+        );
+        // Running it again changes nothing.
+        assert_eq!(
+            short_names("'s'"),
+            "deployments|apps_deployments|exists;pods|core_pods|exists"
+        );
+    }
+
+    #[pg_test]
+    fn an_ambiguous_plural_is_reported_not_guessed() {
+        short_name_fixture();
+        short_name_table(
+            "example_com_widgets",
+            "gw",
+            "resource 'widgets', group 'example.com', version 'v1', kind 'Widget'",
+        );
+        short_name_table(
+            "other_io_widgets",
+            "gw",
+            "resource 'widgets', group 'other.io', version 'v1', kind 'Widget'",
+        );
+        let got = short_names("'s'");
+        assert!(
+            got.contains(
+                "widgets||skipped: ambiguous between example_com_widgets, other_io_widgets"
+            ),
+            "{got}"
+        );
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT to_regclass('s.widgets') IS NULL"),
+            Ok(Some(true)),
+            "no view may be created for an ambiguous plural"
+        );
+    }
+
+    #[pg_test]
+    fn a_short_name_is_never_repointed() {
+        short_name_fixture();
+        short_name_table(
+            "example_com_widgets",
+            "gw",
+            "resource 'widgets', group 'example.com', version 'v1', kind 'Widget'",
+        );
+        short_name_table(
+            "other_io_widgets",
+            "gw",
+            "resource 'widgets', group 'other.io', version 'v1', kind 'Widget'",
+        );
+        assert_eq!(
+            Spi::get_one::<String>(
+                "SELECT axiom_create_short_name('s', 'w', 'example_com_widgets')"
+            ),
+            Ok(Some("created".to_owned()))
+        );
+        assert_eq!(
+            Spi::get_one::<String>("SELECT axiom_create_short_name('s', 'w', 'other_io_widgets')"),
+            Ok(Some(
+                "skipped: already the short name for example_com_widgets".to_owned()
+            ))
+        );
+    }
+
+    #[pg_test]
+    fn an_object_axiom_did_not_create_is_left_alone() {
+        short_name_fixture();
+        Spi::run("CREATE TABLE s.pods (mine int)").expect("user table");
+        let got = short_names("'s'");
+        assert!(
+            got.contains("pods|core_pods|skipped: exists and was not created by axiom"),
+            "{got}"
+        );
+        assert_eq!(
+            Spi::get_one::<String>(
+                "SELECT string_agg(attname::text, ',') FROM pg_attribute \
+                 WHERE attrelid = 's.pods'::regclass AND attnum > 0"
+            ),
+            Ok(Some("mine".to_owned())),
+            "the user's table must be untouched"
+        );
+    }
+
+    #[pg_test]
+    fn two_servers_in_one_schema_make_core_ambiguous_until_one_is_named() {
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run(
+            "CREATE SERVER gw2 FOREIGN DATA WRAPPER axiom_fdw \
+             OPTIONS (endpoint 'https://127.0.0.1:2', rpc_timeout_secs '1')",
+        )
+        .expect("second server");
+        Spi::run("CREATE SCHEMA s").expect("schema");
+        short_name_table("c1_core_pods", "gw", "resource 'pods'");
+        short_name_table("c2_core_pods", "gw2", "resource 'pods'");
+        let got = short_names("'s'");
+        assert!(
+            got.starts_with("pods||skipped: ambiguous between c1_core_pods, c2_core_pods"),
+            "{got}"
+        );
+        assert_eq!(
+            short_names("'s', server_name => 'gw2'"),
+            "pods|c2_core_pods|created"
+        );
+    }
+
+    #[pg_test(error = "axiom: s.nope is not an axiom foreign table")]
+    fn a_short_name_needs_an_axiom_table_to_point_at() {
+        Spi::run("CREATE SCHEMA s").expect("schema");
+        Spi::run("CREATE TABLE s.nope (x int)").expect("table");
+        Spi::run("SELECT axiom_create_short_name('s', 'n', 'nope')").expect("should fail");
+    }
 
     #[pg_test]
     fn fdw_is_installed() {

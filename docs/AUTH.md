@@ -142,7 +142,7 @@ Secret" is answerable from the cluster audit log alone.
 
 **A consequence worth designing for: Kubernetes denies, it does not filter.** A
 cluster-wide `LIST` by an identity without cluster-wide permission returns 403,
-not the subset that identity may see. So `SELECT * FROM prod.pods` fails
+not the subset that identity may see. So `SELECT * FROM prod.core_pods` fails
 outright for a namespace-scoped role rather than returning their namespaces.
 Two answers: document it ("add a namespace qual"), or have the gateway discover
 the caller's permitted namespaces and fan out per namespace. The second is
@@ -273,7 +273,7 @@ CREATE USER MAPPING FOR alice SERVER prod OPTIONS (k8s_user 'alice@corp.example'
 Per query:
 
 ```
-alice: SELECT * FROM prod.pods WHERE namespace = 'payments';
+alice: SELECT * FROM prod.core_pods WHERE namespace = 'payments';
    │
    │ 1. FDW callback in alice's backend looks up the user mapping for
    │    current_user. alice cannot supply k8s_user herself.

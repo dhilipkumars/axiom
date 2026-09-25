@@ -1047,7 +1047,10 @@ fn import_foreign_schema_generates_usable_tables() {
         .iter()
         .map(|r| r.get(0))
         .collect();
-    assert_eq!(tables, vec!["configmaps", "pods", "widgets"]);
+    assert_eq!(
+        tables,
+        vec!["core_configmaps", "core_pods", "example_com_widgets"]
+    );
 
     // The CRD's table carries the resolved identity, so a scan needs no discovery.
     let opts: Vec<String> = tx
@@ -1055,7 +1058,7 @@ fn import_foreign_schema_generates_usable_tables() {
             "SELECT unnest(ftoptions) FROM pg_foreign_table ft
                JOIN pg_class c ON c.oid = ft.ftrelid
                JOIN pg_namespace n ON n.oid = c.relnamespace
-              WHERE n.nspname = 'k8s' AND c.relname = 'widgets' ORDER BY 1",
+              WHERE n.nspname = 'k8s' AND c.relname = 'example_com_widgets' ORDER BY 1",
             &[],
         )
         .expect("options")
@@ -1072,7 +1075,7 @@ fn import_foreign_schema_generates_usable_tables() {
         .query(
             "SELECT a.attname FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
                JOIN pg_namespace n ON n.oid = c.relnamespace
-              WHERE n.nspname = 'k8s' AND c.relname = 'widgets' AND a.attnum > 0
+              WHERE n.nspname = 'k8s' AND c.relname = 'example_com_widgets' AND a.attnum > 0
               ORDER BY a.attnum",
             &[],
         )
@@ -1103,7 +1106,7 @@ fn import_foreign_schema_generates_usable_tables() {
     // so this exercises generated DDL end to end rather than only its text.
     let n: i64 = tx
         .query_one(
-            "SELECT count(*) FROM k8s.pods WHERE namespace = 'shop'",
+            "SELECT count(*) FROM k8s.core_pods WHERE namespace = 'shop'",
             &[],
         )
         .expect("scan imported table")
@@ -1130,8 +1133,10 @@ fn import_foreign_schema_filters_and_options() {
          CREATE SCHEMA only_pods;
          CREATE SCHEMA not_pods;
          CREATE SCHEMA prefixed;
-         IMPORT FOREIGN SCHEMA k8s LIMIT TO (pods) FROM SERVER imp2 INTO only_pods;
-         IMPORT FOREIGN SCHEMA k8s EXCEPT (pods, configmaps) FROM SERVER imp2 INTO not_pods;
+         CREATE SCHEMA old_spelling;
+         IMPORT FOREIGN SCHEMA k8s LIMIT TO (core_pods) FROM SERVER imp2 INTO only_pods;
+         IMPORT FOREIGN SCHEMA k8s EXCEPT (core_pods, core_configmaps) FROM SERVER imp2 INTO not_pods;
+         IMPORT FOREIGN SCHEMA k8s LIMIT TO (pods) FROM SERVER imp2 INTO old_spelling;
          IMPORT FOREIGN SCHEMA k8s FROM SERVER imp2 INTO prefixed
            OPTIONS (prefix 'c1_', cache_mode 'watch');"
     ))
@@ -1148,11 +1153,20 @@ fn import_foreign_schema_filters_and_options() {
         .map(|r| r.get(0))
         .collect()
     };
-    assert_eq!(names(&mut tx, "only_pods"), vec!["pods"]);
-    assert_eq!(names(&mut tx, "not_pods"), vec!["widgets"]);
+    assert_eq!(names(&mut tx, "only_pods"), vec!["core_pods"]);
+    assert_eq!(names(&mut tx, "not_pods"), vec!["example_com_widgets"]);
+    assert_eq!(
+        names(&mut tx, "old_spelling"),
+        Vec::<String>::new(),
+        "LIMIT TO names tables; a bare plural matches none (it warns instead)"
+    );
     assert_eq!(
         names(&mut tx, "prefixed"),
-        vec!["c1_configmaps", "c1_pods", "c1_widgets"],
+        vec![
+            "c1_core_configmaps",
+            "c1_core_pods",
+            "c1_example_com_widgets"
+        ],
         "the prefix renames tables so two clusters can share a schema"
     );
 
@@ -1161,7 +1175,7 @@ fn import_foreign_schema_filters_and_options() {
             "SELECT unnest(ftoptions) FROM pg_foreign_table ft
                JOIN pg_class c ON c.oid = ft.ftrelid
                JOIN pg_namespace n ON n.oid = c.relnamespace
-              WHERE n.nspname = 'prefixed' AND c.relname = 'c1_pods'",
+              WHERE n.nspname = 'prefixed' AND c.relname = 'c1_core_pods'",
             &[],
         )
         .expect("options")
@@ -1172,6 +1186,79 @@ fn import_foreign_schema_filters_and_options() {
     assert!(
         opts.contains(&"resource=pods".to_owned()),
         "the prefix must not leak into the resource option: {opts:?}"
+    );
+
+    tx.rollback().expect("rollback");
+}
+
+/// A short name is a view, and writes through it reach the cluster exactly as
+/// writes to the table do: Postgres rewrites them onto the foreign table, and
+/// the FDW's own update targets still carry identity and `resourceVersion`.
+#[test]
+fn writes_through_a_short_name_reach_the_cluster() {
+    let stub = start_stub();
+    let mut pg = pg_client();
+    let ca = stub.ca_path.display();
+    let port = stub.addr.port();
+    let mut tx = pg.transaction().expect("begin");
+    tx.batch_execute(&format!(
+        "CREATE SERVER sn FOREIGN DATA WRAPPER axiom_fdw \
+           OPTIONS (endpoint 'https://localhost:{port}', ca_cert '{ca}', rpc_timeout_secs '5');
+         CREATE SCHEMA sn;
+         IMPORT FOREIGN SCHEMA k8s LIMIT TO (core_configmaps) FROM SERVER sn INTO sn;"
+    ))
+    .expect("import");
+    let status: String = tx
+        .query_one(
+            "SELECT status FROM axiom_create_short_names('sn') WHERE short_name = 'configmaps'",
+            &[],
+        )
+        .expect("short names")
+        .get(0);
+    assert_eq!(status, "created");
+
+    tx.execute(
+        "INSERT INTO sn.configmaps (name, namespace, data) \
+         VALUES ('viaview', 'shop', '{\"K\":\"1\"}')",
+        &[],
+    )
+    .expect("insert through the view");
+    let row = tx
+        .query_one(
+            "UPDATE sn.configmaps SET data = data || '{\"K\":\"2\"}' \
+             WHERE namespace = 'shop' AND name = 'viaview' \
+             RETURNING data->>'K', raw->'metadata'->>'resourceVersion'",
+            &[],
+        )
+        .expect("update through the view");
+    assert_eq!(row.get::<_, String>(0), "2");
+    assert_eq!(
+        row.get::<_, String>(1),
+        "2",
+        "the read resourceVersion was carried"
+    );
+    {
+        let cms = stub.cluster.configmaps.lock().expect("lock");
+        assert_eq!(
+            cms[&("shop".to_owned(), "viaview".to_owned())]["data"]["K"],
+            "2"
+        );
+    }
+    let n = tx
+        .execute(
+            "DELETE FROM sn.configmaps WHERE namespace = 'shop' AND name = 'viaview'",
+            &[],
+        )
+        .expect("delete through the view");
+    assert_eq!(n, 1);
+    assert!(
+        !stub
+            .cluster
+            .configmaps
+            .lock()
+            .expect("lock")
+            .contains_key(&("shop".to_owned(), "viaview".to_owned())),
+        "the delete must reach the cluster"
     );
 
     tx.rollback().expect("rollback");

@@ -47,12 +47,19 @@ either system pretending to be the other.
 you can query is bounded by the gateway's RBAC — `nodes` and `deployments` below
 need granting, which the examples page shows how to do.*
 
+*Tables are named for their API group — `core_pods`, `apps_deployments`,
+`postgresql_cnpg_io_clusters` — so a name never changes because something else
+was installed in the cluster. If you would rather type `pods`,
+`SELECT * FROM axiom_create_short_names('k8s')` creates short names as views.
+[Table names](https://dhilipkumars.github.io/axiom/guides/querying/#table-names)
+has the rules.*
+
 **Join across kinds.** Which pods are running on nodes under memory pressure?
 
 ```sql
 SELECT p.namespace, p.name, n.name AS node
-FROM k8s.pods p
-JOIN k8s.nodes n ON n.name = p.node
+FROM k8s.core_pods p
+JOIN k8s.core_nodes n ON n.name = p.node
 WHERE n.status->'conditions' @> '[{"type":"MemoryPressure","status":"True"}]';
 ```
 
@@ -60,7 +67,7 @@ WHERE n.status->'conditions' @> '[{"type":"MemoryPressure","status":"True"}]';
 
 ```sql
 SELECT namespace, phase, count(*)
-FROM k8s.pods
+FROM k8s.core_pods
 WHERE phase <> 'Running'
 GROUP BY namespace, phase
 ORDER BY count(*) DESC;
@@ -72,7 +79,7 @@ a handful of field selectors. SQL gives you the whole object:
 ```sql
 -- deployments that never finished rolling out
 SELECT namespace, name, replicas, ready_replicas
-FROM k8s.deployments
+FROM k8s.apps_deployments
 WHERE coalesce(ready_replicas, '0')::int < replicas::int;
 ```
 
@@ -83,7 +90,7 @@ still reachable through `raw`, the whole object as `jsonb`:
 
 ```sql
 SELECT namespace, name
-FROM k8s.deployments
+FROM k8s.apps_deployments
 WHERE raw->'spec'->'template'->'spec'->'containers' @> '[{"imagePullPolicy":"Always"}]';
 ```
 
@@ -91,11 +98,11 @@ WHERE raw->'spec'->'template'->'spec'->'containers' @> '[{"imagePullPolicy":"Alw
 are real API calls, not a local cache being edited:
 
 ```sql
-UPDATE k8s.configmaps
+UPDATE k8s.core_configmaps
    SET data = data || '{"LOG_LEVEL":"debug"}'
  WHERE namespace = 'payments' AND name = 'api';
 
-DELETE FROM k8s.configmaps WHERE namespace = 'staging' AND name = 'stale-flags';
+DELETE FROM k8s.core_configmaps WHERE namespace = 'staging' AND name = 'stale-flags';
 ```
 
 Pods are deliberately read-only at the SQL layer, whatever RBAC allows — a
@@ -106,7 +113,7 @@ not a pod phase — so it lives in a nested field `kubectl` cannot filter on:
 
 ```sql
 SELECT namespace, name
-FROM k8s.pods
+FROM k8s.core_pods
 WHERE raw->'status'->'containerStatuses' @>
       '[{"state":{"waiting":{"reason":"CrashLoopBackOff"}}}]';
 ```
@@ -115,9 +122,9 @@ WHERE raw->'status'->'containerStatuses' @>
 server and its own schema:
 
 ```sql
-SELECT 'prod' AS cluster, namespace, name FROM prod.pods  WHERE phase = 'Failed'
+SELECT 'prod' AS cluster, namespace, name FROM prod.core_pods  WHERE phase = 'Failed'
 UNION ALL
-SELECT 'stage',           namespace, name FROM stage.pods WHERE phase = 'Failed';
+SELECT 'stage',           namespace, name FROM stage.core_pods WHERE phase = 'Failed';
 ```
 
 ## Getting started

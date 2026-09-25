@@ -243,6 +243,12 @@ IMPORT FOREIGN SCHEMA k8s FROM SERVER prod INTO k8s;
 IMPORT FOREIGN SCHEMA "apps" FROM SERVER prod INTO k8s;
 ```
 
+Each table is named for its API group and resource: `core_pods`,
+`apps_deployments`. A name never changes because something else was installed
+in the cluster. For shorter names, `SELECT * FROM axiom_create_short_names('k8s')`
+adds views such as `k8s.pods`. [Table names](querying.md#table-names) has the
+rules.
+
 A whole-cluster import on a large cluster can take longer than the default
 30-second `rpc_timeout_secs`, because it does one access review per kind on top
 of the OpenAPI fetches. If an import fails with `Cancelled: Timeout expired`,
@@ -256,12 +262,12 @@ ALTER SERVER prod OPTIONS (SET rpc_timeout_secs '120');
 
 ```sql
 SELECT name, namespace, phase, node
-  FROM k8s.pods
+  FROM k8s.core_pods
  WHERE namespace = 'kube-system'
  ORDER BY name;
 ```
 
-`\d k8s.pods` shows what discovery chose. Every table gets the same universal
+`\d k8s.core_pods` shows what discovery chose. Every table gets the same universal
 columns, plus the kind's own top-level fields, plus a `raw jsonb` column
 holding the whole object. The [column reference](../generated/columns.md)
 explains the rules.
@@ -423,7 +429,7 @@ CREATE USER MAPPING FOR CURRENT_USER SERVER prod;
 CREATE SCHEMA k8s;
 IMPORT FOREIGN SCHEMA k8s FROM SERVER prod INTO k8s;
 
-SELECT name, namespace, phase FROM k8s.pods WHERE namespace = 'kube-system';
+SELECT name, namespace, phase FROM k8s.core_pods WHERE namespace = 'kube-system';
 ```
 
 That is the whole path. [Import a schema](#6-import-a-schema) and
