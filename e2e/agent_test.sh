@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Agent access E2E (#86): the recipe in docs/guides/agents.md, run against a
+# Agent access E2E (#86): the recipe in docs/guides/agent-access.md, run against a
 # real cluster. An agent role reads a redacted, tenant-scoped view and nothing
 # else: not the tables behind it, not a write, not a foreign table of its own,
 # not the watch status. Every claim the guide makes is asserted here, and the

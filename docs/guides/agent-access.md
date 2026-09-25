@@ -7,8 +7,8 @@ so it reaches exactly what you intend. It also covers the controls that look
 like security but aren't, and what Axiom does not yet enforce.
 
 Everything under [The recipe](#the-recipe) is run against a real cluster by
-the `agent` end-to-end test (`e2e/agent_test.sh`), so each claim here is one CI
-checks.
+the `agent` end-to-end test (`e2e/agent_test.sh`), so CI checks every claim
+it makes.
 
 ## What an agent gets that kubectl cannot give it
 
