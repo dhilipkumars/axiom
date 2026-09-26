@@ -220,12 +220,13 @@ jobs:
             echo
             echo "| Postgres | extension (lint, unit, pg tests) | e2e suite |"
             echo "|---|---|---|"
-            for row in $(jq -c '.[]' <<<"$MATRIX"); do
-              pg="$(jq -r .pg <<<"$row")"; label="$(jq -r .label <<<"$row")"
+            # One row per line: a label like " (next: 19beta4-bookworm)" has
+            # spaces, so the rows cannot go through word splitting.
+            while IFS=$'\t' read -r pg label; do
               ext="$(awk -F'\t' -v n="extension pg${pg}${label}" '$1 == n { print $2 }' <<<"$jobs")"
               e2e="$(awk -F'\t' -v n="e2e pg${pg}${label}" '$1 == n { print $2 }' <<<"$jobs")"
               echo "| ${pg}${label} | $(icon "$ext") | $(icon "$e2e") |"
-            done
+            done < <(jq -r '.[] | [.pg, .label] | @tsv' <<<"$MATRIX")
             echo
             echo "The next major is in pre-release, so its failures are reported but do not fail the run."
             echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
