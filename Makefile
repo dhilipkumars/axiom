@@ -31,10 +31,15 @@ gateway-build:
 # GATEWAY_COVER_DIR=path also records coverage there, for scripts/coverage-report
 # to merge with the e2e suite's (#90). atomic because -race requires it, and the
 # e2e binary uses the same mode so the two can be merged.
+#
+# Coverage runs use exactly the Go in gateway/go.mod: Go versions count
+# statements differently (1.26 and 1.27 disagree by ten points on
+# cmd/gateway), so a figure is comparable with CI's only on CI's toolchain.
+GO_MOD_VERSION := $(shell awk '/^go /{print $$2}' gateway/go.mod)
 gateway-test:
 ifdef GATEWAY_COVER_DIR
 	mkdir -p $(abspath $(GATEWAY_COVER_DIR))
-	cd gateway && go test -race -count=1 -cover -covermode=atomic ./... -args -test.gocoverdir=$(abspath $(GATEWAY_COVER_DIR))
+	cd gateway && GOTOOLCHAIN=go$(GO_MOD_VERSION) go test -race -count=1 -cover -covermode=atomic ./... -args -test.gocoverdir=$(abspath $(GATEWAY_COVER_DIR))
 else
 	cd gateway && go test -race -count=1 ./...
 endif

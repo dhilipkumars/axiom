@@ -74,7 +74,7 @@ jobs:
         with: { go-version-file: gateway/go.mod }
       - uses: golangci/golangci-lint-action@v8
         with:
-          version: v2.11.4
+          version: v2.14.0
           working-directory: gateway
       # Coverage recorded here is merged with the e2e suite's in that job (#90).
       - run: make gateway-test GATEWAY_COVER_DIR=coverage/unit
@@ -226,7 +226,15 @@ jobs:
               /out/usr/lib/postgresql/16/lib/axiom.so
           fi
           scripts/coverage-report-extension coverage/extension-unit/unit.lcov coverage/e2e/extension/e2e.lcov \
-            | tee -a "$GITHUB_STEP_SUMMARY"
+            coverage/report/extension-totals.tsv | tee -a "$GITHUB_STEP_SUMMARY"
+      # Enforcement: no figure may fall more than half a point below the
+      # committed baseline. Not `always()`: when the suite itself failed, the
+      # figures are partial and a second failure would only be noise.
+      - name: coverage ratchet
+        run: |
+          scripts/coverage-ratchet scripts/coverage-baseline.tsv \
+            coverage/report/totals.tsv coverage/report/extension-totals.tsv | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -239,6 +247,8 @@ jobs:
             coverage/e2e/gateway
             coverage/extension-unit/unit.lcov
             coverage/e2e/extension/e2e.lcov
+            coverage/report/totals.tsv
+            coverage/report/extension-totals.tsv
           retention-days: 14
 
   # The downloadable artifact, against a stock Postgres. Separate from the e2e

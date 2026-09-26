@@ -7,7 +7,8 @@
 # what `E2E_COVER_DIR=... make e2e` collected from the gateway Pods. Either may
 # be missing or empty, and its column then reads "-". Prints a Markdown table
 # on stdout (for $GITHUB_STEP_SUMMARY) and writes OUT_DIR/coverage.html and
-# OUT_DIR/coverage.txt for the merged data.
+# OUT_DIR/coverage.txt for the merged data, and OUT_DIR/totals.tsv -- one
+# "gateway<TAB>layer<TAB>percent" line per layer -- for scripts/coverage-ratchet.
 #
 # Three columns rather than one number on purpose: "unit" and "e2e" say which
 # kind of test reaches a package, which is what decides where a new test goes.
@@ -78,6 +79,11 @@ awk -F'\t' -v module="$module/" '
 ' "$out/.unit" "$out/.e2e" "$out/.merged" | sort
 cell() { if [[ -n "$1" ]]; then printf '%s%%' "$1"; else printf -- '-'; fi; }
 printf '| **total** | %s | %s | **%s** |\n' "$(cell "$ut")" "$(cell "$et")" "$(cell "$ct")"
+{
+  [[ -n "$ut" ]] && printf 'gateway\tunit\t%s\n' "$ut"
+  [[ -n "$et" ]] && printf 'gateway\te2e\t%s\n' "$et"
+  printf 'gateway\tcombined\t%s\n' "$ct"
+} > "$out/totals.tsv"
 rm -f "$out/.unit" "$out/.e2e" "$out/.merged"
 echo
-echo "Statement coverage of the gateway's own packages; generated code and test tooling excluded. It measures what ran, not what was asserted."
+echo "Statement coverage of the gateway's own packages, measured with $(go env GOVERSION); generated code and test tooling excluded. Figures are comparable only within one Go version, which counts statements its own way. It measures what ran, not what was asserted."

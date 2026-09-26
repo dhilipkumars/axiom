@@ -469,6 +469,16 @@ How the e2e figures are collected:
 Gateway figures are statement coverage, the extension's are line coverage,
 and neither says what was asserted.
 
+**The ratchet.** CI fails a change that lowers any figure -- unit, e2e or
+combined, for either component -- by more than half a point below
+`scripts/coverage-baseline.tsv`. When a figure rises past that, the ratchet
+says so; raise it in the baseline in the same PR, so it cannot slide back.
+Lowering a figure is allowed, but it is an edit a reviewer sees. The baseline
+is CI's measurement: gateway coverage uses exactly the Go in `gateway/go.mod`
+(`make gateway-test` pins it with `GOTOOLCHAIN`), because Go versions count
+statements differently -- 1.26 and 1.27 disagree by ten points on
+`cmd/gateway`.
+
 `make ext-test` starts a throwaway Postgres with `shared_preload_libraries =
 'axiom'` and an endpoint nothing listens on, so you will see the worker logging
 `ping failed` lines in the test output. That is expected: one of the tests

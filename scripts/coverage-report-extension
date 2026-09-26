@@ -2,7 +2,7 @@
 # Extension line coverage from unit tests and the e2e suite, separately and
 # merged (#90).
 #
-#   scripts/coverage-report-extension UNIT_LCOV E2E_LCOV
+#   scripts/coverage-report-extension UNIT_LCOV E2E_LCOV [TOTALS_TSV]
 #
 # Both are what scripts/extension-coverage-lcov wrote; either may be missing,
 # and its column then reads "-". Merged by file and line: the unit and e2e
@@ -11,8 +11,8 @@
 # table on stdout, one row per source file.
 set -euo pipefail
 
-[[ $# -eq 2 ]] || { echo "usage: $(basename "$0") UNIT_LCOV E2E_LCOV" >&2; exit 2; }
-unit="$1" e2e="$2"
+[[ $# -eq 2 || $# -eq 3 ]] || { echo "usage: $(basename "$0") UNIT_LCOV E2E_LCOV [TOTALS_TSV]" >&2; exit 2; }
+unit="$1" e2e="$2" totals="${3:-/dev/null}"
 src="$(cd "$(dirname "${BASH_SOURCE[0]}")/../extension" && pwd)"
 
 # Test code is not the product. Rust keeps unit tests inside the file they
@@ -50,7 +50,7 @@ if [[ "$unit" == /dev/null && "$e2e" == /dev/null ]]; then
 fi
 echo "| file | unit | e2e | combined |"
 echo "|---|---:|---:|---:|"
-awk -v xfile="$excluded" -v ufile="$unit" -v has_u="$([[ "$unit" != /dev/null ]] && echo 1 || echo 0)" \
+awk -v totals="$totals" -v xfile="$excluded" -v ufile="$unit" -v has_u="$([[ "$unit" != /dev/null ]] && echo 1 || echo 0)" \
     -v has_e="$([[ "$e2e" != /dev/null ]] && echo 1 || echo 0)" '
   FILENAME == xfile {
     if ($1 == "file") skipfile[$2] = 1
@@ -81,6 +81,9 @@ awk -v xfile="$excluded" -v ufile="$unit" -v has_u="$([[ "$unit" != /dev/null ]]
     printf "| **total** | %s | %s | **%.1f%%** |\n",
       has_u ? sprintf("%.1f%%", 100 * U / T) : "-",
       has_e ? sprintf("%.1f%%", 100 * E / T) : "-", 100 * C / T
+    if (has_u) printf "extension\tunit\t%.1f\n", 100 * U / T > totals
+    if (has_e) printf "extension\te2e\t%.1f\n", 100 * E / T > totals
+    printf "extension\tcombined\t%.1f\n", 100 * C / T > totals
   }' "$excluded" "$unit" "$e2e"
 echo
 echo "Line coverage of extension/src, test modules and generated protobuf code excluded. It measures what ran, not what was asserted."
