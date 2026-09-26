@@ -76,7 +76,13 @@ jobs:
         with:
           version: v2.11.4
           working-directory: gateway
-      - run: make gateway-test
+      # Coverage recorded here is merged with the e2e suite's in that job (#90).
+      - run: make gateway-test GATEWAY_COVER_DIR=coverage/unit
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gateway-unit-coverage
+          path: coverage/unit
+          retention-days: 7
       - run: make gateway-vuln
 
   extension-unit:
@@ -170,9 +176,31 @@ jobs:
       - uses: helm/kind-action@v1
         with:
           install_only: true
+      # Go only for `go tool covdata` in the coverage report below.
+      - uses: actions/setup-go@v5
+        with: { go-version-file: gateway/go.mod }
+      - uses: actions/download-artifact@v4
+        with:
+          name: gateway-unit-coverage
+          path: coverage/unit
       - run: make e2e
         env:
           E2E_TIMEOUT_SECS: "180"
+          # The gateway image records coverage, and the suite collects it (#90).
+          E2E_COVER_DIR: ${{ github.workspace }}/coverage/e2e
+      # Unit, e2e and combined gateway coverage per package, in the job summary.
+      # Report-only for now: a baseline comes first, then a ratchet.
+      - name: gateway coverage report
+        if: always()
+        run: scripts/coverage-report coverage/unit coverage/e2e coverage/report >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gateway-coverage
+          path: |
+            coverage/report/coverage.html
+            coverage/report/coverage.txt
+          retention-days: 14
 
   # The downloadable artifact, against a stock Postgres. Separate from the e2e
   # job because it shares nothing with it: no cluster, no gateway, no compose

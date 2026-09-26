@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Gateway coverage from unit tests and the e2e suite, separately and merged (#90).
+#
+#   scripts/coverage-report UNIT_DIR E2E_DIR OUT_DIR
+#
+# UNIT_DIR is what `make gateway-test GATEWAY_COVER_DIR=...` wrote; E2E_DIR is
+# what `E2E_COVER_DIR=... make e2e` collected from the gateway Pods. Either may
+# be missing or empty, and its column then reads "-". Prints a Markdown table
+# on stdout (for $GITHUB_STEP_SUMMARY) and writes OUT_DIR/coverage.html and
+# OUT_DIR/coverage.txt for the merged data.
+#
+# Three columns rather than one number on purpose: "unit" and "e2e" say which
+# kind of test reaches a package, which is what decides where a new test goes.
+# Generated protobuf code and test-only tooling are left out; they are not the
+# product and would only dilute the figure.
+set -euo pipefail
+
+[[ $# -eq 3 ]] || { echo "usage: $(basename "$0") UNIT_DIR E2E_DIR OUT_DIR" >&2; exit 2; }
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+abs() { mkdir -p "$1" && cd "$1" && pwd; }
+unit="$(abs "$1")"; e2e="$(abs "$2")"; out="$(abs "$3")"
+cd "$root/gateway"
+
+module="$(go list -m)"
+pkgs="$(go list ./... | grep -v -e '/gen/' -e '/internal/testcert' -e '/internal/coverflush' -e '/cmd/docsgen' | paste -sd, -)"
+has_data() { compgen -G "$1/covmeta.*" >/dev/null; }
+
+# percent DIR -> "package<TAB>NN.N%" lines for the product packages.
+percent() {
+  go tool covdata percent -i="$1" -pkg="$pkgs" |
+    awk '{ sub(/%$/, "", $3); print $1 "\t" $3 }'
+}
+# total DIR -> overall percentage across the product packages.
+total() {
+  go tool covdata textfmt -i="$1" -pkg="$pkgs" -o="$out/.t.txt"
+  go tool cover -func="$out/.t.txt" | awk '/^total:/ { sub(/%$/, "", $3); print $3 }'
+  rm -f "$out/.t.txt"
+}
+
+inputs=()
+has_data "$unit" && inputs+=("$unit")
+has_data "$e2e" && inputs+=("$e2e")
+[[ ${#inputs[@]} -gt 0 ]] || { echo "no coverage data in $unit or $e2e" >&2; exit 1; }
+
+merged="$out/merged"
+rm -rf "$merged" && mkdir -p "$merged"
+go tool covdata merge -i="$(IFS=,; echo "${inputs[*]}")" -o="$merged" -pkg="$pkgs"
+go tool covdata textfmt -i="$merged" -pkg="$pkgs" -o="$out/coverage.txt"
+go tool cover -html="$out/coverage.txt" -o="$out/coverage.html"
+
+# Joined in awk rather than bash associative arrays, which the bash 3.2 that
+# macOS ships does not have.
+: > "$out/.unit"; : > "$out/.e2e"
+if has_data "$unit"; then percent "$unit" > "$out/.unit"; fi
+if has_data "$e2e"; then percent "$e2e" > "$out/.e2e"; fi
+percent "$merged" > "$out/.merged"
+ut="$(if has_data "$unit"; then total "$unit"; fi)"
+et="$(if has_data "$e2e"; then total "$e2e"; fi)"
+ct="$(total "$merged")"
+
+echo "### Gateway coverage"
+echo
+echo "| package | unit | e2e | combined |"
+echo "|---|---:|---:|---:|"
+awk -F'\t' -v module="$module/" '
+  function cell(v) { return v == "" ? "-" : v "%" }
+  FILENAME ~ /\.unit$/ { u[$1] = $2; next }
+  FILENAME ~ /\.e2e$/  { e[$1] = $2; next }
+  { p = $1; sub("^" module, "", p)
+    printf "| `%s` | %s | %s | **%s** |\n", p, cell(u[$1]), cell(e[$1]), cell($2) }
+' "$out/.unit" "$out/.e2e" "$out/.merged" | sort
+cell() { if [[ -n "$1" ]]; then printf '%s%%' "$1"; else printf -- '-'; fi; }
+printf '| **total** | %s | %s | **%s** |\n' "$(cell "$ut")" "$(cell "$et")" "$(cell "$ct")"
+rm -f "$out/.unit" "$out/.e2e" "$out/.merged"
+echo
+echo "Statement coverage of the gateway's own packages; generated code and test tooling excluded. It measures what ran, not what was asserted."

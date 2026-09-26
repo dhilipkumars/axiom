@@ -435,6 +435,33 @@ make lint
 make unit
 ```
 
+### Coverage
+
+The gateway's coverage is measured from unit tests and from the e2e suite, and
+the two are reported side by side:
+
+```sh
+make gateway-test GATEWAY_COVER_DIR=coverage/unit        # unit tests, recording coverage
+E2E_COVER_DIR=$PWD/coverage/e2e make e2e                  # the suite, with a coverage-recording gateway
+scripts/coverage-report coverage/unit coverage/e2e coverage/report
+open coverage/report/coverage.html
+```
+
+The report prints a per-package table of unit, e2e and combined statement
+coverage. CI publishes it in the e2e job's summary, with the HTML report as an
+artifact. How the e2e figure is collected:
+
+- `E2E_COVER_DIR` builds the gateway with `-cover` and the `axiomcover` tag;
+  releases never are.
+- The gateway writes its counters to a directory on the kind node when it
+  receives SIGTERM, so each Pod the suite restarts contributes, including one
+  killed at the end of its grace period.
+- The suite scales the last gateway to zero and copies the directory off the
+  node before deleting the cluster.
+
+The extension's coverage is not measured yet (#90, phase 2), and a percentage
+says which code ran, not what was asserted.
+
 `make ext-test` starts a throwaway Postgres with `shared_preload_libraries =
 'axiom'` and an endpoint nothing listens on, so you will see the worker logging
 `ping failed` lines in the test output. That is expected: one of the tests

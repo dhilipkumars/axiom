@@ -232,6 +232,50 @@ kind_wait_rbac_aggregated() {
   done
 }
 
+# kind_gateway_coverage_volume: when E2E_COVER_DIR is set, give the gateway
+# Pod somewhere to write coverage (#90).
+#
+# The image is the coverage build in that case (lib/stack.sh sets the build
+# argument), and it writes its counters to GOCOVERDIR when told to stop. A
+# hostPath on the kind node outlives every Pod the suite restarts, so each one
+# adds its file; kind_collect_gateway_coverage copies them off at the end.
+# World-writable because the gateway runs as uid 65532 and the node directory
+# is created by root.
+kind_gateway_coverage_volume() {
+  [[ -n "${E2E_COVER_DIR:-}" ]] || return 0
+  docker exec "${E2E_KIND_CLUSTER}-control-plane" sh -c 'mkdir -p /axiom-coverage && chmod 0777 /axiom-coverage' \
+    || fail "create the coverage directory on the kind node"
+  kubectl_e2e -n "$E2E_GATEWAY_SA_NS" patch deployment axiom-gateway --type=strategic -p '{
+    "spec": {"template": {"spec": {
+      "volumes": [{"name": "coverage", "hostPath": {"path": "/axiom-coverage", "type": "DirectoryOrCreate"}}],
+      "containers": [{"name": "gateway",
+        "env": [{"name": "GOCOVERDIR", "value": "/coverage"}],
+        "volumeMounts": [{"name": "coverage", "mountPath": "/coverage"}]}]
+    }}}}' >/dev/null || fail "add the coverage volume to the gateway"
+}
+
+# kind_collect_gateway_coverage: stop the gateway so it writes its counters,
+# then copy everything the suite's gateway Pods wrote to E2E_COVER_DIR.
+#
+# Scaled to zero rather than deleted: that sends the running Pod SIGTERM,
+# which is when the coverage build writes, and waiting for the Pod to go
+# means its file is complete before the copy. Never fails the suite: a missing
+# report is not a test failure.
+kind_collect_gateway_coverage() {
+  [[ -n "${E2E_COVER_DIR:-}" ]] || return 0
+  local node="${E2E_KIND_CLUSTER}-control-plane"
+  docker inspect "$node" >/dev/null 2>&1 || return 0
+  kubectl_e2e -n "$E2E_GATEWAY_SA_NS" scale deploy/axiom-gateway --replicas=0 >/dev/null 2>&1 || true
+  kubectl_e2e -n "$E2E_GATEWAY_SA_NS" wait --for=delete pod -l app.kubernetes.io/name=axiom-gateway \
+    --timeout=60s >/dev/null 2>&1 || true
+  mkdir -p "$E2E_COVER_DIR"
+  if docker cp "$node:/axiom-coverage/." "$E2E_COVER_DIR/" >/dev/null 2>&1; then
+    log "gateway coverage: $(find "$E2E_COVER_DIR" -name 'covcounters.*' | wc -l | tr -d ' ') counter file(s) in $E2E_COVER_DIR"
+  else
+    log "gateway coverage: nothing to collect from $node"
+  fi
+}
+
 # kind_deploy_gateway [SERVE]: apply the Deployment and wait for it to be ready.
 # SERVE is the --serve allowlist; gates need different values, so it is applied
 # with `kubectl set env` after the manifest rather than baked into it.
@@ -278,6 +322,7 @@ kind_deploy_gateway() {
     || fail "imagePullPolicy is still Always after patching; the gate would have \
 tested the published image instead of this build"
   kubectl_e2e apply -f - <<<"$patched" >/dev/null || fail "apply gateway deployment"
+  kind_gateway_coverage_volume
   # Override the manifest's defaults the same way an operator would. Not
   # ConfigMap keys: a referenced key is required, and a Pod whose ConfigMap
   # lacks it never starts (deploy/k8s/gateway-deployment.yaml says why).

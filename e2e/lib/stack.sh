@@ -57,6 +57,12 @@ fail() { printf '\nE2E FAILED: %s\n' "$*" >&2; stack_dump; exit 1; }
 
 # --- compose wrapper --------------------------------------------------------
 
+# E2E_COVER_DIR=path builds the coverage-recording gateway and collects what
+# it records there at the end of the suite (#90; scripts/coverage-report).
+if [[ -n "${E2E_COVER_DIR:-}" ]]; then
+  export AXIOM_GATEWAY_COVER=1
+fi
+
 compose() {
   local files=(-f "$E2E_COMPOSE_FILE") f
   for f in $E2E_COMPOSE_OVERLAYS; do files+=(-f "$f"); done
