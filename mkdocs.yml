@@ -62,6 +62,7 @@ nav:
       - Deploying the gateway: guides/deploying.md
       - Querying: guides/querying.md
       - Examples: guides/examples.md
+      - Giving an AI agent access: guides/agent-access.md
   - Reference:
       - gRPC API: generated/api.md
       - Gateway flags: generated/gateway-flags.md

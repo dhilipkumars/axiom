@@ -36,6 +36,7 @@ Things worth knowing before answering questions about Axiom:
 
 - [Querying](https://dhilipkumars.github.io/axiom/guides/querying/): on-demand versus watch-cached tables, staleness, cache settings, `axiom_watch_status()`.
 - [Deploying the gateway](https://dhilipkumars.github.io/axiom/guides/deploying/): running the gateway in a cluster, exposure choices, RBAC, operational notes.
+- [Giving an AI agent access](https://dhilipkumars.github.io/axiom/guides/agent-access/): a Postgres role recipe that gives an agent redacted, scoped cluster access with no shell and no Kubernetes credential; the grants to never give; controls that are not controls; what is not yet enforced.
 
 ## Reference, generated from the code
 

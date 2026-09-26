@@ -217,6 +217,11 @@ A subscription is in one of three states, readable from SQL:
 SELECT * FROM axiom_watch_status();
 ```
 
+Only superusers can call it by default, because it names every watched
+resource and namespace whatever the caller's table grants. Grant it to the
+roles that monitor Axiom:
+`GRANT EXECUTE ON FUNCTION axiom_watch_status() TO monitoring;`.
+
 - **`ACTIVE`** — the stream is current and scans are authoritative.
 - **`DEGRADED`** — the stream is broken and the cache is stale. Scans still
   return the cached rows, with a `WARNING` saying so on every scan. Stale data
