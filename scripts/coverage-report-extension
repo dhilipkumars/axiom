@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Extension line coverage from unit tests and the e2e suite, separately and
+# merged (#90).
+#
+#   scripts/coverage-report-extension UNIT_LCOV E2E_LCOV
+#
+# Both are what scripts/extension-coverage-lcov wrote; either may be missing,
+# and its column then reads "-". Merged by file and line: the unit and e2e
+# builds are different binaries (debug test build, release .so), so their raw
+# profiles are not merged, but the lines they execute are. Prints a Markdown
+# table on stdout, one row per source file.
+set -euo pipefail
+
+[[ $# -eq 2 ]] || { echo "usage: $(basename "$0") UNIT_LCOV E2E_LCOV" >&2; exit 2; }
+unit="$1" e2e="$2"
+src="$(cd "$(dirname "${BASH_SOURCE[0]}")/../extension" && pwd)"
+
+# Test code is not the product. Rust keeps unit tests inside the file they
+# test, and the unit build counts them as covered lines of that file, which
+# would inflate its figure with the tests covering themselves. So every
+# `#[cfg(... test ...)] mod name {` block is left out by its line range, and
+# so is every file lib.rs declares that way
+# (`#[cfg(test)] mod stub_gateway_tests;`). A top-level module ends at the
+# first line that is just `}` -- rustfmt, which CI enforces, guarantees it --
+# which is sturdier than counting braces: test fixtures hold deliberately
+# malformed JSON like b"{not json". Test-only helpers outside a module are a
+# few lines and stay in.
+excluded="$(mktemp)"
+trap 'rm -f "$excluded"' EXIT
+for f in "$src"/src/*.rs; do
+  awk -v F="src/$(basename "$f")" '
+    /^#\[cfg\(.*test/ { pend = 1; next }
+    pend && /^#\[/ { next }
+    pend && /^(pub(\([a-z]+\))? )?mod [A-Za-z_]+ *;/ {
+      m = $0; sub(/^(pub(\([a-z]+\))? )?mod /, "", m); sub(/ *;.*/, "", m)
+      print "file", "src/" m ".rs"; pend = 0; next }
+    pend && /^(pub(\([a-z]+\))? )?mod [A-Za-z_]+ *\{/ { start = NR; inmod = 1; pend = 0; next }
+    { pend = 0 }
+    inmod && /^\}/ { print "range", F, start, NR; inmod = 0 }
+  ' "$f"
+done > "$excluded"
+[[ -s "$unit" ]] || unit=/dev/null
+[[ -s "$e2e" ]] || e2e=/dev/null
+
+echo "### Extension coverage"
+echo
+if [[ "$unit" == /dev/null && "$e2e" == /dev/null ]]; then
+  echo "No extension coverage data was recorded, so there is nothing to report."
+  exit 0
+fi
+echo "| file | unit | e2e | combined |"
+echo "|---|---:|---:|---:|"
+awk -v xfile="$excluded" -v ufile="$unit" -v has_u="$([[ "$unit" != /dev/null ]] && echo 1 || echo 0)" \
+    -v has_e="$([[ "$e2e" != /dev/null ]] && echo 1 || echo 0)" '
+  FILENAME == xfile {
+    if ($1 == "file") skipfile[$2] = 1
+    else { n = ++nr[$2]; lo[$2, n] = $3; hi[$2, n] = $4 }
+    next }
+  FNR == 1 { src = (FILENAME == ufile ? "u" : "e") }
+  /^SF:/ { f = substr($0, 4); next }
+  /^DA:/ { split(substr($0, 4), a, ","); ln = a[1] + 0
+           if (f in skipfile) next
+           for (i = 1; i <= nr[f]; i++) if (ln >= lo[f, i] && ln <= hi[f, i]) next
+           key = f SUBSEP a[1]
+           line[key] = 1; files[f] = 1
+           if (a[2] > 0) hit[src, key] = 1
+           next }
+  END {
+    for (k in line) {
+      split(k, p, SUBSEP); t[p[1]]++; T++
+      if (hit["u", k]) { u[p[1]]++; U++ }
+      if (hit["e", k]) { e[p[1]]++; E++ }
+      if (hit["u", k] || hit["e", k]) { c[p[1]]++; C++ }
+    }
+    for (f in files)
+      printf "| `%s` | %s | %s | **%.1f%%** |\n", f,
+        has_u ? sprintf("%.1f%%", 100 * u[f] / t[f]) : "-",
+        has_e ? sprintf("%.1f%%", 100 * e[f] / t[f]) : "-",
+        100 * c[f] / t[f] | "sort"
+    close("sort")
+    printf "| **total** | %s | %s | **%.1f%%** |\n",
+      has_u ? sprintf("%.1f%%", 100 * U / T) : "-",
+      has_e ? sprintf("%.1f%%", 100 * E / T) : "-", 100 * C / T
+  }' "$excluded" "$unit" "$e2e"
+echo
+echo "Line coverage of extension/src, test modules and generated protobuf code excluded. It measures what ran, not what was asserted."

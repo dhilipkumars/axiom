@@ -20,6 +20,9 @@
 #   E2E_KIND_KEEP=1   leave the cluster up afterwards (implied while gates run)
 #   E2E_NO_BUILD=1    reuse already-built images instead of building once here
 #   E2E_TIMEOUT_SECS  passed through to each gate
+#   E2E_COVER_DIR     build the coverage-recording gateway and extension, and
+#                     collect their data under gateway/ and extension/ here
+#                     (#90); scripts/coverage-report* read it
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,6 +44,9 @@ hms() { printf '%dm%02ds' $(( $1 / 60 )) $(( $1 % 60 )); }
 suite_teardown() {
   local rc=$?
   if [[ "$KEEP_CLUSTER_AT_END" == "1" ]]; then
+    # kind_down collects coverage when it deletes the cluster; a kept one
+    # still has to be collected here (#90).
+    kind_collect_gateway_coverage
     log "E2E_KIND_KEEP=1, leaving kind cluster $E2E_KIND_CLUSTER"
   else
     E2E_KIND_KEEP=0 kind_down

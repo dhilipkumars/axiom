@@ -1,0 +1,13 @@
+# Coverage overlay for the e2e suite (#90), added by e2e/lib/stack.sh when
+# E2E_COVER_DIR is set. The extension in that build is instrumented; this tells
+# every Postgres process where to write its profile, and mounts the directory.
+#
+# %4m: a pool of four files that each exiting process merges into, under a
+# lock, rather than one file per process. The gates open a connection per
+# statement, so one file per backend would be thousands.
+services:
+  postgres:
+    environment:
+      LLVM_PROFILE_FILE: /coverage/axiom-%4m.profraw
+    volumes:
+      - ${E2E_EXT_COVER_DIR:?E2E_EXT_COVER_DIR must be set with the coverage overlay}:/coverage

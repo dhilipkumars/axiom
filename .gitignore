@@ -27,3 +27,6 @@ e2e/.kind/
 # scripts/local-dev writes a rewritten kubeconfig here; it holds cluster
 # credentials and is regenerated on every `make local-dev-up`.
 .local-dev/
+
+# Coverage data and reports (scripts/coverage-report, #90)
+/coverage/

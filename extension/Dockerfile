@@ -32,9 +32,21 @@ WORKDIR /src/extension
 # '0.1.0'` would run an old release's SQL against this release's library and
 # succeed. Only the staging directory is deleted, so nothing is recompiled --
 # the object files live elsewhere under target/.
+#
+# COVER=1 builds the e2e suite's coverage-recording extension (#90): every
+# crate compiled with -C instrument-coverage, so each backend and the worker
+# write an LLVM profile when they exit, and llvm-tools matching this rustc so
+# the same stage can turn those profiles into a report. Releases never set it.
+# LLVM_PROFILE_FILE=/dev/null keeps the instrumented build scripts and schema
+# generator that run during the build from leaving profiles in the image.
+ARG COVER=""
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/extension/target \
-    rm -rf target/release/axiom-pg${PG_MAJOR} \
+    if [ -n "$COVER" ]; then \
+        rustup component add llvm-tools \
+        && export RUSTFLAGS="-C instrument-coverage" LLVM_PROFILE_FILE=/dev/null; \
+    fi \
+    && rm -rf target/release/axiom-pg${PG_MAJOR} \
     && cargo pgrx package --pg-config /usr/lib/postgresql/${PG_MAJOR}/bin/pg_config \
         --no-default-features --features pg${PG_MAJOR} \
     && mkdir -p /out \
