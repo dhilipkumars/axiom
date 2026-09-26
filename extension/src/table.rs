@@ -309,6 +309,8 @@ pub enum WriteError {
     NotWritable(String),
     /// The old `raw` value lacks an identity/resourceVersion.
     BadOldRaw(&'static str),
+    /// `raw` names a different apiVersion/kind from the table's: (found, want).
+    WrongKind(String, String),
 }
 
 impl fmt::Display for WriteError {
@@ -338,6 +340,9 @@ impl fmt::Display for WriteError {
                 "column \"{col}\" is managed by the Kubernetes API server and cannot be written"
             ),
             Self::BadOldRaw(what) => write!(f, "cannot identify the row to write: {what}"),
+            Self::WrongKind(found, want) => {
+                write!(f, "raw describes {found}, but this table holds {want}")
+            }
         }
     }
 }
@@ -407,6 +412,10 @@ fn set_identity(body: &mut serde_json::Value, resource: &Resource, id: &Identity
     body["metadata"]["name"] = serde_json::Value::String(id.name.clone());
     if resource.namespaced {
         body["metadata"]["namespace"] = serde_json::Value::String(id.namespace.clone());
+    } else if let Some(m) = body["metadata"].as_object_mut() {
+        // A cluster-scoped object has no namespace, and the API server refuses
+        // one that claims it does -- which a hand-written raw can.
+        m.remove("namespace");
     }
     if id.resource_version.is_empty() {
         if let Some(m) = body["metadata"].as_object_mut() {
@@ -512,11 +521,57 @@ fn check_read_only(
     Ok(())
 }
 
+/// Refuses a `raw` that says it is some other kind of object.
+///
+/// `set_identity` stamps the table's apiVersion and kind onto whatever it is
+/// given, so without this a `Deployment` manifest inserted into a table of
+/// `ConfigMap`s would quietly become a `ConfigMap` carrying a `Deployment`'s
+/// fields. A `raw` that omits them is fine: the table supplies them.
+fn check_raw_kind(raw: &serde_json::Value, resource: &Resource) -> Result<(), WriteError> {
+    let want_api = resource.api_version();
+    let want_kind = resource.kind.to_string();
+    let api = str_at(raw, "/apiVersion");
+    let kind = str_at(raw, "/kind");
+    if api.is_some_and(|a| a != want_api) || kind.is_some_and(|k| k != want_kind) {
+        return Err(WriteError::WrongKind(
+            format!(
+                "{} {}",
+                api.unwrap_or(&want_api),
+                kind.unwrap_or(&want_kind)
+            ),
+            format!("{want_api} {want_kind}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Metadata the API server assigns when it creates an object. A `raw` read
+/// from another object carries them, and using that as a template is the
+/// point of honouring `raw` on INSERT, so they are dropped rather than sent:
+/// a create cannot choose them, and some make it fail outright.
+const SERVER_ASSIGNED_METADATA: &[&str] = &[
+    "uid",
+    "resourceVersion",
+    "creationTimestamp",
+    "generation",
+    "managedFields",
+    "deletionTimestamp",
+    "deletionGracePeriodSeconds",
+    "selfLink",
+];
+
 /// Builds the body for `INSERT`.
 ///
 /// `name` is required (from the column or from `raw`), `namespace` too for a
-/// namespaced kind. `raw`, if given, is the base object that the typed columns
-/// are then applied over.
+/// namespaced kind. `raw`, if given, is the base object, so a whole manifest
+/// can be inserted as one `jsonb` value.
+///
+/// Precedence when both are given: a non-NULL typed column overrides the same
+/// field in `raw`, as it does on UPDATE, which is what lets `raw` serve as a
+/// template (`INSERT ... (name, raw) VALUES ('copy', (SELECT raw ...))`). A
+/// NULL column leaves `raw` alone. Postgres fills every column an INSERT does
+/// not mention with NULL, so NULL cannot mean "clear this": treating it that
+/// way wiped `raw`'s labels, annotations and data and reported success (#78).
 pub fn insert_body(schema: &TableSchema, new: &NewRow) -> Result<WriteBody, WriteError> {
     if !schema.writable {
         return Err(WriteError::ReadOnly(schema.resource.to_string()));
@@ -533,6 +588,7 @@ pub fn insert_body(schema: &TableSchema, new: &NewRow) -> Result<WriteBody, Writ
         if !r.is_object() {
             return Err(WriteError::NotAnObject("raw".to_owned()));
         }
+        check_raw_kind(r, &schema.resource)?;
     }
     let raw_name = raw.and_then(|r| str_at(r, "/metadata/name"));
     let raw_ns = raw.and_then(|r| str_at(r, "/metadata/namespace"));
@@ -556,24 +612,30 @@ pub fn insert_body(schema: &TableSchema, new: &NewRow) -> Result<WriteBody, Writ
     }
 
     let mut body = raw.cloned().unwrap_or_else(|| serde_json::json!({}));
+    if let Some(m) = body.get_mut("metadata").and_then(|m| m.as_object_mut()) {
+        for key in SERVER_ASSIGNED_METADATA {
+            m.remove(*key);
+        }
+    }
     for (i, col) in schema.columns.iter().enumerate() {
         let Some(col) = col else { continue };
         if !col.writable || col.name == "name" || col.name == "namespace" {
             continue;
         }
-        match new.cells.get(i) {
-            Some(NewCell::Value(Cell::Json(v))) => {
-                apply_column(&mut body, &schema.resource, col, Some(v))?;
-            }
-            // An explicit NULL clears the field.
-            Some(NewCell::Null) => apply_column(&mut body, &schema.resource, col, None)?,
-            _ => {}
+        // NULL is how Postgres fills a column the INSERT did not mention;
+        // there is no existing object for it to clear, so only values apply.
+        if let Some(NewCell::Value(Cell::Json(v))) = new.cells.get(i) {
+            apply_column(&mut body, &schema.resource, col, Some(v))?;
         }
     }
     // A ConfigMap without `data` gets an empty map so `data ? 'k'` is false
-    // rather than NULL on the row that comes back.
-    if is_configmap(&schema.resource) && body.get("data").is_none() {
-        body["data"] = serde_json::json!({});
+    // rather than NULL on the row that comes back; `data` that arrived through
+    // raw gets the check a typed `data` column already had.
+    if is_configmap(&schema.resource) {
+        match body.get("data") {
+            Some(d) => check_configmap_data(d)?,
+            None => body["data"] = serde_json::json!({}),
+        }
     }
 
     let id = Identity {
@@ -625,6 +687,7 @@ pub fn update_body(
             if !r.is_object() {
                 return Err(WriteError::NotAnObject("raw".to_owned()));
             }
+            check_raw_kind(r, &schema.resource)?;
             r.clone()
         }
         _ => old_raw.clone(),
@@ -1050,6 +1113,25 @@ mod tests {
     }
 
     #[test]
+    fn a_cluster_scoped_raw_that_claims_a_namespace_loses_it() {
+        let r = Resource::new(
+            "example.com",
+            "v1",
+            "ClusterWidget",
+            "clusterwidgets",
+            false,
+        )
+        .expect("valid");
+        let s = TableSchema::resolve(r, true, &[Some("name"), Some("spec"), Some("raw")]);
+        let raw = json!({"metadata":{"name":"cw","namespace":"default"},"spec":{"a":1}});
+        let w = insert_body(&s, &pg_row(&s, &[("raw", j(raw))])).expect("valid");
+        assert!(
+            w.body["metadata"].get("namespace").is_none(),
+            "the API server refuses a cluster-scoped object that names a namespace"
+        );
+    }
+
+    #[test]
     fn insert_validation_errors() {
         let s = configmaps();
         let e =
@@ -1126,6 +1208,159 @@ mod tests {
             Err(WriteError::NotWritable("uid".into())),
             "accepting uid would look like it worked while the API server ignored it"
         );
+    }
+
+    /// Builds a row the way Postgres hands one to an INSERT: every column of
+    /// the table is present, and each one the statement did not mention is
+    /// NULL. `new_row` leaves them undeclared instead, which is why its tests
+    /// never saw the NULLs that wiped `raw` (#78).
+    fn pg_row(schema: &TableSchema, pairs: &[(&str, Option<Cell>)]) -> NewRow {
+        let mut row = NewRow::undeclared(schema);
+        for (i, col) in schema.columns.iter().enumerate() {
+            if col.is_some() {
+                row.cells[i] = NewCell::Null;
+            }
+        }
+        for (col, cell) in pairs {
+            row.cells[schema.index_of(col).expect("column")] =
+                cell.clone().map_or(NewCell::Null, NewCell::Value);
+        }
+        row
+    }
+
+    #[test]
+    fn insert_of_raw_alone_keeps_everything_in_it() {
+        // #78, as Postgres delivers it: `INSERT ... (namespace, name, raw)`
+        // leaves data, labels and annotations NULL.
+        let s = configmaps();
+        let raw = json!({"apiVersion":"v1","kind":"ConfigMap",
+            "metadata":{"name":"rawtest","namespace":"default",
+                        "labels":{"from":"raw"},"annotations":{"note":"raw"}},
+            "data":{"k":"v"}});
+        let new = pg_row(
+            &s,
+            &[
+                ("namespace", t("default")),
+                ("name", t("rawtest")),
+                ("raw", j(raw)),
+            ],
+        );
+        let w = insert_body(&s, &new).expect("valid");
+        assert_eq!(w.body["data"], json!({"k":"v"}), "data was discarded");
+        assert_eq!(w.body["metadata"]["labels"], json!({"from":"raw"}));
+        assert_eq!(w.body["metadata"]["annotations"], json!({"note":"raw"}));
+    }
+
+    #[test]
+    fn insert_takes_identity_from_raw_when_the_columns_are_null() {
+        let s = configmaps();
+        let raw = json!({"metadata":{"name":"fromraw","namespace":"shop"},"data":{"k":"v"}});
+        let w = insert_body(&s, &pg_row(&s, &[("raw", j(raw))])).expect("valid");
+        assert_eq!(w.identity.name, "fromraw");
+        assert_eq!(w.identity.namespace, "shop");
+        assert_eq!(w.body["data"], json!({"k":"v"}));
+    }
+
+    #[test]
+    fn a_typed_column_overrides_the_same_field_in_raw() {
+        // raw as a template: the documented precedence, as on UPDATE.
+        let s = configmaps();
+        let template = json!({"metadata":{"name":"template","namespace":"shop",
+                                          "labels":{"tier":"web"}},"data":{"OLD":"1"}});
+        let new = pg_row(
+            &s,
+            &[
+                ("name", t("copy")),
+                ("raw", j(template)),
+                ("data", j(json!({"NEW":"2"}))),
+            ],
+        );
+        let w = insert_body(&s, &new).expect("valid");
+        assert_eq!(w.identity.name, "copy", "the name column wins over raw");
+        assert_eq!(
+            w.body["data"],
+            json!({"NEW":"2"}),
+            "the data column wins over raw"
+        );
+        assert_eq!(
+            w.body["metadata"]["labels"],
+            json!({"tier":"web"}),
+            "a field no column set comes from raw"
+        );
+    }
+
+    #[test]
+    fn raw_read_from_another_object_works_as_a_template() {
+        // What `SELECT raw FROM ...` returns: server-assigned metadata that a
+        // create cannot choose. It is dropped; what the user owns is kept.
+        let s = configmaps();
+        let read = json!({"apiVersion":"v1","kind":"ConfigMap",
+            "metadata":{"name":"orig","namespace":"shop","uid":"u1","resourceVersion":"9",
+                        "creationTimestamp":"2026-01-01T00:00:00Z","generation":3,
+                        "managedFields":[{"manager":"kubectl"}],"labels":{"tier":"web"}},
+            "data":{"k":"v"}});
+        let new = pg_row(&s, &[("name", t("copy")), ("raw", j(read))]);
+        let w = insert_body(&s, &new).expect("valid");
+        let meta = w.body["metadata"].as_object().expect("metadata");
+        for key in SERVER_ASSIGNED_METADATA {
+            assert!(!meta.contains_key(*key), "{key} was sent on a create");
+        }
+        assert_eq!(meta["labels"], json!({"tier":"web"}));
+        assert_eq!(meta["name"], "copy");
+        assert_eq!(w.body["data"], json!({"k":"v"}));
+    }
+
+    #[test]
+    fn raw_of_another_kind_is_refused_not_relabelled() {
+        let s = configmaps();
+        for raw in [
+            json!({"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"d","namespace":"shop"}}),
+            json!({"kind":"Secret","metadata":{"name":"d","namespace":"shop"}}),
+            json!({"apiVersion":"v2","metadata":{"name":"d","namespace":"shop"}}),
+        ] {
+            let got = insert_body(&s, &pg_row(&s, &[("raw", j(raw.clone()))]));
+            assert!(
+                matches!(got, Err(WriteError::WrongKind(..))),
+                "{raw}: got {got:?}"
+            );
+        }
+        // Omitting apiVersion and kind is fine: the table supplies them.
+        let raw = json!({"metadata":{"name":"d","namespace":"shop"}});
+        let w = insert_body(&s, &pg_row(&s, &[("raw", j(raw))])).expect("valid");
+        assert_eq!(w.body["kind"], "ConfigMap");
+        assert_eq!(
+            WriteError::WrongKind("apps/v1 Deployment".into(), "v1 ConfigMap".into()).to_string(),
+            "raw describes apps/v1 Deployment, but this table holds v1 ConfigMap"
+        );
+    }
+
+    #[test]
+    fn configmap_data_from_raw_is_checked_like_the_column() {
+        let s = configmaps();
+        let raw = json!({"metadata":{"name":"d","namespace":"shop"},"data":{"n":1}});
+        assert!(matches!(
+            insert_body(&s, &pg_row(&s, &[("raw", j(raw))])),
+            Err(WriteError::DataValueNotString(_))
+        ));
+    }
+
+    #[test]
+    fn update_refuses_raw_replaced_with_another_kind() {
+        let s = configmaps();
+        let mut other = cm_raw();
+        other["kind"] = json!("Secret");
+        let new = new_row(
+            &s,
+            &[
+                ("name", t("app")),
+                ("namespace", t("shop")),
+                ("raw", j(other)),
+            ],
+        );
+        assert!(matches!(
+            update_body(&s, &cm_raw(), &new),
+            Err(WriteError::WrongKind(..))
+        ));
     }
 
     #[test]

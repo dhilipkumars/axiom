@@ -166,7 +166,8 @@ fn write_sqlstate(e: &WriteError) -> PgSqlErrorCode {
         }
         WriteError::InvalidName(..)
         | WriteError::NotAnObject(_)
-        | WriteError::DataValueNotString(_) => PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+        | WriteError::DataValueNotString(_)
+        | WriteError::WrongKind(..) => PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
         WriteError::BadOldRaw(_) => PgSqlErrorCode::ERRCODE_FDW_ERROR,
     }
 }

@@ -151,6 +151,26 @@ UPDATE k8s.core_configmaps SET data = data || '{"LOG_LEVEL":"debug"}'
  WHERE namespace = 'default' AND name = 'app';
 ```
 
+**`raw` is a whole object on INSERT too.** A complete manifest can be inserted
+as one `jsonb` value, and a typed column given alongside it overrides the same
+field, so `raw` read from one object works as a template for another:
+
+```sql
+INSERT INTO k8s.core_configmaps (namespace, name, raw) VALUES ('default', 'app',
+  '{"metadata":{"labels":{"team":"payments"}},"data":{"LOG_LEVEL":"info"}}');
+
+-- a copy of it under a new name, with data overridden
+INSERT INTO k8s.core_configmaps (namespace, name, data, raw)
+  SELECT 'default', 'app-copy', '{"LOG_LEVEL":"debug"}', raw
+    FROM k8s.core_configmaps WHERE namespace = 'default' AND name = 'app';
+```
+
+A column the INSERT leaves NULL takes its value from `raw`. Metadata the API
+server assigns at creation (`uid`, `resourceVersion`, `creationTimestamp`,
+`managedFields` and the like) is dropped from `raw` rather than sent, and a
+`raw` whose `apiVersion` or `kind` names a different kind from the table is
+refused rather than relabelled.
+
 **Conflicts are retryable.** An `UPDATE` carries the `resource_version` the row
 was read at. If the object changed in between, the statement fails with
 `40001`, the same SQLSTATE Postgres uses for a serialization failure, and the

@@ -1,0 +1,51 @@
+# A cluster-scoped CRD the gateway may write, for the configmaps gate. None of
+# the other fixtures is both cluster-scoped and writable, and that is the
+# combination where a namespace inside raw matters: the gateway refuses a body
+# whose metadata.namespace differs from the request's, and a cluster-scoped
+# request has none.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: clustergadgets.example.com
+spec:
+  group: example.com
+  scope: Cluster
+  names:
+    plural: clustergadgets
+    singular: clustergadget
+    kind: ClusterGadget
+    listKind: ClusterGadgetList
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+---
+# Only this gate writes ClusterGadgets; the shipped RBAC knows nothing of them.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: axiom-e2e-clustergadgets
+rules:
+  - apiGroups: ["example.com"]
+    resources: ["clustergadgets"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: axiom-e2e-clustergadgets
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: axiom-e2e-clustergadgets
+subjects:
+  - kind: ServiceAccount
+    name: axiom-gateway
+    namespace: axiom-system

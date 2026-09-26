@@ -150,7 +150,5 @@ instructions:
   Cast (`replicas::int > 5`), and use `axiom_quantity()` for Kubernetes
   quantities such as `500m` or `128Mi`
   ([#79](https://github.com/dhilipkumars/axiom/issues/79)).
-- **`INSERT` ignores `raw`.** Supply the typed columns instead
-  ([#78](https://github.com/dhilipkumars/axiom/issues/78)).
 - **Table names carry the API group.** It's `k8s.core_pods`, not `k8s.pods`,
   unless someone created [short names](querying.md#short-names).
