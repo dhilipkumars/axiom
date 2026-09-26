@@ -38,6 +38,9 @@ services:
     build:
       context: ../..
       dockerfile: extension/Dockerfile
+      args:
+        # Set by the e2e suite when measuring coverage (#90); empty otherwise.
+        COVER: ${AXIOM_EXT_COVER:-}
     environment:
       POSTGRES_USER: axiom
       # Dev-only password for a container that only listens inside the compose

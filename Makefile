@@ -49,11 +49,24 @@ gateway-vuln:
 ext-build:
 	cd extension && cargo build --no-default-features --features $(PG)
 
+# EXT_COVER_DIR=path also records coverage, as lcov in path/unit.lcov (#90).
+# Every crate is built with -C instrument-coverage; the pgrx test Postgres
+# inherits LLVM_PROFILE_FILE, so pg tests running inside a backend count, not
+# only the pure unit tests. Needs the llvm-tools rustup component.
 ext-test:
 	# Always start from a fresh scratch cluster: a stale/partially-cached
 	# test-pgdata makes pgrx skip initdb and then fail to start Postgres.
 	rm -rf "$${CARGO_TARGET_DIR:-extension/target}/test-pgdata"
+ifdef EXT_COVER_DIR
+	mkdir -p $(abspath $(EXT_COVER_DIR))
+	cd extension && RUSTFLAGS="-C instrument-coverage" \
+		LLVM_PROFILE_FILE=$(abspath $(EXT_COVER_DIR))/ext-%4m.profraw cargo pgrx test $(PG)
+	scripts/extension-coverage-lcov $(abspath $(EXT_COVER_DIR)) $(abspath $(EXT_COVER_DIR))/unit.lcov \
+		$$(pg_config_dir=/usr/lib/postgresql/$(subst pg,,$(PG))/bin; $$pg_config_dir/pg_config --pkglibdir)/axiom.so \
+		$$(find "$${CARGO_TARGET_DIR:-extension/target}/debug/deps" -maxdepth 1 -type f -perm -u+x -name 'axiom-*')
+else
 	cd extension && cargo pgrx test $(PG)
+endif
 
 ext-lint:
 	cd extension && cargo fmt --check

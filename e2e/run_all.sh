@@ -20,8 +20,9 @@
 #   E2E_KIND_KEEP=1   leave the cluster up afterwards (implied while gates run)
 #   E2E_NO_BUILD=1    reuse already-built images instead of building once here
 #   E2E_TIMEOUT_SECS  passed through to each gate
-#   E2E_COVER_DIR     build the coverage-recording gateway and collect its
-#                     data here (#90); scripts/coverage-report reads it
+#   E2E_COVER_DIR     build the coverage-recording gateway and extension, and
+#                     collect their data under gateway/ and extension/ here
+#                     (#90); scripts/coverage-report* read it
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

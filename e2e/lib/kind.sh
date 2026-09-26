@@ -272,9 +272,10 @@ kind_collect_gateway_coverage() {
   kubectl_e2e -n "$E2E_GATEWAY_SA_NS" scale deploy/axiom-gateway --replicas=0 >/dev/null 2>&1 || true
   kubectl_e2e -n "$E2E_GATEWAY_SA_NS" wait --for=delete pod -l app.kubernetes.io/name=axiom-gateway \
     --timeout=60s >/dev/null 2>&1 || true
-  mkdir -p "$E2E_COVER_DIR"
-  if docker cp "$node:/axiom-coverage/." "$E2E_COVER_DIR/" >/dev/null 2>&1; then
-    log "gateway coverage: $(find "$E2E_COVER_DIR" -name 'covcounters.*' | wc -l | tr -d ' ') counter file(s) in $E2E_COVER_DIR"
+  local dest="$E2E_COVER_DIR/gateway"
+  mkdir -p "$dest"
+  if docker cp "$node:/axiom-coverage/." "$dest/" >/dev/null 2>&1; then
+    log "gateway coverage: $(find "$dest" -name 'covcounters.*' | wc -l | tr -d ' ') counter file(s) in $dest"
   else
     log "gateway coverage: nothing to collect from $node"
   fi

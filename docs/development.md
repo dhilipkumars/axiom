@@ -437,30 +437,37 @@ make unit
 
 ### Coverage
 
-The gateway's coverage is measured from unit tests and from the e2e suite, and
-the two are reported side by side:
+Coverage is measured for the gateway and the extension, from unit tests and
+from the e2e suite, and reported side by side:
 
 ```sh
-make gateway-test GATEWAY_COVER_DIR=coverage/unit        # unit tests, recording coverage
-E2E_COVER_DIR=$PWD/coverage/e2e make e2e                  # the suite, with a coverage-recording gateway
-scripts/coverage-report coverage/unit coverage/e2e coverage/report
-open coverage/report/coverage.html
+make gateway-test GATEWAY_COVER_DIR=coverage/unit            # gateway unit tests
+make ext-test PG=pg16 EXT_COVER_DIR=coverage/extension-unit   # extension unit + pg tests (needs llvm-tools)
+E2E_COVER_DIR=$PWD/coverage/e2e make e2e                      # the suite, both components instrumented
+
+scripts/coverage-report coverage/unit coverage/e2e/gateway coverage/report
+scripts/coverage-report-extension coverage/extension-unit/unit.lcov coverage/e2e/extension/e2e.lcov
 ```
 
-The report prints a per-package table of unit, e2e and combined statement
-coverage. CI publishes it in the e2e job's summary, with the HTML report as an
-artifact. How the e2e figure is collected:
+The e2e extension profiles need `scripts/extension-coverage-lcov` run with the
+llvm-tools of the rustc that built the instrumented `.so`; the e2e CI job shows
+how, inside the extension's build stage. CI publishes both tables in the e2e
+job's summary and log, with the HTML report and raw data as an artifact.
 
-- `E2E_COVER_DIR` builds the gateway with `-cover` and the `axiomcover` tag;
-  releases never are.
-- The gateway writes its counters to a directory on the kind node when it
+How the e2e figures are collected:
+
+- `E2E_COVER_DIR` builds the gateway with `-cover` and the `axiomcover` tag,
+  and the extension with `-C instrument-coverage`. Releases never are.
+- **Gateway:** it writes its counters to a directory on the kind node when it
   receives SIGTERM, so each Pod the suite restarts contributes, including one
-  killed at the end of its grace period.
-- The suite scales the last gateway to zero and copies the directory off the
-  node before deleting the cluster.
+  killed at the end of its grace period. The suite stops the last one and
+  copies the directory to `E2E_COVER_DIR/gateway` before deleting the cluster.
+- **Extension:** every Postgres process writes its LLVM profile to
+  `E2E_COVER_DIR/extension` as it exits, merged into a pool of four files, so
+  the connection-per-statement gates do not leave thousands.
 
-The extension's coverage is not measured yet (#90, phase 2), and a percentage
-says which code ran, not what was asserted.
+Gateway figures are statement coverage, the extension's are line coverage,
+and neither says what was asserted.
 
 `make ext-test` starts a throwaway Postgres with `shared_preload_libraries =
 'axiom'` and an endpoint nothing listens on, so you will see the worker logging

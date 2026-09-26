@@ -57,10 +57,19 @@ fail() { printf '\nE2E FAILED: %s\n' "$*" >&2; stack_dump; exit 1; }
 
 # --- compose wrapper --------------------------------------------------------
 
-# E2E_COVER_DIR=path builds the coverage-recording gateway and collects what
-# it records there at the end of the suite (#90; scripts/coverage-report).
+# E2E_COVER_DIR=path builds the coverage-recording gateway and extension and
+# collects what they record (#90): the gateway's under gateway/, collected
+# from the kind node at the end; the extension's under extension/, written
+# there directly by every Postgres process through the coverage overlay.
 if [[ -n "${E2E_COVER_DIR:-}" ]]; then
-  export AXIOM_GATEWAY_COVER=1
+  export AXIOM_GATEWAY_COVER=1 AXIOM_EXT_COVER=1
+  export E2E_EXT_COVER_DIR="$E2E_COVER_DIR/extension"
+  # World-writable: the postgres user in the container writes here.
+  mkdir -p "$E2E_EXT_COVER_DIR" && chmod 0777 "$E2E_EXT_COVER_DIR"
+  case " ${E2E_COMPOSE_OVERLAYS:-} " in
+    *docker-compose.coverage.yml*) ;;
+    *) export E2E_COMPOSE_OVERLAYS="${E2E_COMPOSE_OVERLAYS:-} $E2E_ROOT/deploy/compose/docker-compose.coverage.yml" ;;
+  esac
 fi
 
 compose() {
