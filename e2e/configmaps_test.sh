@@ -19,7 +19,17 @@ SA="system:serviceaccount:$E2E_GATEWAY_SA_NS:$E2E_GATEWAY_SA"
 kind_up
 e2e_on_teardown kind_down
 stack_up
-kind_deploy_gateway "pods,configmaps"
+# A cluster-scoped CRD the gateway may write, for the raw-namespace checks
+# below. Established before the gateway starts, so discovery sees it.
+kubectl_e2e apply -f "$here/fixtures/clustergadget-crd.yaml" >/dev/null || fail "apply the ClusterGadget CRD"
+clustergadgets_down() {
+  kubectl_e2e delete clustergadgets --all --ignore-not-found >/dev/null 2>&1 || true
+  kubectl_e2e delete -f "$here/fixtures/clustergadget-crd.yaml" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+}
+e2e_on_teardown clustergadgets_down
+kubectl_e2e wait --for=condition=Established crd/clustergadgets.example.com --timeout=60s >/dev/null \
+  || fail "the ClusterGadget CRD did not become Established"
+kind_deploy_gateway "pods,configmaps,clustergadgets.example.com"
 
 log "namespace and DDL"
 kubectl_e2e create namespace "$NS" --dry-run=client -o yaml | kubectl_e2e apply -f - >/dev/null
@@ -186,8 +196,37 @@ out="$(psql_axiom "INSERT INTO k8s_configmaps (namespace, name, raw) VALUES ('$N
   '{\"apiVersion\":\"apps/v1\",\"kind\":\"Deployment\"}');" 2>&1 || true)"
 grep -q "raw describes apps/v1 Deployment" <<<"$out" || fail "a Deployment manifest was accepted: $out"
 kubectl_e2e -n "$NS" get configmap not-a-cm >/dev/null 2>&1 && fail "the mismatched manifest created a ConfigMap"
-kubectl_e2e -n "$NS" delete configmap from-raw from-template --ignore-not-found >/dev/null
 echo "refused: $(grep -o 'raw describes [^,]*' <<<"$out" | head -1)"
+
+log "UPDATE refuses raw replaced with another kind, and leaves the object alone"
+out="$(psql_axiom "UPDATE k8s_configmaps SET raw = jsonb_set(raw, '{kind}', '\"Secret\"')
+                    WHERE namespace = '$NS' AND name = 'from-raw';" 2>&1 || true)"
+grep -q "raw describes v1 Secret" <<<"$out" || fail "an UPDATE turning raw into a Secret was accepted: $out"
+got="$(kubectl_e2e -n "$NS" get configmap from-raw -o jsonpath='{.kind}|{.data.k}')"
+[[ "$got" == "ConfigMap|v" ]] || fail "the refused UPDATE still changed the object: '$got'"
+echo "refused, and from-raw is untouched: $got"
+kubectl_e2e -n "$NS" delete configmap from-raw from-template --ignore-not-found >/dev/null
+
+log "a cluster-scoped kind drops a namespace that raw claims, on INSERT and UPDATE"
+# The gateway refuses a body whose metadata.namespace differs from the
+# request's, and a cluster-scoped request has none. A raw copied from a
+# namespaced manifest, or written by hand, easily carries one.
+kubectl_e2e delete clustergadget g1 --ignore-not-found >/dev/null
+psql_axiom "CREATE FOREIGN TABLE IF NOT EXISTS k8s_clustergadgets (name text, spec jsonb, raw jsonb) SERVER kind
+            OPTIONS (resource 'clustergadgets', group 'example.com', version 'v1', kind 'ClusterGadget', namespaced 'false');"
+psql_axiom "INSERT INTO k8s_clustergadgets (raw) VALUES
+  ('{\"metadata\":{\"name\":\"g1\",\"namespace\":\"default\"},\"spec\":{\"size\":\"s\"}}');" \
+  || fail "INSERT of a cluster-scoped raw that names a namespace failed"
+got="$(kubectl_e2e get clustergadget g1 -o jsonpath='{.metadata.name}|{.metadata.namespace}|{.spec.size}')"
+[[ "$got" == "g1||s" ]] || fail "the cluster has '$got', want 'g1||s'"
+psql_axiom "UPDATE k8s_clustergadgets
+               SET raw = jsonb_set(jsonb_set(raw, '{metadata,namespace}', '\"default\"'), '{spec,size}', '\"m\"')
+             WHERE name = 'g1';" \
+  || fail "UPDATE of a cluster-scoped raw that names a namespace failed"
+got="$(kubectl_e2e get clustergadget g1 -o jsonpath='{.spec.size}')"
+[[ "$got" == "m" ]] || fail "the UPDATE did not reach the cluster: spec.size is '$got'"
+kubectl_e2e delete clustergadget g1 --ignore-not-found >/dev/null
+echo "inserted and updated with a namespace in raw; the cluster-scoped object has none"
 
 log "a later page larger than the first shrinks instead of failing the listing (#85)"
 # Tiny ConfigMaps named a-*, then large ones named b-*. A namespaced list comes
