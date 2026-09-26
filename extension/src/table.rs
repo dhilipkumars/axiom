@@ -341,7 +341,7 @@ impl fmt::Display for WriteError {
             ),
             Self::BadOldRaw(what) => write!(f, "cannot identify the row to write: {what}"),
             Self::WrongKind(found, want) => {
-                write!(f, "raw is a {found} object, but this table holds {want}")
+                write!(f, "raw describes {found}, but this table holds {want}")
             }
         }
     }
@@ -412,6 +412,10 @@ fn set_identity(body: &mut serde_json::Value, resource: &Resource, id: &Identity
     body["metadata"]["name"] = serde_json::Value::String(id.name.clone());
     if resource.namespaced {
         body["metadata"]["namespace"] = serde_json::Value::String(id.namespace.clone());
+    } else if let Some(m) = body["metadata"].as_object_mut() {
+        // A cluster-scoped object has no namespace, and the API server refuses
+        // one that claims it does -- which a hand-written raw can.
+        m.remove("namespace");
     }
     if id.resource_version.is_empty() {
         if let Some(m) = body["metadata"].as_object_mut() {
@@ -1109,6 +1113,25 @@ mod tests {
     }
 
     #[test]
+    fn a_cluster_scoped_raw_that_claims_a_namespace_loses_it() {
+        let r = Resource::new(
+            "example.com",
+            "v1",
+            "ClusterWidget",
+            "clusterwidgets",
+            false,
+        )
+        .expect("valid");
+        let s = TableSchema::resolve(r, true, &[Some("name"), Some("spec"), Some("raw")]);
+        let raw = json!({"metadata":{"name":"cw","namespace":"default"},"spec":{"a":1}});
+        let w = insert_body(&s, &pg_row(&s, &[("raw", j(raw))])).expect("valid");
+        assert!(
+            w.body["metadata"].get("namespace").is_none(),
+            "the API server refuses a cluster-scoped object that names a namespace"
+        );
+    }
+
+    #[test]
     fn insert_validation_errors() {
         let s = configmaps();
         let e =
@@ -1307,7 +1330,7 @@ mod tests {
         assert_eq!(w.body["kind"], "ConfigMap");
         assert_eq!(
             WriteError::WrongKind("apps/v1 Deployment".into(), "v1 ConfigMap".into()).to_string(),
-            "raw is a apps/v1 Deployment object, but this table holds v1 ConfigMap"
+            "raw describes apps/v1 Deployment, but this table holds v1 ConfigMap"
         );
     }
 

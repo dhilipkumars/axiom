@@ -184,10 +184,10 @@ echo "copied from-raw with data overridden: $got"
 log "raw of another kind is refused, not relabelled"
 out="$(psql_axiom "INSERT INTO k8s_configmaps (namespace, name, raw) VALUES ('$NS', 'not-a-cm',
   '{\"apiVersion\":\"apps/v1\",\"kind\":\"Deployment\"}');" 2>&1 || true)"
-grep -q "raw is a apps/v1 Deployment object" <<<"$out" || fail "a Deployment manifest was accepted: $out"
+grep -q "raw describes apps/v1 Deployment" <<<"$out" || fail "a Deployment manifest was accepted: $out"
 kubectl_e2e -n "$NS" get configmap not-a-cm >/dev/null 2>&1 && fail "the mismatched manifest created a ConfigMap"
 kubectl_e2e -n "$NS" delete configmap from-raw from-template --ignore-not-found >/dev/null
-echo "refused: $(grep -o 'raw is a [^,]*' <<<"$out" | head -1)"
+echo "refused: $(grep -o 'raw describes [^,]*' <<<"$out" | head -1)"
 
 log "a later page larger than the first shrinks instead of failing the listing (#85)"
 # Tiny ConfigMaps named a-*, then large ones named b-*. A namespaced list comes
