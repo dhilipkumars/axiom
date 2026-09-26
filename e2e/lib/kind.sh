@@ -32,6 +32,10 @@ kubectl_e2e() { kubectl --kubeconfig "$E2E_ADMIN_KUBECONFIG" "$@"; }
 
 kind_down() {
   if [[ "$E2E_KIND_KEEP" == "1" ]]; then log "E2E_KIND_KEEP=1, leaving kind cluster $E2E_KIND_CLUSTER"; return 0; fi
+  # A gate run on its own deletes the cluster here, so collect first; a no-op
+  # without E2E_COVER_DIR (#90). Only once the cluster is really going: it
+  # scales the gateway to zero, and a kept cluster's next gate needs it.
+  kind_collect_gateway_coverage
   log "deleting kind cluster $E2E_KIND_CLUSTER"
   kind delete cluster --name "$E2E_KIND_CLUSTER" >/dev/null 2>&1 || true
   rm -rf "$E2E_KUBE_DIR"

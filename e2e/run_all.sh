@@ -42,9 +42,10 @@ hms() { printf '%dm%02ds' $(( $1 / 60 )) $(( $1 % 60 )); }
 
 suite_teardown() {
   local rc=$?
-  # Before the cluster goes: the counters live on its node (#90).
-  kind_collect_gateway_coverage
   if [[ "$KEEP_CLUSTER_AT_END" == "1" ]]; then
+    # kind_down collects coverage when it deletes the cluster; a kept one
+    # still has to be collected here (#90).
+    kind_collect_gateway_coverage
     log "E2E_KIND_KEEP=1, leaving kind cluster $E2E_KIND_CLUSTER"
   else
     E2E_KIND_KEEP=0 kind_down

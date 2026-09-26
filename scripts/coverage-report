@@ -40,7 +40,14 @@ total() {
 inputs=()
 has_data "$unit" && inputs+=("$unit")
 has_data "$e2e" && inputs+=("$e2e")
-[[ ${#inputs[@]} -gt 0 ]] || { echo "no coverage data in $unit or $e2e" >&2; exit 1; }
+if [[ ${#inputs[@]} -eq 0 ]]; then
+  # Most likely an earlier step failed before recording anything. Say so in the
+  # summary rather than adding a second failure to a job that already has one.
+  echo "### Gateway coverage"
+  echo
+  echo "No coverage data was recorded (in $unit or $e2e), so there is nothing to report."
+  exit 0
+fi
 
 merged="$out/merged"
 rm -rf "$merged" && mkdir -p "$merged"

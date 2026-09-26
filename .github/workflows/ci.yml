@@ -192,14 +192,19 @@ jobs:
       # Report-only for now: a baseline comes first, then a ratchet.
       - name: gateway coverage report
         if: always()
-        run: scripts/coverage-report coverage/unit coverage/e2e coverage/report >> "$GITHUB_STEP_SUMMARY"
+        # tee: into the summary for people, and into the log for anyone reading
+        # the run from the command line, where summaries are not available.
+        run: scripts/coverage-report coverage/unit coverage/e2e coverage/report | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: gateway-coverage
+          # The raw unit and e2e data too, so every column can be regenerated.
           path: |
             coverage/report/coverage.html
             coverage/report/coverage.txt
+            coverage/unit
+            coverage/e2e
           retention-days: 14
 
   # The downloadable artifact, against a stock Postgres. Separate from the e2e
