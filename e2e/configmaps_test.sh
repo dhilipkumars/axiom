@@ -159,6 +159,36 @@ kubectl_e2e -n "$NS" get configmap after-idle >/dev/null 2>&1 \
 echo "wrote and read back across a 45s idle gap"
 kubectl_e2e -n "$NS" delete configmap after-idle >/dev/null 2>&1 || true
 
+log "INSERT honours raw: a whole manifest arrives intact (#78)"
+# Read back from the cluster, not through Axiom: Axiom would report an empty
+# object consistently, because the object really would be empty.
+psql_axiom "INSERT INTO k8s_configmaps (namespace, name, raw) VALUES ('$NS', 'from-raw',
+  '{\"apiVersion\":\"v1\",\"kind\":\"ConfigMap\",
+    \"metadata\":{\"name\":\"from-raw\",\"namespace\":\"$NS\",
+                \"labels\":{\"from\":\"raw\"},\"annotations\":{\"note\":\"raw\"}},
+    \"data\":{\"k\":\"v\"}}');"
+got="$(kubectl_e2e -n "$NS" get configmap from-raw \
+  -o jsonpath='{.metadata.labels.from}|{.metadata.annotations.note}|{.data.k}')"
+[[ "$got" == "raw|raw|v" ]] || fail "#78: the cluster has '$got', want 'raw|raw|v' from raw"
+echo "labels, annotations and data all reached the cluster"
+
+log "raw as a template: a typed column overrides the same field, the rest comes from raw"
+psql_axiom "INSERT INTO k8s_configmaps (namespace, name, data, raw)
+  SELECT '$NS', 'from-template', '{\"k\":\"override\"}', raw
+    FROM k8s_configmaps WHERE namespace = '$NS' AND name = 'from-raw';"
+got="$(kubectl_e2e -n "$NS" get configmap from-template \
+  -o jsonpath='{.metadata.labels.from}|{.data.k}')"
+[[ "$got" == "raw|override" ]] || fail "template insert gave '$got', want 'raw|override'"
+echo "copied from-raw with data overridden: $got"
+
+log "raw of another kind is refused, not relabelled"
+out="$(psql_axiom "INSERT INTO k8s_configmaps (namespace, name, raw) VALUES ('$NS', 'not-a-cm',
+  '{\"apiVersion\":\"apps/v1\",\"kind\":\"Deployment\"}');" 2>&1 || true)"
+grep -q "raw is a apps/v1 Deployment object" <<<"$out" || fail "a Deployment manifest was accepted: $out"
+kubectl_e2e -n "$NS" get configmap not-a-cm >/dev/null 2>&1 && fail "the mismatched manifest created a ConfigMap"
+kubectl_e2e -n "$NS" delete configmap from-raw from-template --ignore-not-found >/dev/null
+echo "refused: $(grep -o 'raw is a [^,]*' <<<"$out" | head -1)"
+
 log "a later page larger than the first shrinks instead of failing the listing (#85)"
 # Tiny ConfigMaps named a-*, then large ones named b-*. A namespaced list comes
 # back in name order, so at the extension's page size of 200 the first page is
