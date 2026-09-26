@@ -32,7 +32,10 @@ trap cleanup EXIT
 if [[ -z "${E2E_PG_IMAGE:-}" ]]; then
   log "building the extension image (pg${PG_MAJOR})"
   docker build -q -f "$ROOT/extension/Dockerfile" \
-    --build-arg "PG_MAJOR=${PG_MAJOR}" -t "$IMAGE" "$ROOT" >/dev/null \
+    --build-arg "PG_MAJOR=${PG_MAJOR}" \
+    --build-arg "PG_BASE_IMAGE=${E2E_PG_BASE_IMAGE:-postgres:${PG_MAJOR}-bookworm}" \
+    --build-arg "PGDG_COMPONENTS=${E2E_PGDG_COMPONENTS:-main}" \
+    -t "$IMAGE" "$ROOT" >/dev/null \
     || fail "could not build $IMAGE"
 fi
 

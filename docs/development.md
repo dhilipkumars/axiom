@@ -703,3 +703,19 @@ CI runs the same plus `make ext-audit`, `govulncheck`, gitleaks, and the E2E
 gates. New behaviour ships with tests for its failure paths, not only the happy
 path — a test that only proves the good case passes is the kind this project
 has repeatedly found to be worthless.
+
+**Across Postgres majors.** A pull request runs the e2e suite on Postgres 16
+only. The `pg-matrix` workflow runs the extension's lint and tests and the
+whole e2e suite on every supported major, and on the next one while it is in
+pre-release, nightly. Comment `/cover-all-pg-versions` on a pull request to run
+it against the PR's head, or on an issue to run it against `main`; owners,
+members and collaborators can trigger it, and the results are posted back as a
+comment. A failure on the next major is reported but does not fail the run.
+
+Locally, `E2E_PG_MAJOR=17 make e2e` runs the suite against another major. For
+one in pre-release, also set the image and PGDG component:
+
+```sh
+E2E_PG_MAJOR=19 E2E_PG_BASE_IMAGE=postgres:19beta4-bookworm \
+  E2E_PGDG_COMPONENTS="main 19" make e2e
+```

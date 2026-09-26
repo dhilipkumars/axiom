@@ -1,0 +1,237 @@
+name: pg-matrix
+
+# Every supported Postgres major, and the next one while it is in pre-release,
+# through the extension's lint and tests and the whole e2e suite.
+#
+# Pull requests run the e2e suite on Postgres 16 only: a run per major would
+# triple a 25-minute job on every change. But the extension differs by major in
+# real code -- shmem's dsa_create split at 17, create_foreignscan_path's three
+# arities, tuple attributes at 18 -- and on 17 and 18 nothing else puts a query
+# through a real cluster. This does, nightly, so a break specific to one major
+# surfaces within a day.
+#
+# The next major is here to find what it breaks before it is released. Its
+# jobs may fail without failing the run: a pre-release changes under us, and a
+# red nightly for a beta regression nobody can act on would train people to
+# ignore the nightly. They are still reported, alongside the rest.
+#
+# On demand, comment `/cover-all-pg-versions` on an issue (tests the default
+# branch) or a pull request (tests its head commit). Only repository owners,
+# members and collaborators can trigger it, and the jobs that run the code get
+# a read-only token and no secrets, so a pull request from a fork is run only
+# because a maintainer asked for it. GitHub reads issue_comment workflows from
+# the default branch, so the command works once this file is merged.
+
+on:
+  # TEMPORARY, removed before merge: the other triggers only fire once this
+  # file is on the default branch, so this is the one pre-merge run.
+  push:
+    branches: [pg-matrix]
+  schedule:
+    - cron: "43 4 * * *"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit to test
+        default: main
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_PGRX_VERSION: "0.19.2"
+  # The supported window (extension/Cargo.toml, docs/PLAN.md), and the next
+  # major. When the next one is released: move it into SUPPORTED and raise
+  # NEXT. PostgreSQL's master branch is already the major after NEXT, but
+  # pgrx 0.19.2 has no bindings for it, so it cannot be built against yet.
+  SUPPORTED_PG_MAJORS: "16 17 18"
+  NEXT_PG_MAJOR: "19"
+
+concurrency:
+  group: pg-matrix-${{ github.event.issue.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  setup:
+    name: setup
+    if: >-
+      github.event_name != 'issue_comment' ||
+      (startsWith(github.event.comment.body, '/cover-all-pg-versions') &&
+       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    outputs:
+      ref: ${{ steps.ref.outputs.ref }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: what to test
+        id: ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          IS_PR: ${{ github.event.issue.pull_request != null }}
+          NUMBER: ${{ github.event.issue.number }}
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          case "$EVENT" in
+            issue_comment)
+              if [[ "$IS_PR" == "true" ]]; then
+                ref="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER" -q .head.sha)"
+              else
+                ref="$(gh api "repos/$GITHUB_REPOSITORY" -q .default_branch)"
+              fi ;;
+            workflow_dispatch) ref="$INPUT_REF" ;;
+            *) ref="$GITHUB_SHA" ;;
+          esac
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "testing $ref"
+
+      # The next major's image tag moves with every beta and release
+      # candidate, so it is looked up rather than written down. Its release
+      # image is preferred once it exists.
+      - name: which majors
+        id: matrix
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, re, urllib.request
+          supported = os.environ["SUPPORTED_PG_MAJORS"].split()
+          nxt = os.environ["NEXT_PG_MAJOR"]
+          tags, url = [], f"https://hub.docker.com/v2/repositories/library/postgres/tags?name={nxt}&page_size=100"
+          while url:
+              page = json.load(urllib.request.urlopen(url, timeout=30))
+              tags += [t["name"] for t in page["results"]]
+              url = page.get("next")
+          if f"{nxt}-bookworm" in tags:
+              image = f"postgres:{nxt}-bookworm"
+          else:
+              pre = [(m.group(1) == "rc", int(m.group(2)), t) for t in tags
+                     if (m := re.fullmatch(rf"{nxt}(beta|rc)(\d+)-bookworm", t))]
+              image = f"postgres:{max(pre)[2]}" if pre else ""
+          matrix = [{"pg": p, "next": False, "label": "", "base_image": f"postgres:{p}-bookworm",
+                     "components": "main"} for p in supported]
+          if image:
+              matrix.append({"pg": nxt, "next": True, "label": f" (next: {image.split(':')[1]})",
+                             "base_image": image, "components": f"main {nxt}"})
+          print("matrix=" + json.dumps(matrix))
+          PY
+          cat "$GITHUB_OUTPUT"
+
+      - name: acknowledge the comment
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.issue.number }}
+          REF: ${{ steps.ref.outputs.ref }}
+        run: |
+          gh issue comment "$NUMBER" --repo "$GITHUB_REPOSITORY" --body \
+            "Running every supported Postgres major and the next one against \`$REF\`: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Results will be posted here."
+
+  extension:
+    name: extension pg${{ matrix.pg }}${{ matrix.label }}
+    needs: setup
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.next }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    env:
+      PG_MAJOR: ${{ matrix.pg }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.setup.outputs.ref }}
+      - name: Install PostgreSQL ${{ matrix.pg }} (PGDG)
+        env:
+          COMPONENTS: ${{ matrix.components }}
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg ${COMPONENTS}" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-${PG_MAJOR} postgresql-server-dev-${PG_MAJOR} libclang-dev clang
+          # cargo pgrx test runs initdb/postgres as the current user; it must own the install dirs.
+          sudo chown -R "$USER" /usr/lib/postgresql/${PG_MAJOR} /usr/share/postgresql/${PG_MAJOR}
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: "clippy, rustfmt" }
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: extension
+          key: pg${{ matrix.pg }}
+      - name: Install cargo tooling
+        run: |
+          cargo install cargo-pgrx --version "${CARGO_PGRX_VERSION}" --locked
+          cargo pgrx init --pg${PG_MAJOR} /usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
+      - run: make ext-lint PG=pg${PG_MAJOR}
+      - run: make ext-test PG=pg${PG_MAJOR}
+
+  e2e:
+    name: e2e pg${{ matrix.pg }}${{ matrix.label }}
+    needs: setup
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.next }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.setup.outputs.ref }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: helm/kind-action@v1
+        with:
+          install_only: true
+      - run: make e2e
+        env:
+          E2E_TIMEOUT_SECS: "180"
+          E2E_PG_MAJOR: ${{ matrix.pg }}
+          E2E_PG_BASE_IMAGE: ${{ matrix.base_image }}
+          E2E_PGDG_COMPONENTS: ${{ matrix.components }}
+
+  report:
+    name: report
+    needs: [setup, extension, e2e]
+    if: always() && needs.setup.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: results per major
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          NUMBER: ${{ github.event.issue.number }}
+          REF: ${{ needs.setup.outputs.ref }}
+          MATRIX: ${{ needs.setup.outputs.matrix }}
+        run: |
+          jobs="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" \
+            -q '.jobs[] | "\(.name)\t\(.conclusion // .status)"')"
+          icon() { case "$1" in success) echo "pass" ;; failure) echo "**fail**" ;; *) echo "$1" ;; esac; }
+          {
+            echo "### Postgres majors: \`$REF\`"
+            echo
+            echo "| Postgres | extension (lint, unit, pg tests) | e2e suite |"
+            echo "|---|---|---|"
+            for row in $(jq -c '.[]' <<<"$MATRIX"); do
+              pg="$(jq -r .pg <<<"$row")"; label="$(jq -r .label <<<"$row")"
+              ext="$(awk -F'\t' -v n="extension pg${pg}${label}" '$1 == n { print $2 }' <<<"$jobs")"
+              e2e="$(awk -F'\t' -v n="e2e pg${pg}${label}" '$1 == n { print $2 }' <<<"$jobs")"
+              echo "| ${pg}${label} | $(icon "$ext") | $(icon "$e2e") |"
+            done
+            echo
+            echo "The next major is in pre-release, so its failures are reported but do not fail the run."
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > results.md
+          cat results.md >> "$GITHUB_STEP_SUMMARY"
+          cat results.md
+          if [[ "$EVENT" == "issue_comment" ]]; then
+            gh issue comment "$NUMBER" --repo "$GITHUB_REPOSITORY" --body-file results.md
+          fi
