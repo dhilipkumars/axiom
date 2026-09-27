@@ -303,13 +303,24 @@ unsafe fn tupdesc_attr(
 
 /// See the pg16/pg17 variant above.
 ///
+/// The cast below is the one Postgres's own `TupleDescAttr` makes. From 19,
+/// `CompactAttribute` is only 2-byte aligned, so clippy cannot see that the
+/// full attributes are 4-byte aligned; they are because the compact array
+/// starts, and each entry ends, on a boundary the full attribute accepts.
+/// These assertions fail the build if a later major changes that.
+///
 /// # Safety
 /// `tupdesc` must be a live tuple descriptor and `i` less than its `natts`.
 #[cfg(not(any(feature = "pg16", feature = "pg17")))]
+#[allow(clippy::cast_ptr_alignment)]
 unsafe fn tupdesc_attr(
     tupdesc: pg_sys::TupleDesc,
     i: usize,
 ) -> *const pg_sys::FormData_pg_attribute {
+    const FULL: usize = std::mem::align_of::<pg_sys::FormData_pg_attribute>();
+    const _: () = assert!(std::mem::size_of::<pg_sys::CompactAttribute>().is_multiple_of(FULL));
+    const _: () =
+        assert!(std::mem::offset_of!(pg_sys::TupleDescData, compact_attrs).is_multiple_of(FULL));
     // SAFETY: caller guarantees a live descriptor and an in-range index. The
     // full attribute array begins after `natts` compact entries.
     unsafe {
