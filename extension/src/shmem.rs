@@ -599,6 +599,31 @@ unsafe fn area_for(ctl: &Control) -> Result<*mut pg_sys::dsa_area, ShmemError> {
     }
 }
 
+/// The name this process reports for the cache's LWLock tranche -- what
+/// `pg_stat_activity.wait_event` shows a backend waiting on it. Attaches to
+/// the cache first, as a scan would, since that is where a backend names the
+/// tranche on majors that name it per process. `None` before the worker has
+/// created the cache. For the #93 check that naming works on every major.
+pub fn tranche_name() -> Result<Option<String>, ShmemError> {
+    ensure_available()?;
+    let ctl = CONTROL.share();
+    if ctl.tranche == 0 {
+        return Ok(None);
+    }
+    let event = u16::try_from(ctl.tranche).map_err(|_| ShmemError::CacheNotReady)?;
+    // SAFETY: attaching is what a scan does; GetLWLockIdentifier returns a
+    // pointer to a static or registered NUL-terminated name, never null.
+    unsafe {
+        area_for(&ctl)?;
+        let name = pg_sys::GetLWLockIdentifier(pg_sys::PG_WAIT_LWLOCK, event);
+        Ok(Some(
+            std::ffi::CStr::from_ptr(name)
+                .to_string_lossy()
+                .into_owned(),
+        ))
+    }
+}
+
 // --- object index -------------------------------------------------------------------------------
 
 /// Header of one cached object; followed by namespace, name, rv, json bytes.

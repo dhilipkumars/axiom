@@ -359,6 +359,20 @@ mod tests {
         );
     }
 
+    #[pg_test]
+    fn the_cache_tranche_is_named_in_every_backend() {
+        // #93: Postgres 19 names a tranche at allocation and dropped per-process
+        // registration. On every major a backend that has attached to the
+        // cache must report the tranche by its name, not as "extension" --
+        // that name is what pg_stat_activity.wait_event shows.
+        let (slot, id) = slot_for("tranche-name");
+        clear(slot, id).expect("the cache is ready");
+        assert_eq!(
+            crate::shmem::tranche_name().expect("shared memory is available"),
+            Some("axiom_cache".to_owned())
+        );
+    }
+
     /// Growing past the load factor rehashes, and must not lose or duplicate a
     /// key while doing it.
     ///
