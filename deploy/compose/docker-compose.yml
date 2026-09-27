@@ -38,7 +38,12 @@ services:
     build:
       context: ../..
       dockerfile: extension/Dockerfile
+      # Postgres 16 unless the suite is told otherwise: e2e/lib/stack.sh fills
+      # these from E2E_PG_MAJOR for the nightly run across majors.
       args:
+        PG_MAJOR: ${E2E_PG_MAJOR:-16}
+        PG_BASE_IMAGE: ${E2E_PG_BASE_IMAGE:-postgres:${E2E_PG_MAJOR:-16}-bookworm}
+        PGDG_COMPONENTS: ${E2E_PGDG_COMPONENTS:-main}
         # Set by the e2e suite when measuring coverage (#90); empty otherwise.
         COVER: ${AXIOM_EXT_COVER:-}
     environment:

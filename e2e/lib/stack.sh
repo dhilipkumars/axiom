@@ -72,6 +72,14 @@ if [[ -n "${E2E_COVER_DIR:-}" ]]; then
   esac
 fi
 
+# E2E_PG_MAJOR runs the suite against another Postgres major (default 16).
+# For a released major the base image and PGDG components follow from it; for
+# one still in pre-release the caller sets E2E_PG_BASE_IMAGE (a beta or rc
+# tag) and E2E_PGDG_COMPONENTS ("main NN"), as the nightly workflow does.
+export E2E_PG_MAJOR="${E2E_PG_MAJOR:-16}"
+export E2E_PG_BASE_IMAGE="${E2E_PG_BASE_IMAGE:-postgres:${E2E_PG_MAJOR}-bookworm}"
+export E2E_PGDG_COMPONENTS="${E2E_PGDG_COMPONENTS:-main}"
+
 compose() {
   local files=(-f "$E2E_COMPOSE_FILE") f
   for f in $E2E_COMPOSE_OVERLAYS; do files+=(-f "$f"); done

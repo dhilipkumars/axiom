@@ -1,16 +1,24 @@
 # Build context: repository root (the crate's build.rs reads ../proto).
 # Produces a stock postgres:16 image with the axiom extension installed.
 ARG PG_MAJOR=16
+# The image the extension is installed into, and the PGDG components the build
+# installs the matching server from. Both default to a released major; the
+# nightly run across majors overrides them for the next one, still in
+# pre-release -- a `postgres:19beta4-bookworm` image, and PGDG's `19`
+# component, which is where a pre-release server is published.
+ARG PG_BASE_IMAGE=postgres:${PG_MAJOR}-bookworm
+ARG PGDG_COMPONENTS=main
 
 # Rust 1.96 or newer: cargo-pgrx 0.19 requires it.
 FROM rust:1.97-bookworm AS build
 ARG PG_MAJOR
+ARG PGDG_COMPONENTS
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg clang libclang-dev pkg-config \
         libssl-dev libreadline-dev zlib1g-dev bison flex \
     && install -d /usr/share/postgresql-common/pgdg \
     && curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-    && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+    && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg ${PGDG_COMPONENTS}" > /etc/apt/sources.list.d/pgdg.list \
     && apt-get update && apt-get install -y --no-install-recommends \
         postgresql-${PG_MAJOR} postgresql-server-dev-${PG_MAJOR} \
     && rm -rf /var/lib/apt/lists/*
@@ -65,7 +73,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM scratch AS artifact
 COPY --from=build /out/usr /usr
 
-FROM postgres:${PG_MAJOR}-bookworm
+FROM ${PG_BASE_IMAGE}
 ARG PG_MAJOR
 COPY --from=build /out/usr/lib/postgresql/${PG_MAJOR}/lib/axiom.so /usr/lib/postgresql/${PG_MAJOR}/lib/
 COPY --from=build /out/usr/share/postgresql/${PG_MAJOR}/extension/axiom* /usr/share/postgresql/${PG_MAJOR}/extension/
