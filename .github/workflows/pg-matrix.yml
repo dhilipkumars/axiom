@@ -94,14 +94,21 @@ jobs:
         id: matrix
         run: |
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import json, os, re, urllib.request
+          import json, os, re, sys, urllib.request
           supported = os.environ["SUPPORTED_PG_MAJORS"].split()
           nxt = os.environ["NEXT_PG_MAJOR"]
+          # A Docker Hub rate limit or outage must not stop the supported
+          # majors from being tested: without the lookup, the next major is
+          # left out of this run and says why.
           tags, url = [], f"https://hub.docker.com/v2/repositories/library/postgres/tags?name={nxt}&page_size=100"
-          while url:
-              page = json.load(urllib.request.urlopen(url, timeout=30))
-              tags += [t["name"] for t in page["results"]]
-              url = page.get("next")
+          try:
+              while url:
+                  page = json.load(urllib.request.urlopen(url, timeout=30))
+                  tags += [t["name"] for t in page["results"]]
+                  url = page.get("next")
+          except Exception as err:
+              print(f"::warning::could not look up the Postgres {nxt} image ({err}); testing {' '.join(supported)} only", file=sys.stderr)
+              tags = []
           if f"{nxt}-bookworm" in tags:
               image = f"postgres:{nxt}-bookworm"
           else:
