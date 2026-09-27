@@ -30,7 +30,7 @@ the components natively you also need the Go and Rust toolchains.
 **Go side**
 
 ```sh
-# Go 1.26+  (https://go.dev/dl); client-go v0.37 requires it
+# Go 1.27+  (https://go.dev/dl); gateway/go.mod requires it
 go version
 
 # buf (proto lint + codegen) and golangci-lint v2
