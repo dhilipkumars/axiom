@@ -485,6 +485,46 @@ pub fn clear_bookmark(slot: usize, id: u32) -> Result<(), ShmemError> {
 
 const TRANCHE_NAME: &std::ffi::CStr = c"axiom_cache";
 
+// How the tranche gets its name. Through 18 the id is allocated nameless and
+// every process that uses it registers the name locally, which is what makes
+// `pg_stat_activity.wait_event` say axiom_cache rather than "extension".
+// Postgres 19 takes the name at allocation and keeps it in shared memory for
+// every process, and removed LWLockRegisterTranche (#93). Gated on the old
+// majors by name, as dsa_create is below, so every later major takes the new
+// arm by default rather than failing to compile.
+
+/// Allocates the tranche id, named, on every major.
+unsafe fn new_named_tranche() -> i32 {
+    // SAFETY: plain allocation calls, made by the caller from a process
+    // attached to shared memory.
+    unsafe {
+        #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+        {
+            let id = pg_sys::LWLockNewTrancheId();
+            pg_sys::LWLockRegisterTranche(id, TRANCHE_NAME.as_ptr());
+            id
+        }
+        #[cfg(not(any(feature = "pg16", feature = "pg17", feature = "pg18")))]
+        {
+            pg_sys::LWLockNewTrancheId(TRANCHE_NAME.as_ptr())
+        }
+    }
+}
+
+/// Makes an existing tranche's name known to this process. Through 18 each
+/// process registers it; from 19 the name lives in shared memory already.
+#[cfg_attr(
+    not(any(feature = "pg16", feature = "pg17", feature = "pg18")),
+    allow(unused_variables)
+)]
+unsafe fn name_tranche_here(id: i32) {
+    #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+    // SAFETY: registering a name for an id this cluster allocated.
+    unsafe {
+        pg_sys::LWLockRegisterTranche(id, TRANCHE_NAME.as_ptr());
+    }
+}
+
 /// Creates (or re-attaches to) the DSA area. Worker only; call once at start.
 /// Marks pre-existing subscriptions as needing a stream (the worker that owned
 /// them is gone).
@@ -496,9 +536,12 @@ pub fn worker_init(cache_limit_bytes: usize) -> Result<(), ShmemError> {
     // outlives any transaction.
     unsafe {
         if ctl.tranche == 0 {
-            ctl.tranche = pg_sys::LWLockNewTrancheId();
+            ctl.tranche = new_named_tranche();
+        } else {
+            // A restarted worker reuses the id; this process still needs the
+            // name where names are per process.
+            name_tranche_here(ctl.tranche);
         }
-        pg_sys::LWLockRegisterTranche(ctl.tranche, TRANCHE_NAME.as_ptr());
         let old = pg_sys::MemoryContextSwitchTo(pg_sys::TopMemoryContext);
         let area = if ctl.dsa_ready {
             pg_sys::dsa_attach(ctl.dsa_handle)
@@ -546,7 +589,7 @@ unsafe fn area_for(ctl: &Control) -> Result<*mut pg_sys::dsa_area, ShmemError> {
     }
     // SAFETY: attach in TopMemoryContext so the mapping persists for the backend's life.
     unsafe {
-        pg_sys::LWLockRegisterTranche(ctl.tranche, TRANCHE_NAME.as_ptr());
+        name_tranche_here(ctl.tranche);
         let old = pg_sys::MemoryContextSwitchTo(pg_sys::TopMemoryContext);
         let area = pg_sys::dsa_attach(ctl.dsa_handle);
         pg_sys::dsa_pin_mapping(area);
