@@ -57,10 +57,12 @@ jobs:
       (startsWith(github.event.comment.body, '/cover-all-pg-versions') &&
        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
     runs-on: ubuntu-latest
+    # pull-requests: write because acknowledging a comment on a pull request
+    # is a pull-request write: issues: write covers only comments on issues.
     permissions:
       contents: read
       issues: write
-      pull-requests: read
+      pull-requests: write
     outputs:
       ref: ${{ steps.ref.outputs.ref }}
       matrix: ${{ steps.matrix.outputs.matrix }}
@@ -126,8 +128,10 @@ jobs:
           PY
           cat "$GITHUB_OUTPUT"
 
+      # A courtesy; failing to post it must not cancel the run it announces.
       - name: acknowledge the comment
         if: github.event_name == 'issue_comment'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           NUMBER: ${{ github.event.issue.number }}
