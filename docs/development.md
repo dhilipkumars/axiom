@@ -720,7 +720,7 @@ E2E_PG_MAJOR=19 E2E_PG_BASE_IMAGE=postgres:19beta4-bookworm \
   E2E_PGDG_COMPONENTS="main 19" make e2e
 ```
 
-That is the mechanism, not a passing run: today the extension does not build
-for Postgres 19, which moved LWLock tranche naming into `LWLockNewTrancheId`
-and removed `LWLockRegisterTranche` (#93). The nightly reports it until that
-is fixed.
+Code that differs by major is gated on the pgrx feature for it. Postgres 19,
+for one, names LWLock tranches in `LWLockNewTrancheId` and has no
+`LWLockRegisterTranche` (#93), and shrank `CompactAttribute` so that finding a
+tuple descriptor's full attributes needs a cast clippy cannot prove aligned.
