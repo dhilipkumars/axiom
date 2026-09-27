@@ -599,7 +599,7 @@ unsafe fn area_for(ctl: &Control) -> Result<*mut pg_sys::dsa_area, ShmemError> {
     }
 }
 
-/// The name this process reports for the cache's LWLock tranche -- what
+/// The name this process reports for the cache's `LWLock` tranche -- what
 /// `pg_stat_activity.wait_event` shows a backend waiting on it. Attaches to
 /// the cache first, as a scan would, since that is where a backend names the
 /// tranche on majors that name it per process. `None` before the worker has
