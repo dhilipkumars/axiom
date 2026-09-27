@@ -23,10 +23,6 @@ name: pg-matrix
 # the default branch, so the command works once this file is merged.
 
 on:
-  # TEMPORARY, removed before merge: the other triggers only fire once this
-  # file is on the default branch, so this is the one pre-merge run.
-  push:
-    branches: [pg-matrix]
   schedule:
     - cron: "43 4 * * *"
   workflow_dispatch:
