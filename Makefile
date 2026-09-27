@@ -74,10 +74,14 @@ ifdef EXT_COVER_DIR
 		LLVM_PROFILE_FILE=$(abspath $(EXT_COVER_DIR))/ext-%4m.profraw cargo pgrx test $(PG)
 	# The objects that wrote the profiles: the installed library, found through
 	# pgrx's own pg_config for this major (.so, or .dylib on macOS), and this
-	# run's test binaries.
-	scripts/extension-coverage-lcov $(abspath $(EXT_COVER_DIR)) $(abspath $(EXT_COVER_DIR))/unit.lcov \
-		$$(lib="$$(cd extension && cargo pgrx info pg-config $(PG) | xargs -I{} {} --pkglibdir)"; ls "$$lib"/axiom.so "$$lib"/axiom.dylib 2>/dev/null | head -1) \
-		$$(find "$${CARGO_TARGET_DIR:-extension/target}/debug/deps" -maxdepth 1 -type f -perm -u+x -name 'axiom-*')
+	# run's test binaries. A missing library is an error, not a smaller report:
+	# the pg tests run inside it, and leaving it out silently halved the figure.
+	pg_config="$$(cd extension && cargo pgrx info pg-config $(PG))" \
+		&& lib="$$("$$pg_config" --pkglibdir)" \
+		&& so="$$(ls "$$lib"/axiom.so "$$lib"/axiom.dylib 2>/dev/null | head -1)" \
+		&& { [ -n "$$so" ] || { echo "no installed axiom library in $$lib" >&2; exit 1; }; } \
+		&& scripts/extension-coverage-lcov $(abspath $(EXT_COVER_DIR)) $(abspath $(EXT_COVER_DIR))/unit.lcov "$$so" \
+			$$(find "$${CARGO_TARGET_DIR:-extension/target}/debug/deps" -maxdepth 1 -type f -perm -u+x -name 'axiom-*')
 else
 	cd extension && cargo pgrx test $(PG)
 endif
