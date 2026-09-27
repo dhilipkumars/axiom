@@ -318,8 +318,9 @@ unsafe fn tupdesc_attr(
     i: usize,
 ) -> *const pg_sys::FormData_pg_attribute {
     const FULL: usize = std::mem::align_of::<pg_sys::FormData_pg_attribute>();
-    const _: () = assert!(std::mem::size_of::<pg_sys::CompactAttribute>() % FULL == 0);
-    const _: () = assert!(std::mem::offset_of!(pg_sys::TupleDescData, compact_attrs) % FULL == 0);
+    const _: () = assert!(std::mem::size_of::<pg_sys::CompactAttribute>().is_multiple_of(FULL));
+    const _: () =
+        assert!(std::mem::offset_of!(pg_sys::TupleDescData, compact_attrs).is_multiple_of(FULL));
     // SAFETY: caller guarantees a live descriptor and an in-range index. The
     // full attribute array begins after `natts` compact entries.
     unsafe {
