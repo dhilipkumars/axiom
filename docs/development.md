@@ -719,3 +719,8 @@ one in pre-release, also set the image and PGDG component:
 E2E_PG_MAJOR=19 E2E_PG_BASE_IMAGE=postgres:19beta4-bookworm \
   E2E_PGDG_COMPONENTS="main 19" make e2e
 ```
+
+That is the mechanism, not a passing run: today the extension does not build
+for Postgres 19, which moved LWLock tranche naming into `LWLockNewTrancheId`
+and removed `LWLockRegisterTranche` (#93). The nightly reports it until that
+is fixed.
