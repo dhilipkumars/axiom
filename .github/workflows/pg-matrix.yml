@@ -81,7 +81,8 @@ jobs:
               else
                 ref="$(gh api "repos/$GITHUB_REPOSITORY" -q .default_branch)"
               fi ;;
-            workflow_dispatch) ref="$INPUT_REF" ;;
+            # An input cleared to "" would leave nothing to check out.
+            workflow_dispatch) ref="${INPUT_REF:-main}" ;;
             *) ref="$GITHUB_SHA" ;;
           esac
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
@@ -103,7 +104,8 @@ jobs:
           tags, url = [], f"https://hub.docker.com/v2/repositories/library/postgres/tags?name={nxt}&page_size=100"
           try:
               while url:
-                  page = json.load(urllib.request.urlopen(url, timeout=30))
+                  req = urllib.request.Request(url, headers={"User-Agent": "axiom-pg-matrix"})
+                  page = json.load(urllib.request.urlopen(req, timeout=30))
                   tags += [t["name"] for t in page["results"]]
                   url = page.get("next")
           except Exception as err:
