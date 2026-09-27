@@ -66,9 +66,13 @@ ifdef EXT_COVER_DIR
 	mkdir -p $(abspath $(EXT_COVER_DIR))
 	cd extension && RUSTFLAGS="-C instrument-coverage" \
 		LLVM_PROFILE_FILE=$(abspath $(EXT_COVER_DIR))/ext-%4m.profraw cargo pgrx test $(PG)
+	# The objects that wrote the profiles: the installed library, found through
+	# pgrx's own pg_config for this major (.so, or .dylib on macOS), and the
+	# newest lib test binary only -- target/ is cached, so older ones build up
+	# and would be read against profiles they did not write.
 	scripts/extension-coverage-lcov $(abspath $(EXT_COVER_DIR)) $(abspath $(EXT_COVER_DIR))/unit.lcov \
-		$$(pg_config_dir=/usr/lib/postgresql/$(subst pg,,$(PG))/bin; $$pg_config_dir/pg_config --pkglibdir)/axiom.so \
-		$$(find "$${CARGO_TARGET_DIR:-extension/target}/debug/deps" -maxdepth 1 -type f -perm -u+x -name 'axiom-*')
+		$$(lib="$$(cd extension && cargo pgrx info pg-config $(PG) | xargs -I{} {} --pkglibdir)"; ls "$$lib"/axiom.so "$$lib"/axiom.dylib 2>/dev/null | head -1) \
+		$$(ls -t $$(find "$${CARGO_TARGET_DIR:-extension/target}/debug/deps" -maxdepth 1 -type f -perm -u+x -name 'axiom-*') | head -1)
 else
 	cd extension && cargo pgrx test $(PG)
 endif

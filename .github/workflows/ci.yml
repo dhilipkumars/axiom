@@ -238,7 +238,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: gateway-coverage
+          name: coverage
           # The raw unit and e2e data too, so every column can be regenerated.
           path: |
             coverage/report/coverage.html

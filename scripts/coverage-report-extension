@@ -13,6 +13,7 @@ set -euo pipefail
 
 [[ $# -eq 2 || $# -eq 3 ]] || { echo "usage: $(basename "$0") UNIT_LCOV E2E_LCOV [TOTALS_TSV]" >&2; exit 2; }
 unit="$1" e2e="$2" totals="${3:-/dev/null}"
+[[ "$totals" == /dev/null ]] || mkdir -p "$(dirname "$totals")"
 src="$(cd "$(dirname "${BASH_SOURCE[0]}")/../extension" && pwd)"
 
 # Test code is not the product. Rust keeps unit tests inside the file they
@@ -30,7 +31,7 @@ trap 'rm -f "$excluded"' EXIT
 for f in "$src"/src/*.rs; do
   awk -v F="src/$(basename "$f")" '
     /^#\[cfg\(.*test/ { pend = 1; next }
-    pend && /^#\[/ { next }
+    pend && (/^#\[/ || /^[[:space:]]*\/\//) { next }
     pend && /^(pub(\([a-z]+\))? )?mod [A-Za-z_]+ *;/ {
       m = $0; sub(/^(pub(\([a-z]+\))? )?mod /, "", m); sub(/ *;.*/, "", m)
       print "file", "src/" m ".rs"; pend = 0; next }

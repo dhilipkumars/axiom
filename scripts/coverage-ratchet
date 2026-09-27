@@ -6,7 +6,8 @@
 # BASELINE holds "component<TAB>layer<TAB>percent" lines, committed in the
 # repository; each TOTALS file is what scripts/coverage-report or
 # scripts/coverage-report-extension wrote for the run. For every figure the
-# baseline has, the run must not be more than TOLERANCE points below it.
+# baseline has, the run must not be more than TOLERANCE points below it, and
+# must have measured it at all.
 #
 # A ratchet rather than fixed floors: it stops coverage eroding without
 # pretending a number is a target. A figure that rose past the tolerance is
@@ -35,7 +36,10 @@ awk -F'\t' -v tol="$TOLERANCE" -v base="$baseline" '
     for (i = 2; i <= n; i++) { v = order[i]; for (j = i - 1; j >= 1 && order[j] > v; j--) order[j + 1] = order[j]; order[j + 1] = v }
     for (i = 1; i <= n; i++) {
       k = order[i]; split(k, p, "\t")
-      if (!(k in r)) { verdict = "not measured this run"; shown = "-" }
+      # A figure the baseline holds but this run did not produce means the
+      # collection broke, not that coverage is fine: passing it would switch
+      # the ratchet off without anyone noticing.
+      if (!(k in r)) { verdict = "**not measured this run**"; shown = "-"; fail = 1 }
       else if (!(k in b)) { verdict = "no baseline yet"; shown = r[k] "%" }
       else {
         shown = r[k] "%"; d = r[k] - b[k]
@@ -48,7 +52,7 @@ awk -F'\t' -v tol="$TOLERANCE" -v base="$baseline" '
     exit fail
   }' "$baseline" "$@" || {
   echo
-  echo "Coverage dropped by more than ${TOLERANCE} points. Add tests for the code this change leaves unexercised, or, if the drop is deliberate, lower the figure in $(basename "$baseline") so a reviewer sees it."
+  echo "Coverage dropped by more than ${TOLERANCE} points, or a figure was not measured. For a drop, add tests for the code this change leaves unexercised, or, if it is deliberate, lower the figure in $(basename "$baseline") so a reviewer sees it. For a missing figure, the coverage collection itself failed: see the report steps above."
   exit 1
 }
 echo
