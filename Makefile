@@ -64,15 +64,20 @@ ext-test:
 	rm -rf "$${CARGO_TARGET_DIR:-extension/target}/test-pgdata"
 ifdef EXT_COVER_DIR
 	mkdir -p $(abspath $(EXT_COVER_DIR))
+	# Test binaries from earlier builds survive in a cached target/, and would
+	# be read against profiles they did not write. Deleting them makes cargo
+	# relink the current one, so every axiom-* binary left afterwards is this
+	# run's. Choosing the newest by mtime is not enough: the cache restores
+	# files with their original times.
+	find "$${CARGO_TARGET_DIR:-extension/target}/debug/deps" -maxdepth 1 -type f -perm -u+x -name 'axiom-*' -delete 2>/dev/null || true
 	cd extension && RUSTFLAGS="-C instrument-coverage" \
 		LLVM_PROFILE_FILE=$(abspath $(EXT_COVER_DIR))/ext-%4m.profraw cargo pgrx test $(PG)
 	# The objects that wrote the profiles: the installed library, found through
-	# pgrx's own pg_config for this major (.so, or .dylib on macOS), and the
-	# newest lib test binary only -- target/ is cached, so older ones build up
-	# and would be read against profiles they did not write.
+	# pgrx's own pg_config for this major (.so, or .dylib on macOS), and this
+	# run's test binaries.
 	scripts/extension-coverage-lcov $(abspath $(EXT_COVER_DIR)) $(abspath $(EXT_COVER_DIR))/unit.lcov \
 		$$(lib="$$(cd extension && cargo pgrx info pg-config $(PG) | xargs -I{} {} --pkglibdir)"; ls "$$lib"/axiom.so "$$lib"/axiom.dylib 2>/dev/null | head -1) \
-		$$(ls -t $$(find "$${CARGO_TARGET_DIR:-extension/target}/debug/deps" -maxdepth 1 -type f -perm -u+x -name 'axiom-*') | head -1)
+		$$(find "$${CARGO_TARGET_DIR:-extension/target}/debug/deps" -maxdepth 1 -type f -perm -u+x -name 'axiom-*')
 else
 	cd extension && cargo pgrx test $(PG)
 endif
