@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# LLVM profiles from an instrumented extension, as lcov for the extension's own
+# source (#90).
+#
+#   scripts/extension-coverage-lcov PROFRAW_DIR OUT_LCOV OBJECT...
+#
+# OBJECTs are the instrumented binaries that wrote the profiles: the axiom.so
+# that ran, and for unit tests the test binaries too. Uses the llvm-tools of
+# the rustc on PATH, which must be the one that compiled them -- the profile
+# format follows the compiler -- so for the e2e suite this runs inside the
+# extension's own build stage. Paths are normalised to src/..., because the
+# unit and e2e builds compile the same sources from different directories and
+# are merged by file and line.
+set -euo pipefail
+
+[[ $# -ge 3 ]] || { echo "usage: $(basename "$0") PROFRAW_DIR OUT_LCOV OBJECT..." >&2; exit 2; }
+dir="$1" out="$2"; shift 2
+host="$(rustc -vV | sed -n 's/^host: //p')"
+bin="$(rustc --print sysroot)/lib/rustlib/$host/bin"
+[[ -x "$bin/llvm-cov" ]] || { echo "llvm-tools is not installed for $(rustc -V)" >&2; exit 1; }
+
+raws=()
+for f in "$dir"/*.profraw; do [[ -e "$f" ]] && raws+=("$f"); done
+[[ ${#raws[@]} -gt 0 ]] || { echo "no .profraw files in $dir" >&2; exit 1; }
+"$bin/llvm-profdata" merge -sparse "${raws[@]}" -o "$dir/merged.profdata"
+
+objects=("$1"); shift
+for o in "$@"; do objects+=(-object "$o"); done
+"$bin/llvm-cov" export -format=lcov -instr-profile="$dir/merged.profdata" "${objects[@]}" > "$out.all"
+
+# Only the extension's own sources, each record kept whole.
+awk '/^SF:/ { keep = ($0 ~ /\/extension\/src\//); if (keep) sub(/^SF:.*\/extension\//, "SF:") }
+     keep' "$out.all" > "$out"
+rm -f "$out.all"
+echo "$(grep -c '^SF:' "$out") source file(s) in $out"

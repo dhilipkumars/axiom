@@ -28,8 +28,21 @@ proto-check: proto
 gateway-build:
 	cd gateway && go build ./...
 
+# GATEWAY_COVER_DIR=path also records coverage there, for scripts/coverage-report
+# to merge with the e2e suite's (#90). atomic because -race requires it, and the
+# e2e binary uses the same mode so the two can be merged.
+#
+# Coverage runs use exactly the Go in gateway/go.mod: Go versions count
+# statements differently (1.26 and 1.27 disagree by ten points on
+# cmd/gateway), so a figure is comparable with CI's only on CI's toolchain.
+GO_MOD_VERSION := $(shell awk '/^go /{print $$2}' gateway/go.mod)
 gateway-test:
+ifdef GATEWAY_COVER_DIR
+	mkdir -p $(abspath $(GATEWAY_COVER_DIR))
+	cd gateway && GOTOOLCHAIN=go$(GO_MOD_VERSION) go test -race -count=1 -cover -covermode=atomic ./... -args -test.gocoverdir=$(abspath $(GATEWAY_COVER_DIR))
+else
 	cd gateway && go test -race -count=1 ./...
+endif
 
 gateway-lint:
 	cd gateway && $(GOLANGCI_LINT) run ./...
@@ -41,11 +54,37 @@ gateway-vuln:
 ext-build:
 	cd extension && cargo build --no-default-features --features $(PG)
 
+# EXT_COVER_DIR=path also records coverage, as lcov in path/unit.lcov (#90).
+# Every crate is built with -C instrument-coverage; the pgrx test Postgres
+# inherits LLVM_PROFILE_FILE, so pg tests running inside a backend count, not
+# only the pure unit tests. Needs the llvm-tools rustup component.
 ext-test:
 	# Always start from a fresh scratch cluster: a stale/partially-cached
 	# test-pgdata makes pgrx skip initdb and then fail to start Postgres.
 	rm -rf "$${CARGO_TARGET_DIR:-extension/target}/test-pgdata"
+ifdef EXT_COVER_DIR
+	mkdir -p $(abspath $(EXT_COVER_DIR))
+	# Test binaries from earlier builds survive in a cached target/, and would
+	# be read against profiles they did not write. Deleting them makes cargo
+	# relink the current one, so every axiom-* binary left afterwards is this
+	# run's. Choosing the newest by mtime is not enough: the cache restores
+	# files with their original times.
+	find "$${CARGO_TARGET_DIR:-extension/target}/debug/deps" -maxdepth 1 -type f -perm -u+x -name 'axiom-*' -delete 2>/dev/null || true
+	cd extension && RUSTFLAGS="-C instrument-coverage" \
+		LLVM_PROFILE_FILE=$(abspath $(EXT_COVER_DIR))/ext-%4m.profraw cargo pgrx test $(PG)
+	# The objects that wrote the profiles: the installed library, found through
+	# pgrx's own pg_config for this major (.so, or .dylib on macOS), and this
+	# run's test binaries. A missing library is an error, not a smaller report:
+	# the pg tests run inside it, and leaving it out silently halved the figure.
+	pg_config="$$(cd extension && cargo pgrx info pg-config $(PG))" \
+		&& lib="$$("$$pg_config" --pkglibdir)" \
+		&& so="$$(ls "$$lib"/axiom.so "$$lib"/axiom.dylib 2>/dev/null | head -1)" \
+		&& { [ -n "$$so" ] || { echo "no installed axiom library in $$lib" >&2; exit 1; }; } \
+		&& scripts/extension-coverage-lcov $(abspath $(EXT_COVER_DIR)) $(abspath $(EXT_COVER_DIR))/unit.lcov "$$so" \
+			$$(find "$${CARGO_TARGET_DIR:-extension/target}/debug/deps" -maxdepth 1 -type f -perm -u+x -name 'axiom-*')
+else
 	cd extension && cargo pgrx test $(PG)
+endif
 
 ext-lint:
 	cd extension && cargo fmt --check

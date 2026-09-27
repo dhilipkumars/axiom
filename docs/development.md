@@ -30,7 +30,7 @@ the components natively you also need the Go and Rust toolchains.
 **Go side**
 
 ```sh
-# Go 1.26+  (https://go.dev/dl); client-go v0.37 requires it
+# Go 1.27+  (https://go.dev/dl); gateway/go.mod requires it
 go version
 
 # buf (proto lint + codegen) and golangci-lint v2
@@ -434,6 +434,50 @@ make docs-check
 make lint
 make unit
 ```
+
+### Coverage
+
+Coverage is measured for the gateway and the extension, from unit tests and
+from the e2e suite, and reported side by side:
+
+```sh
+make gateway-test GATEWAY_COVER_DIR=coverage/unit            # gateway unit tests
+make ext-test PG=pg16 EXT_COVER_DIR=coverage/extension-unit   # extension unit + pg tests (needs llvm-tools)
+E2E_COVER_DIR=$PWD/coverage/e2e make e2e                      # the suite, both components instrumented
+
+scripts/coverage-report coverage/unit coverage/e2e/gateway coverage/report
+scripts/coverage-report-extension coverage/extension-unit/unit.lcov coverage/e2e/extension/e2e.lcov
+```
+
+The e2e extension profiles need `scripts/extension-coverage-lcov` run with the
+llvm-tools of the rustc that built the instrumented `.so`; the e2e CI job shows
+how, inside the extension's build stage. CI publishes both tables in the e2e
+job's summary and log, with the HTML report and raw data as an artifact.
+
+How the e2e figures are collected:
+
+- `E2E_COVER_DIR` builds the gateway with `-cover` and the `axiomcover` tag,
+  and the extension with `-C instrument-coverage`. Releases never are.
+- **Gateway:** it writes its counters to a directory on the kind node when it
+  receives SIGTERM, so each Pod the suite restarts contributes, including one
+  killed at the end of its grace period. The suite stops the last one and
+  copies the directory to `E2E_COVER_DIR/gateway` before deleting the cluster.
+- **Extension:** every Postgres process writes its LLVM profile to
+  `E2E_COVER_DIR/extension` as it exits, merged into a pool of four files, so
+  the connection-per-statement gates do not leave thousands.
+
+Gateway figures are statement coverage, the extension's are line coverage,
+and neither says what was asserted.
+
+**The ratchet.** CI fails a change that lowers any figure -- unit, e2e or
+combined, for either component -- by more than half a point below
+`scripts/coverage-baseline.tsv`. When a figure rises past that, the ratchet
+says so; raise it in the baseline in the same PR, so it cannot slide back.
+Lowering a figure is allowed, but it is an edit a reviewer sees. The baseline
+is CI's measurement: gateway coverage uses exactly the Go in `gateway/go.mod`
+(`make gateway-test` pins it with `GOTOOLCHAIN`), because Go versions count
+statements differently -- 1.26 and 1.27 disagree by ten points on
+`cmd/gateway`.
 
 `make ext-test` starts a throwaway Postgres with `shared_preload_libraries =
 'axiom'` and an endpoint nothing listens on, so you will see the worker logging

@@ -1,0 +1,15 @@
+# Coverage the ratchet holds each change to (#90): component, layer, percent.
+# scripts/coverage-ratchet fails a run that falls more than 0.5 points below a
+# figure here, and says when a figure has risen enough to raise it. Raising a
+# figure is the normal way to update this file; lowering one is a decision a
+# reviewer sees in the diff.
+#
+# Measured in CI: gateway figures with the Go version in gateway/go.mod, which
+# counts statements its own way, and extension figures on Postgres 16. A
+# local run on another toolchain is not comparable.
+gateway	unit	85.6
+gateway	e2e	69.9
+gateway	combined	89.4
+extension	unit	88.7
+extension	e2e	82.6
+extension	combined	91.9
