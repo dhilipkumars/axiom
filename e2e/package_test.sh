@@ -90,7 +90,8 @@ for pg in $MAJORS; do
   out="$(docker run --rm -v "$DIST":/d:ro "postgres:${pg}" bash -c "$RETRY"'
     set -e
     retry apt-get -qq update >/dev/null 2>&1
-    retry apt-get install -y -qq /d/'"$(basename "$deb")"' >/dev/null 2>&1 || { echo "INSTALL-FAILED"; exit 1; }
+    retry apt-get install -y -qq /d/'"$(basename "$deb")"' >/tmp/apt.log 2>&1 \
+      || { echo "INSTALL-FAILED"; tail -30 /tmp/apt.log; exit 1; }
     su postgres -c "/usr/lib/postgresql/'"$pg"'/bin/initdb -D /tmp/data" >/dev/null 2>&1
     echo "shared_preload_libraries = '"'"'axiom'"'"'" >> /tmp/data/postgresql.conf
     su postgres -c "/usr/lib/postgresql/'"$pg"'/bin/pg_ctl -D /tmp/data -l /tmp/pg.log -w start" >/dev/null \
@@ -207,7 +208,7 @@ if [[ "$RUN_RPM" == "1" ]]; then
   # start, so assert the requirement is present rather than assuming rpmbuild
   # did its job.
   log "pg${pg}: the .rpm declares a generated glibc requirement"
-  reqs="$(docker run --rm -v "$DIST":/d:ro rockylinux:9 rpm -qp --requires "/d/$base" 2>/dev/null)" || true
+  reqs="$(docker run --rm -v "$DIST":/d:ro rockylinux/rockylinux:9 rpm -qp --requires "/d/$base" 2>/dev/null)" || true
   grep -q 'libc\.so\.6(GLIBC_' <<<"$reqs" \
     || fail "pg${pg}: the .rpm declares no glibc symbol requirement:
 $reqs"
@@ -217,11 +218,16 @@ $reqs"
   echo "    $(grep -c 'libc\.so\.6(GLIBC_' <<<"$reqs") glibc symbol requirements, requires postgresql${pg}-server"
 
   log "pg${pg}: the .rpm installs on EL9 and the extension runs"
-  out="$(docker run --rm -v "$DIST":/d:ro rockylinux:9 bash -c "$RETRY"'
+  # rockylinux/rockylinux, not Docker Hub's library rockylinux image, which
+  # stopped at 9.3 in 2024. PGDG's EL9 repo file now spells its URLs with
+  # $releasever_major.$releasever_minor, which 9.3's dnf does not expand: every
+  # PGDG repository then looks unreachable and nothing provides the server.
+  out="$(docker run --rm -v "$DIST":/d:ro rockylinux/rockylinux:9 bash -c "$RETRY"'
     set -e
     retry dnf install -y -q https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-'"$RPM_ARCH"'/pgdg-redhat-repo-latest.noarch.rpm >/dev/null 2>&1
     dnf -qy module disable postgresql >/dev/null 2>&1 || true
-    retry dnf install -y -q /d/'"$base"' >/dev/null 2>&1 || { echo INSTALL-FAILED; exit 1; }
+    retry dnf install -y -q /d/'"$base"' >/tmp/dnf.log 2>&1 \
+      || { echo INSTALL-FAILED; tail -30 /tmp/dnf.log; exit 1; }
     su postgres -c "/usr/pgsql-'"$pg"'/bin/initdb -D /var/lib/pgsql/'"$pg"'/data" >/dev/null 2>&1
     echo "shared_preload_libraries = '"'"'axiom'"'"'" >> /var/lib/pgsql/'"$pg"'/data/postgresql.conf
     su postgres -c "/usr/pgsql-'"$pg"'/bin/pg_ctl -D /var/lib/pgsql/'"$pg"'/data -l /tmp/pg.log -w start" >/dev/null \
