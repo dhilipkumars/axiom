@@ -265,8 +265,25 @@ psql_axiom "UPDATE typed_gadgets SET seen_at = '2030-01-01 00:00:00+00' WHERE na
   || fail "UPDATE of a timestamp was refused"
 got="$(kubectl_e2e get clustergadget t10 -o jsonpath='{.seenAt}')"
 [[ "$got" == "2030-01-01T00:00:00.000000Z" ]] || fail "seenAt was written as '$got'"
+got="$(psql_axiom "DO \$\$ BEGIN UPDATE typed_gadgets SET seen_at = 'infinity' WHERE name = 't10';
+  RAISE EXCEPTION 'unexpected success';
+  EXCEPTION WHEN datetime_field_overflow THEN RAISE NOTICE 'caught % %', SQLSTATE, SQLERRM; END \$\$;" 2>&1 || true)"
+grep -q "caught 22008 .*between years 1 and 9999" <<<"$got" \
+  || fail "a timestamp RFC 3339 cannot express must fail with 22008, got: $got"
+got="$(kubectl_e2e get clustergadget t10 -o jsonpath='{.seenAt}')"
+[[ "$got" == "2030-01-01T00:00:00.000000Z" ]] || fail "the refused UPDATE changed seenAt to '$got'"
 kubectl_e2e delete clustergadget t9 t10 --ignore-not-found >/dev/null
 echo "ordered as numbers, compared as timestamps, and written back as their JSON types"
+
+log "#79: a column declared with a type it does not accept is refused with the ones it does"
+got="$(psql_axiom "DROP FOREIGN TABLE IF EXISTS mistyped_gadgets;
+  CREATE FOREIGN TABLE mistyped_gadgets (name text, count integer) SERVER kind
+    OPTIONS (resource 'clustergadgets', group 'example.com', version 'v1', kind 'ClusterGadget', namespaced 'false');
+  SELECT count(*) FROM mistyped_gadgets;" 2>&1 || true)"
+grep -q 'column "count" must be of type jsonb, text, bigint, boolean or timestamptz' <<<"$got" \
+  || fail "integer is not bigint and must be refused naming the accepted types, got: $got"
+psql_axiom "DROP FOREIGN TABLE mistyped_gadgets;"
+echo "refused: integer, naming jsonb, text, bigint, boolean and timestamptz"
 
 log "a later page larger than the first shrinks instead of failing the listing (#85)"
 # Tiny ConfigMaps named a-*, then large ones named b-*. A namespaced list comes
