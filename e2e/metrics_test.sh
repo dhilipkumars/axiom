@@ -176,7 +176,7 @@ done
 
 log "a failing pod and the warning that explains it, on one row"
 # The documented "why is that pod not running?" query, verbatim in shape: event
-# fields are scalar jsonb, unwrapped with #>> '{}'. An image that cannot resolve
+# fields are text columns (#79), compared as written. An image that cannot resolve
 # fails fast and produces a Warning without depending on any registry.
 kubectl_e2e -n "$NS" run broken --image=registry.invalid/axiom/nope:1 --restart=Never >/dev/null \
   || fail "create the broken pod"
@@ -185,11 +185,11 @@ e2e_on_teardown broken_down
 deadline=$((SECONDS + 90))
 while :; do
   got="$(psql_axiom "
-    SELECT p.name || '|' || (e.reason #>> '{}')
+    SELECT p.name || '|' || e.reason
       FROM k8s.core_events e
       JOIN k8s.core_pods p ON p.namespace = e.namespace
                           AND p.name = e.involved_object->>'name'
-     WHERE e.type #>> '{}' = 'Warning'
+     WHERE e.type = 'Warning'
        AND e.involved_object->>'kind' = 'Pod'
        AND p.namespace = '$NS' AND p.name = 'broken'
      LIMIT 1;")"
@@ -257,12 +257,12 @@ psql_axiom "DROP TABLE IF EXISTS tenants;
             CREATE TABLE tenants (namespace text PRIMARY KEY, customer text, plan text);
             INSERT INTO tenants VALUES ('$NS', 'Acme', 'enterprise');" >/dev/null
 got="$(psql_axiom "
-SELECT t.customer || '|' || t.plan || '|' || p.name || '|' || (e.reason #>> '{}')
+SELECT t.customer || '|' || t.plan || '|' || p.name || '|' || e.reason
   FROM tenants t
   JOIN k8s.core_pods p ON p.namespace = t.namespace
   JOIN k8s.core_events e ON e.namespace = p.namespace
                         AND e.involved_object->>'name' = p.name
- WHERE e.type #>> '{}' = 'Warning'
+ WHERE e.type = 'Warning'
    AND e.involved_object->>'kind' = 'Pod'
    AND p.name = 'broken'
  LIMIT 1;")"

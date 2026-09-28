@@ -165,6 +165,44 @@ log "#79: the issue's query runs as written, and every value reads as its type"
 # Before #79, type was jsonb and this was "invalid input syntax for type json".
 psql_axiom "SELECT count(*) FROM $SCHEMA.core_events WHERE type = 'Warning';" >/dev/null \
   || fail "WHERE type = 'Warning' failed on core_events"
+# Not erroring is not enough: a filter that matched nothing would pass that. A
+# kind cluster always has Normal scheduling events, so the same filter on
+# Normal must return rows, and within one scan it must agree with raw.
+normal="$(psql_axiom "SELECT count(*) FROM $SCHEMA.core_events WHERE type = 'Normal';")"
+[[ "$normal" -gt 0 ]] || fail "WHERE type = 'Normal' returned no events on a kind cluster"
+got="$(psql_axiom "SELECT count(*) FILTER (WHERE type = 'Normal') = count(*) FILTER (WHERE raw->>'type' = 'Normal')
+                     FROM $SCHEMA.core_events;")"
+[[ "$got" == "t" ]] || fail "type = 'Normal' disagrees with raw->>'type' within one scan"
+echo "$normal Normal events through WHERE type = 'Normal'"
+
+log "#79: replica counts order as numbers, and an unreported one is NULL"
+# The issue's second example: as text, "9" sorted above "10". The pods can
+# never schedule, so nothing is pulled and nothing becomes ready.
+typed_deployments_down() {
+  kubectl_e2e -n "$NS" delete deployment typed-nine typed-ten --ignore-not-found --wait=false >/dev/null 2>&1 || true
+}
+e2e_on_teardown typed_deployments_down
+for pair in nine:9 ten:10; do
+  kubectl_e2e -n "$NS" apply -f - >/dev/null <<EOF || fail "create deployment typed-${pair%%:*}"
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: typed-${pair%%:*}}
+spec:
+  replicas: ${pair##*:}
+  selector: {matchLabels: {app: typed-${pair%%:*}}}
+  template:
+    metadata: {labels: {app: typed-${pair%%:*}}}
+    spec:
+      nodeSelector: {axiom-e2e/never: "true"}
+      containers: [{name: c, image: registry.invalid/axiom/never:1}]
+EOF
+done
+got="$(psql_axiom "SELECT string_agg(name || ':' || replicas || ':' || coalesce(ready_replicas::text, 'null'), ',' ORDER BY replicas DESC)
+                     FROM $SCHEMA.apps_deployments WHERE namespace = '$NS' AND name LIKE 'typed-%';")"
+[[ "$got" == "typed-ten:10:null,typed-nine:9:null" ]] \
+  || fail "ORDER BY replicas DESC gave '$got': 10 must sort above 9, and nothing is ready"
+typed_deployments_down
+echo "$got"
 # A value the object has but the column reads as NULL would be a conversion
 # that does not match what the API server writes. Compared within one scan, so
 # events arriving meanwhile cannot race it.
