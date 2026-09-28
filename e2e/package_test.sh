@@ -90,7 +90,8 @@ for pg in $MAJORS; do
   out="$(docker run --rm -v "$DIST":/d:ro "postgres:${pg}" bash -c "$RETRY"'
     set -e
     retry apt-get -qq update >/dev/null 2>&1
-    retry apt-get install -y -qq /d/'"$(basename "$deb")"' >/dev/null 2>&1 || { echo "INSTALL-FAILED"; exit 1; }
+    retry apt-get install -y -qq /d/'"$(basename "$deb")"' >/tmp/apt.log 2>&1 \
+      || { echo "INSTALL-FAILED"; tail -30 /tmp/apt.log; exit 1; }
     su postgres -c "/usr/lib/postgresql/'"$pg"'/bin/initdb -D /tmp/data" >/dev/null 2>&1
     echo "shared_preload_libraries = '"'"'axiom'"'"'" >> /tmp/data/postgresql.conf
     su postgres -c "/usr/lib/postgresql/'"$pg"'/bin/pg_ctl -D /tmp/data -l /tmp/pg.log -w start" >/dev/null \
@@ -221,7 +222,8 @@ $reqs"
     set -e
     retry dnf install -y -q https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-'"$RPM_ARCH"'/pgdg-redhat-repo-latest.noarch.rpm >/dev/null 2>&1
     dnf -qy module disable postgresql >/dev/null 2>&1 || true
-    retry dnf install -y -q /d/'"$base"' >/dev/null 2>&1 || { echo INSTALL-FAILED; exit 1; }
+    retry dnf install -y -q /d/'"$base"' >/tmp/dnf.log 2>&1 \
+      || { echo INSTALL-FAILED; tail -30 /tmp/dnf.log; exit 1; }
     su postgres -c "/usr/pgsql-'"$pg"'/bin/initdb -D /var/lib/pgsql/'"$pg"'/data" >/dev/null 2>&1
     echo "shared_preload_libraries = '"'"'axiom'"'"'" >> /var/lib/pgsql/'"$pg"'/data/postgresql.conf
     su postgres -c "/usr/pgsql-'"$pg"'/bin/pg_ctl -D /var/lib/pgsql/'"$pg"'/data -l /tmp/pg.log -w start" >/dev/null \
