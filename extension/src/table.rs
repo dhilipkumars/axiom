@@ -25,7 +25,8 @@ pub const MAX_OBJECT_BYTES: usize = 4 * 1024 * 1024;
 pub struct ResolvedColumn {
     /// Column name as declared in the DDL.
     pub name: String,
-    /// SQL type the column must be declared with.
+    /// SQL type the column is declared with, and so the type its values are
+    /// converted to and from.
     pub sql_type: SqlType,
     /// How the value is read out of an object.
     pub projection: Projection,
@@ -49,31 +50,60 @@ pub struct TableSchema {
 }
 
 impl TableSchema {
-    /// Resolves declared column names against a kind.
+    /// Resolves declared columns against a kind.
     ///
-    /// `declared` is one entry per attribute in order, `None` for dropped
-    /// columns. Every name resolves; a name matching no promoted column becomes
-    /// a top-level lookup that reads NULL when the kind has no such field.
-    pub fn resolve(resource: Resource, writable: bool, declared: &[Option<&str>]) -> Self {
-        let columns = declared
-            .iter()
-            .map(|d| {
-                d.map(|name| {
-                    let c = schema::column(&resource, name);
-                    ResolvedColumn {
-                        name: name.to_owned(),
-                        sql_type: c.sql_type,
-                        projection: c.projection,
-                        writable: c.writable,
-                    }
-                })
-            })
-            .collect();
-        Self {
+    /// `declared` is one entry per attribute in order: the column's name and
+    /// its declared type, `None` for a type that has no [`SqlType`], and `None`
+    /// for the whole entry when the column is dropped. Every name resolves; a
+    /// name matching no promoted column becomes a top-level lookup that reads
+    /// NULL when the kind has no such field. A type the column does not accept
+    /// is an error, so a wrong declaration fails when the table is scanned
+    /// rather than reading as NULL on every row.
+    pub fn resolve(
+        resource: Resource,
+        writable: bool,
+        declared: &[Option<(&str, Option<SqlType>)>],
+    ) -> Result<Self, ColumnTypeError> {
+        let mut columns = Vec::with_capacity(declared.len());
+        for d in declared {
+            let Some((name, sql_type)) = *d else {
+                columns.push(None);
+                continue;
+            };
+            let c = schema::column(&resource, name);
+            let sql_type =
+                sql_type
+                    .filter(|t| c.accepts.contains(t))
+                    .ok_or_else(|| ColumnTypeError {
+                        column: name.to_owned(),
+                        accepts: c.accepts,
+                    })?;
+            columns.push(Some(ResolvedColumn {
+                name: name.to_owned(),
+                sql_type,
+                projection: c.projection,
+                writable: c.writable,
+            }));
+        }
+        Ok(Self {
             resource,
             writable,
             columns,
-        }
+        })
+    }
+
+    /// Resolves column names as `IMPORT FOREIGN SCHEMA` would declare them:
+    /// each at the first type it accepts.
+    ///
+    /// # Panics
+    /// Never: the preferred type is by definition an accepted one.
+    #[cfg(test)]
+    pub fn preferred(resource: Resource, writable: bool, names: &[Option<&str>]) -> Self {
+        let declared: Vec<_> = names
+            .iter()
+            .map(|n| n.map(|n| (n, Some(schema::column(&resource, n).accepts[0]))))
+            .collect();
+        Self::resolve(resource, writable, &declared).expect("the preferred type is accepted")
     }
 
     /// The resolved column with this name, if the table declares it.
@@ -139,14 +169,23 @@ impl TableSchema {
 /// Reads one column's value out of an object. `None` is SQL NULL.
 fn project(raw: &serde_json::Value, column: &ResolvedColumn) -> Option<Cell> {
     match column.projection {
-        Projection::Text(pointer) => str_at(raw, pointer).map(|s| Cell::Text(s.to_owned())),
-        Projection::Scalar(pointer) => raw.pointer(pointer).and_then(|v| match v {
-            serde_json::Value::String(s) => Some(Cell::Text(s.clone())),
-            serde_json::Value::Number(n) => Some(Cell::Text(n.to_string())),
-            serde_json::Value::Bool(b) => Some(Cell::Text(b.to_string())),
-            // Objects, arrays and null have no faithful text rendering here.
-            _ => None,
-        }),
+        Projection::Text(pointer) => raw
+            .pointer(pointer)
+            .and_then(|v| convert(v, column.sql_type)),
+        // Declared text, the column predates #79 and keeps rendering any
+        // scalar, which is how it has always read a JSON number.
+        Projection::Scalar(pointer) if column.sql_type == SqlType::Text => {
+            raw.pointer(pointer).and_then(|v| match v {
+                serde_json::Value::String(s) => Some(Cell::Text(s.clone())),
+                serde_json::Value::Number(n) => Some(Cell::Text(n.to_string())),
+                serde_json::Value::Bool(b) => Some(Cell::Text(b.to_string())),
+                // Objects, arrays and null have no faithful text rendering here.
+                _ => None,
+            })
+        }
+        Projection::Scalar(pointer) => raw
+            .pointer(pointer)
+            .and_then(|v| convert(v, column.sql_type)),
         Projection::Json {
             pointer,
             empty_object,
@@ -159,9 +198,27 @@ fn project(raw: &serde_json::Value, column: &ResolvedColumn) -> Option<Cell> {
             }
         }
         Projection::Raw => Some(Cell::Json(raw.clone())),
-        Projection::TopLevel => schema::top_level_field(raw, &column.name)
-            .filter(|v| !v.is_null())
-            .map(|v| Cell::Json(v.clone())),
+        Projection::TopLevel => {
+            schema::top_level_field(raw, &column.name).and_then(|v| convert(v, column.sql_type))
+        }
+    }
+}
+
+/// Converts a JSON value to a column of type `t`. `None` is SQL NULL: JSON
+/// null, and any value that is not of the declared type. A mismatch is NULL
+/// rather than an error because it is a property of one object, and one
+/// malformed object must not make every query on its table fail.
+fn convert(v: &serde_json::Value, t: SqlType) -> Option<Cell> {
+    match t {
+        SqlType::Jsonb => (!v.is_null()).then(|| Cell::Json(v.clone())),
+        SqlType::Text => v.as_str().map(|s| Cell::Text(s.to_owned())),
+        // A JSON integer only: 3.5 has no bigint, and "3" is a string.
+        SqlType::Int8 => v.as_i64().map(Cell::Int),
+        SqlType::Bool => v.as_bool().map(Cell::Bool),
+        SqlType::Timestamptz => v
+            .as_str()
+            .and_then(crate::timestamp::parse)
+            .map(Cell::Timestamp),
     }
 }
 
@@ -172,7 +229,37 @@ pub enum Cell {
     Text(String),
     /// A jsonb column.
     Json(serde_json::Value),
+    /// A bigint column.
+    Int(i64),
+    /// A boolean column.
+    Bool(bool),
+    /// A timestamptz column: microseconds since 2000-01-01 UTC, the
+    /// representation Postgres itself uses.
+    Timestamp(i64),
 }
+
+/// A column declared with a type it does not accept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnTypeError {
+    /// The column.
+    pub column: String,
+    /// The types it accepts, preferred first.
+    pub accepts: &'static [SqlType],
+}
+
+impl fmt::Display for ColumnTypeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names: Vec<&str> = self.accepts.iter().map(|t| t.name()).collect();
+        let list = match names.as_slice() {
+            [one] => (*one).to_owned(),
+            [init @ .., last] => format!("{} or {last}", init.join(", ")),
+            [] => String::new(),
+        };
+        write!(f, "column {:?} must be of type {list}", self.column)
+    }
+}
+
+impl std::error::Error for ColumnTypeError {}
 
 /// One decoded object, values aligned with [`TableSchema::columns`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,6 +398,8 @@ pub enum WriteError {
     BadOldRaw(&'static str),
     /// `raw` names a different apiVersion/kind from the table's: (found, want).
     WrongKind(String, String),
+    /// A value Kubernetes has no JSON for, such as a timestamp of `infinity`.
+    NotRepresentable(String),
 }
 
 impl fmt::Display for WriteError {
@@ -343,6 +432,10 @@ impl fmt::Display for WriteError {
             Self::WrongKind(found, want) => {
                 write!(f, "raw describes {found}, but this table holds {want}")
             }
+            Self::NotRepresentable(col) => write!(
+                f,
+                "column \"{col}\" holds a value Kubernetes cannot store (timestamps must be between years 1 and 9999)"
+            ),
         }
     }
 }
@@ -458,7 +551,34 @@ fn set_at_pointer(body: &mut serde_json::Value, pointer: &str, value: Option<&se
     }
 }
 
-/// Writes one column's SQL value into the body being built.
+/// The JSON a column's value is written as: the same JSON type it would be
+/// read from, so `SET count = 5` writes the number 5, never the string "5".
+fn json_for(col: &ResolvedColumn, cell: &Cell) -> Result<serde_json::Value, WriteError> {
+    Ok(match cell {
+        Cell::Text(s) => serde_json::Value::String(s.clone()),
+        Cell::Json(v) => v.clone(),
+        Cell::Int(n) => serde_json::Value::from(*n),
+        Cell::Bool(b) => serde_json::Value::Bool(*b),
+        Cell::Timestamp(us) => serde_json::Value::String(
+            crate::timestamp::format(*us)
+                .ok_or_else(|| WriteError::NotRepresentable(col.name.clone()))?,
+        ),
+    })
+}
+
+/// Writes one column's SQL value into the body being built. `None` removes
+/// the field.
+fn apply_cell(
+    body: &mut serde_json::Value,
+    resource: &Resource,
+    col: &ResolvedColumn,
+    cell: Option<&Cell>,
+) -> Result<(), WriteError> {
+    let value = cell.map(|c| json_for(col, c)).transpose()?;
+    apply_column(body, resource, col, value.as_ref())
+}
+
+/// Writes one column's JSON value into the body being built.
 fn apply_column(
     body: &mut serde_json::Value,
     resource: &Resource,
@@ -624,8 +744,8 @@ pub fn insert_body(schema: &TableSchema, new: &NewRow) -> Result<WriteBody, Writ
         }
         // NULL is how Postgres fills a column the INSERT did not mention;
         // there is no existing object for it to clear, so only values apply.
-        if let Some(NewCell::Value(Cell::Json(v))) = new.cells.get(i) {
-            apply_column(&mut body, &schema.resource, col, Some(v))?;
+        if let Some(NewCell::Value(c)) = new.cells.get(i) {
+            apply_cell(&mut body, &schema.resource, col, Some(c))?;
         }
     }
     // A ConfigMap without `data` gets an empty map so `data ? 'k'` is false
@@ -704,11 +824,10 @@ pub fn update_body(
         let old_cell = project(old_raw, col);
         match new.cells.get(i) {
             Some(NewCell::Value(c)) if Some(c) != old_cell.as_ref() => {
-                let Cell::Json(v) = c else { continue };
-                apply_column(&mut body, &schema.resource, col, Some(v))?;
+                apply_cell(&mut body, &schema.resource, col, Some(c))?;
             }
             Some(NewCell::Null) if old_cell.is_some() => {
-                apply_column(&mut body, &schema.resource, col, None)?;
+                apply_cell(&mut body, &schema.resource, col, None)?;
             }
             _ => {}
         }
@@ -741,7 +860,7 @@ mod tests {
     /// The Phase 1 Pods table: `(name, namespace, phase, node, raw)`.
     fn pods() -> TableSchema {
         let r = Resource::new("", "v1", "Pod", "pods", true).expect("valid");
-        TableSchema::resolve(
+        TableSchema::preferred(
             r,
             false,
             &[
@@ -757,7 +876,7 @@ mod tests {
     /// The Phase 2 `ConfigMaps` table: `(name, namespace, data, raw)`.
     fn configmaps() -> TableSchema {
         let r = Resource::new("", "v1", "ConfigMap", "configmaps", true).expect("valid");
-        TableSchema::resolve(
+        TableSchema::preferred(
             r,
             true,
             &[Some("name"), Some("namespace"), Some("data"), Some("raw")],
@@ -768,7 +887,7 @@ mod tests {
     /// jsonb columns, and raw.
     fn widgets() -> TableSchema {
         let r = Resource::new("example.com", "v1", "Widget", "widgets", true).expect("valid");
-        TableSchema::resolve(
+        TableSchema::preferred(
             r,
             true,
             &[
@@ -825,7 +944,7 @@ mod tests {
     #[test]
     fn resolve_keeps_a_slot_for_dropped_columns() {
         let r = Resource::new("", "v1", "Pod", "pods", true).expect("valid");
-        let s = TableSchema::resolve(r, false, &[Some("name"), None, Some("raw")]);
+        let s = TableSchema::preferred(r, false, &[Some("name"), None, Some("raw")]);
         assert_eq!(
             s.columns.len(),
             3,
@@ -894,7 +1013,7 @@ mod tests {
     #[test]
     fn decodes_deployment_replica_counts_from_json_numbers() {
         let r = Resource::new("apps", "v1", "Deployment", "deployments", true).expect("valid");
-        let s = TableSchema::resolve(
+        let s = TableSchema::preferred(
             r,
             true,
             &[
@@ -911,24 +1030,51 @@ mod tests {
             "status": {"readyReplicas": 2, "availableReplicas": 2}
         });
         let row = s.row_from_value(&obj).expect("valid");
-        assert_eq!(row.cell(&s, "replicas"), Some(&Cell::Text("3".into())));
-        assert_eq!(
-            row.cell(&s, "ready_replicas"),
-            Some(&Cell::Text("2".into()))
-        );
-        assert_eq!(
-            row.cell(&s, "available_replicas"),
-            Some(&Cell::Text("2".into()))
-        );
+        assert_eq!(row.cell(&s, "replicas"), Some(&Cell::Int(3)));
+        assert_eq!(row.cell(&s, "ready_replicas"), Some(&Cell::Int(2)));
+        assert_eq!(row.cell(&s, "available_replicas"), Some(&Cell::Int(2)));
         // An absent count is NULL, never 0: "not reported" and "zero replicas"
         // are different facts.
         assert_eq!(row.cell(&s, "updated_replicas"), None);
     }
 
-    #[test]
-    fn scalar_projection_renders_only_json_scalars() {
+    /// A Deployment table as declared before #79, with its counts as text.
+    fn deployments_declared_as_text() -> TableSchema {
         let r = Resource::new("apps", "v1", "Deployment", "deployments", true).expect("valid");
-        let s = TableSchema::resolve(r, true, &[Some("name"), Some("replicas")]);
+        TableSchema::resolve(
+            r,
+            true,
+            &[
+                Some(("name", Some(SqlType::Text))),
+                Some(("replicas", Some(SqlType::Text))),
+            ],
+        )
+        .expect("text is still accepted")
+    }
+
+    #[test]
+    fn a_bigint_replica_count_reads_only_json_integers() {
+        let r = Resource::new("apps", "v1", "Deployment", "deployments", true).expect("valid");
+        let s = TableSchema::preferred(r, true, &[Some("name"), Some("replicas")]);
+        for (value, want) in [
+            (json!(0), Some(Cell::Int(0))),
+            (json!(10), Some(Cell::Int(10))),
+            // Not an integer: NULL rather than a guess or an error.
+            (json!("3"), None),
+            (json!(2.5), None),
+            (json!(true), None),
+            (json!(null), None),
+            (json!({"a": 1}), None),
+        ] {
+            let obj = json!({"metadata": {"name": "d"}, "spec": {"replicas": value}});
+            let row = s.row_from_value(&obj).expect("valid");
+            assert_eq!(row.cell(&s, "replicas"), want.as_ref(), "value {value}");
+        }
+    }
+
+    #[test]
+    fn a_replica_count_declared_as_text_reads_as_it_did_before_79() {
+        let s = deployments_declared_as_text();
         for (value, want) in [
             (json!(0), Some(Cell::Text("0".into()))),
             (json!("3"), Some(Cell::Text("3".into()))),
@@ -971,7 +1117,7 @@ mod tests {
     #[test]
     fn a_column_the_kind_does_not_have_reads_null() {
         let r = Resource::new("example.com", "v1", "Widget", "widgets", true).expect("valid");
-        let s = TableSchema::resolve(r, true, &[Some("name"), Some("nonesuch")]);
+        let s = TableSchema::preferred(r, true, &[Some("name"), Some("nonesuch")]);
         let obj = json!({"metadata":{"name":"w1"},"spec":{}});
         let row = s.row_from_value(&obj).expect("valid");
         assert_eq!(row.cell(&s, "nonesuch"), None);
@@ -980,7 +1126,7 @@ mod tests {
     #[test]
     fn camel_case_top_level_fields_match_their_snake_case_column() {
         let r = Resource::new("", "v1", "Secret", "secrets", true).expect("valid");
-        let s = TableSchema::resolve(r, true, &[Some("name"), Some("string_data")]);
+        let s = TableSchema::preferred(r, true, &[Some("name"), Some("string_data")]);
         let obj = json!({"metadata":{"name":"s"},"stringData":{"k":"v"}});
         let row = s.row_from_value(&obj).expect("valid");
         assert_eq!(
@@ -1102,7 +1248,7 @@ mod tests {
             false,
         )
         .expect("valid");
-        let s = TableSchema::resolve(r, true, &[Some("name"), Some("spec"), Some("raw")]);
+        let s = TableSchema::preferred(r, true, &[Some("name"), Some("spec"), Some("raw")]);
         let new = new_row(&s, &[("name", t("cw")), ("spec", j(json!({"a":1})))]);
         let w = insert_body(&s, &new).expect("valid");
         assert_eq!(w.identity.namespace, "");
@@ -1122,7 +1268,7 @@ mod tests {
             false,
         )
         .expect("valid");
-        let s = TableSchema::resolve(r, true, &[Some("name"), Some("spec"), Some("raw")]);
+        let s = TableSchema::preferred(r, true, &[Some("name"), Some("spec"), Some("raw")]);
         let raw = json!({"metadata":{"name":"cw","namespace":"default"},"spec":{"a":1}});
         let w = insert_body(&s, &pg_row(&s, &[("raw", j(raw))])).expect("valid");
         assert!(
@@ -1185,7 +1331,7 @@ mod tests {
     #[test]
     fn insert_rejects_server_managed_columns() {
         let r = Resource::new("example.com", "v1", "Widget", "widgets", true).expect("valid");
-        let s = TableSchema::resolve(
+        let s = TableSchema::preferred(
             r,
             true,
             &[
@@ -1589,7 +1735,7 @@ mod tests {
     #[test]
     fn update_rejects_a_forged_server_managed_column() {
         let r = Resource::new("example.com", "v1", "Widget", "widgets", true).expect("valid");
-        let s = TableSchema::resolve(
+        let s = TableSchema::preferred(
             r,
             true,
             &[Some("name"), Some("namespace"), Some("uid"), Some("raw")],
@@ -1626,7 +1772,7 @@ mod tests {
     #[test]
     fn update_writes_back_to_the_camel_case_field_it_read() {
         let r = Resource::new("", "v1", "Secret", "secrets", true).expect("valid");
-        let s = TableSchema::resolve(
+        let s = TableSchema::preferred(
             r,
             true,
             &[
@@ -1677,5 +1823,260 @@ mod tests {
         let row = new_row(&s, &[("data", None)]);
         assert!(is_null(&s, &row, "data"));
         assert_eq!(*cell(&s, &row, "nonexistent"), NewCell::Undeclared);
+    }
+
+    // --- typed columns (#79) ----------------------------------------------------
+
+    /// An events table with its top-level fields typed, as the gateway will
+    /// declare them, plus `creation_timestamp` as `timestamptz`.
+    fn events() -> TableSchema {
+        let r = Resource::new("", "v1", "Event", "events", true).expect("valid");
+        TableSchema::resolve(
+            r,
+            true,
+            &[
+                Some(("name", Some(SqlType::Text))),
+                Some(("namespace", Some(SqlType::Text))),
+                Some(("creation_timestamp", Some(SqlType::Timestamptz))),
+                Some(("type", Some(SqlType::Text))),
+                Some(("count", Some(SqlType::Int8))),
+                Some(("first_timestamp", Some(SqlType::Timestamptz))),
+                Some(("event_time", Some(SqlType::Timestamptz))),
+                Some(("involved_object", Some(SqlType::Jsonb))),
+                Some(("raw", Some(SqlType::Jsonb))),
+            ],
+        )
+        .expect("every declaration is accepted")
+    }
+
+    fn event() -> serde_json::Value {
+        json!({
+            "apiVersion": "v1", "kind": "Event",
+            "metadata": {"name": "e1", "namespace": "shop", "resourceVersion": "9",
+                         "creationTimestamp": "2024-05-01T10:00:00Z"},
+            "type": "Warning",
+            "count": 10,
+            // An offset and a MicroTime: both must survive an UPDATE that does
+            // not touch them exactly as written, not re-spelled in UTC.
+            "firstTimestamp": "2024-05-01T15:30:00+05:30",
+            "eventTime": "2024-05-01T10:00:00.123456Z",
+            "involvedObject": {"kind": "Pod", "name": "web-0"}
+        })
+    }
+
+    #[test]
+    fn a_column_declared_with_a_type_it_does_not_accept_is_refused() {
+        let pods = Resource::new("", "v1", "Pod", "pods", true).expect("valid");
+        let err = TableSchema::resolve(pods, false, &[Some(("phase", Some(SqlType::Int8)))])
+            .expect_err("phase is text");
+        assert_eq!(err.to_string(), r#"column "phase" must be of type text"#);
+
+        let err = TableSchema::resolve(
+            pods,
+            false,
+            &[Some(("creation_timestamp", Some(SqlType::Jsonb)))],
+        )
+        .expect_err("a timestamp is not jsonb");
+        assert_eq!(
+            err.to_string(),
+            r#"column "creation_timestamp" must be of type timestamptz or text"#
+        );
+
+        // A type with no SqlType at all, such as integer or date.
+        let err =
+            TableSchema::resolve(pods, false, &[Some(("count", None))]).expect_err("no SqlType");
+        assert_eq!(
+            err.to_string(),
+            r#"column "count" must be of type jsonb, text, bigint, boolean or timestamptz"#
+        );
+    }
+
+    #[test]
+    fn typed_top_level_fields_read_as_their_declared_types() {
+        let s = events();
+        let row = s.row_from_value(&event()).expect("valid");
+        assert_eq!(row.cell(&s, "type"), Some(&Cell::Text("Warning".into())));
+        assert_eq!(row.cell(&s, "count"), Some(&Cell::Int(10)));
+        assert_eq!(
+            row.cell(&s, "creation_timestamp"),
+            Some(&Cell::Timestamp(767_872_800_000_000))
+        );
+        // 15:30 at +05:30 is 10:00 UTC.
+        assert_eq!(
+            row.cell(&s, "first_timestamp"),
+            Some(&Cell::Timestamp(767_872_800_000_000))
+        );
+        assert_eq!(
+            row.cell(&s, "event_time"),
+            Some(&Cell::Timestamp(767_872_800_123_456))
+        );
+        assert_eq!(
+            row.cell(&s, "involved_object"),
+            Some(&Cell::Json(json!({"kind": "Pod", "name": "web-0"})))
+        );
+    }
+
+    #[test]
+    fn a_value_not_of_the_declared_type_reads_as_null() {
+        let s = events();
+        let mut obj = event();
+        obj["type"] = json!(3);
+        obj["count"] = json!("10");
+        obj["firstTimestamp"] = json!("yesterday");
+        obj["eventTime"] = json!(1_714_557_600);
+        obj["metadata"]["creationTimestamp"] = json!(null);
+        let row = s
+            .row_from_value(&obj)
+            .expect("one bad field is not a bad object");
+        for col in [
+            "type",
+            "count",
+            "first_timestamp",
+            "event_time",
+            "creation_timestamp",
+        ] {
+            assert_eq!(row.cell(&s, col), None, "{col}");
+        }
+    }
+
+    #[test]
+    fn a_creation_timestamp_declared_as_text_reads_the_string_as_before_79() {
+        let r = Resource::new("", "v1", "Event", "events", true).expect("valid");
+        let s = TableSchema::resolve(
+            r,
+            true,
+            &[
+                Some(("name", Some(SqlType::Text))),
+                Some(("creation_timestamp", Some(SqlType::Text))),
+            ],
+        )
+        .expect("text is still accepted");
+        let row = s.row_from_value(&event()).expect("valid");
+        assert_eq!(
+            row.cell(&s, "creation_timestamp"),
+            Some(&Cell::Text("2024-05-01T10:00:00Z".into()))
+        );
+    }
+
+    #[test]
+    fn insert_writes_each_typed_column_as_its_json_type() {
+        let s = events();
+        let new = pg_row(
+            &s,
+            &[
+                ("name", t("e2")),
+                ("namespace", t("shop")),
+                ("type", t("Normal")),
+                ("count", Some(Cell::Int(5))),
+            ],
+        );
+        let w = insert_body(&s, &new).expect("valid");
+        assert_eq!(w.body["type"], json!("Normal"));
+        assert_eq!(w.body["count"], json!(5), "a number, not the string \"5\"");
+        // Columns the INSERT did not mention are left out, not written as null.
+        assert!(w.body.get("firstTimestamp").is_none());
+    }
+
+    #[test]
+    fn a_boolean_column_writes_a_json_boolean() {
+        let r = Resource::new("", "v1", "ConfigMap", "configmaps", true).expect("valid");
+        let s = TableSchema::resolve(
+            r,
+            true,
+            &[
+                Some(("name", Some(SqlType::Text))),
+                Some(("namespace", Some(SqlType::Text))),
+                Some(("immutable", Some(SqlType::Bool))),
+                Some(("raw", Some(SqlType::Jsonb))),
+            ],
+        )
+        .expect("valid");
+        let old = json!({"apiVersion": "v1", "kind": "ConfigMap",
+            "metadata": {"name": "c", "namespace": "shop", "resourceVersion": "3"},
+            "data": {}});
+        let row = s.row_from_value(&old).expect("valid");
+        assert_eq!(row.cell(&s, "immutable"), None, "absent reads as NULL");
+        let new = pg_row(
+            &s,
+            &[
+                ("name", t("c")),
+                ("namespace", t("shop")),
+                ("immutable", Some(Cell::Bool(true))),
+                ("raw", j(old.clone())),
+            ],
+        );
+        let w = update_body(&s, &old, &new).expect("valid");
+        assert_eq!(w.body["immutable"], json!(true), "a boolean, not \"true\"");
+    }
+
+    /// The UPDATE Postgres delivers for `SET involved_object = ...`: every
+    /// other column carries the value the scan read.
+    fn update_touching_only_involved_object() -> (TableSchema, serde_json::Value, NewRow) {
+        let s = events();
+        let old = event();
+        let read = s.row_from_value(&old).expect("valid");
+        let mut new = NewRow::undeclared(&s);
+        for (i, cell) in read.cells.iter().enumerate() {
+            new.cells[i] = cell.clone().map_or(NewCell::Null, NewCell::Value);
+        }
+        new.cells[s.index_of("involved_object").expect("declared")] =
+            NewCell::Value(Cell::Json(json!({"kind": "Pod", "name": "web-1"})));
+        (s, old, new)
+    }
+
+    #[test]
+    fn update_leaves_unchanged_typed_fields_exactly_as_written() {
+        let (s, old, new) = update_touching_only_involved_object();
+        let w = update_body(&s, &old, &new).expect("unchanged read-only columns are no write");
+        assert_eq!(w.body["involvedObject"]["name"], json!("web-1"));
+        for field in ["type", "count", "firstTimestamp", "eventTime"] {
+            assert_eq!(w.body[field], old[field], "{field} must be untouched");
+        }
+        assert_eq!(
+            w.body["metadata"]["creationTimestamp"],
+            old["metadata"]["creationTimestamp"]
+        );
+    }
+
+    #[test]
+    fn update_of_a_typed_column_writes_its_json_type() {
+        let (s, old, mut new) = update_touching_only_involved_object();
+        new.cells[s.index_of("count").expect("declared")] = NewCell::Value(Cell::Int(11));
+        new.cells[s.index_of("event_time").expect("declared")] =
+            NewCell::Value(Cell::Timestamp(767_872_800_000_001));
+        new.cells[s.index_of("first_timestamp").expect("declared")] = NewCell::Null;
+        let w = update_body(&s, &old, &new).expect("valid");
+        assert_eq!(w.body["count"], json!(11));
+        assert_eq!(
+            w.body["eventTime"],
+            json!("2024-05-01T10:00:00.000001Z"),
+            "written back to the field it was read from, as RFC 3339"
+        );
+        assert!(
+            w.body.get("firstTimestamp").is_none(),
+            "SET first_timestamp = NULL clears the field"
+        );
+    }
+
+    #[test]
+    fn a_changed_creation_timestamp_is_refused_whatever_its_type() {
+        let (s, old, mut new) = update_touching_only_involved_object();
+        new.cells[s.index_of("creation_timestamp").expect("declared")] =
+            NewCell::Value(Cell::Timestamp(0));
+        assert_eq!(
+            update_body(&s, &old, &new).expect_err("server-managed"),
+            WriteError::NotWritable("creation_timestamp".into())
+        );
+    }
+
+    #[test]
+    fn a_timestamp_kubernetes_cannot_store_is_an_error_not_a_bad_write() {
+        let (s, old, mut new) = update_touching_only_involved_object();
+        // What Postgres stores for 'infinity'.
+        new.cells[s.index_of("event_time").expect("declared")] =
+            NewCell::Value(Cell::Timestamp(i64::MAX));
+        let err = update_body(&s, &old, &new).expect_err("no RFC 3339 for infinity");
+        assert_eq!(err, WriteError::NotRepresentable("event_time".into()));
+        assert!(err.to_string().contains("between years 1 and 9999"));
     }
 }

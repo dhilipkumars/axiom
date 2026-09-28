@@ -639,14 +639,28 @@ struct ScanState {
     exhausted: bool,
 }
 
+/// The [`SqlType`] a column declared with type `oid` has, if any.
+fn sql_type_of(oid: pg_sys::Oid) -> Option<SqlType> {
+    [
+        (pg_sys::TEXTOID, SqlType::Text),
+        (pg_sys::JSONBOID, SqlType::Jsonb),
+        (pg_sys::INT8OID, SqlType::Int8),
+        (pg_sys::BOOLOID, SqlType::Bool),
+        (pg_sys::TIMESTAMPTZOID, SqlType::Timestamptz),
+    ]
+    .into_iter()
+    .find_map(|(o, t)| (o == oid).then_some(t))
+}
+
 /// Resolves the relation's declared columns against its kind, validating types.
 ///
 /// Unlike Phases 1-3 there is no list of permitted names to check against: a
 /// kind's fields are not known without discovery, and a scan deliberately never
 /// discovers. A name matching no promoted column becomes a top-level lookup
 /// that reads NULL if the object has no such field, which is what lets a
-/// hand-written table target a CRD. Types are still strict, so a column
-/// declared with the wrong type fails at scan rather than at cast time.
+/// hand-written table target a CRD. The declared type decides how values are
+/// converted, and must be one the column accepts, so a column declared with
+/// the wrong type fails at scan rather than reading NULL on every row.
 unsafe fn resolve_schema(
     tupdesc: pg_sys::TupleDesc,
     resource: &Resource,
@@ -655,40 +669,31 @@ unsafe fn resolve_schema(
     // SAFETY: tupdesc is a live TupleDesc supplied by the executor.
     unsafe {
         let natts = usize::try_from((*tupdesc).natts).unwrap_or(0);
-        let mut names: Vec<Option<String>> = Vec::with_capacity(natts);
+        let mut names: Vec<Option<(String, Option<SqlType>)>> = Vec::with_capacity(natts);
         for i in 0..natts {
             let att = tupdesc_attr(tupdesc, i);
             if (*att).attisdropped {
                 names.push(None);
                 continue;
             }
-            names.push(Some(
+            names.push(Some((
                 CStr::from_ptr((*att).attname.data.as_ptr().cast::<c_char>())
                     .to_string_lossy()
                     .into_owned(),
-            ));
+                sql_type_of((*att).atttypid),
+            )));
         }
-        let borrowed: Vec<Option<&str>> = names.iter().map(|n| n.as_deref()).collect();
-        let schema = TableSchema::resolve(*resource, writable, &borrowed);
-
-        for (i, col) in schema.columns.iter().enumerate() {
-            let Some(col) = col else { continue };
-            let att = tupdesc_attr(tupdesc, i);
-            let (want_oid, want_name) = match col.sql_type {
-                SqlType::Text => (pg_sys::TEXTOID, "text"),
-                SqlType::Jsonb => (pg_sys::JSONBOID, "jsonb"),
-            };
-            if (*att).atttypid != want_oid {
-                raise(
-                    PgSqlErrorCode::ERRCODE_FDW_INVALID_DATA_TYPE,
-                    format!(
-                        "column {:?} must be of type {want_name} for {}",
-                        col.name, schema.resource
-                    ),
-                );
-            }
+        let borrowed: Vec<Option<(&str, Option<SqlType>)>> = names
+            .iter()
+            .map(|n| n.as_ref().map(|(name, t)| (name.as_str(), *t)))
+            .collect();
+        match TableSchema::resolve(*resource, writable, &borrowed) {
+            Ok(schema) => schema,
+            Err(e) => raise(
+                PgSqlErrorCode::ERRCODE_FDW_INVALID_DATA_TYPE,
+                format!("{e} for {resource}"),
+            ),
         }
-        schema
     }
 }
 
@@ -732,6 +737,11 @@ unsafe fn store_row(
                 let datum = match row.cells.get(i).and_then(Option::as_ref) {
                     Some(Cell::Text(s)) => s.clone().into_datum(),
                     Some(Cell::Json(v)) => JsonB(v.clone()).into_datum(),
+                    Some(Cell::Int(n)) => n.into_datum(),
+                    Some(Cell::Bool(b)) => b.into_datum(),
+                    // A timestamptz datum is its microseconds since the
+                    // Postgres epoch, passed by value.
+                    Some(Cell::Timestamp(us)) => us.into_datum(),
                     None => None,
                 };
                 if let Some(d) = datum {
@@ -776,10 +786,15 @@ unsafe fn new_row_from_slot(slot: *mut pg_sys::TupleTableSlot, schema: &TableSch
             row.cells[i] = NewCell::Null;
             continue;
         };
-        let value = match col.sql_type {
-            // SAFETY: column types were checked against the tupdesc in resolve_schema.
-            SqlType::Text => unsafe { String::from_datum(datum, false) }.map(Cell::Text),
-            SqlType::Jsonb => unsafe { JsonB::from_datum(datum, false) }.map(|j| Cell::Json(j.0)),
+        // SAFETY: column types were checked against the tupdesc in resolve_schema.
+        let value = unsafe {
+            match col.sql_type {
+                SqlType::Text => String::from_datum(datum, false).map(Cell::Text),
+                SqlType::Jsonb => JsonB::from_datum(datum, false).map(|j| Cell::Json(j.0)),
+                SqlType::Int8 => i64::from_datum(datum, false).map(Cell::Int),
+                SqlType::Bool => bool::from_datum(datum, false).map(Cell::Bool),
+                SqlType::Timestamptz => i64::from_datum(datum, false).map(Cell::Timestamp),
+            }
         };
         row.cells[i] = value.map_or(NewCell::Null, NewCell::Value);
     }

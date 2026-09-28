@@ -33,6 +33,7 @@ pub mod status;
 #[cfg(test)]
 mod stub_gateway_tests;
 pub mod table;
+pub mod timestamp;
 pub mod transport;
 
 ::pgrx::pg_module_magic!();
@@ -934,6 +935,20 @@ mod tests {
         Spi::run(UNREACHABLE_SERVER).expect("server");
         Spi::run(
             "CREATE FOREIGN TABLE t (name text, phase int) SERVER gw OPTIONS (resource 'pods')",
+        )
+        .expect("table");
+        let _ = Spi::get_one::<i64>("SELECT count(*) FROM t WHERE name = 'impossible name'");
+    }
+
+    #[pg_test(
+        error = "column \"spec\" must be of type jsonb, text, bigint, boolean or timestamptz for pods"
+    )]
+    fn a_top_level_column_of_an_unsupported_type_is_rejected_at_scan() {
+        // #79: a top-level field takes the type its DDL declares, but only one
+        // the extension can convert to; integer is not bigint.
+        Spi::run(UNREACHABLE_SERVER).expect("server");
+        Spi::run(
+            "CREATE FOREIGN TABLE t (name text, spec integer) SERVER gw OPTIONS (resource 'pods')",
         )
         .expect("table");
         let _ = Spi::get_one::<i64>("SELECT count(*) FROM t WHERE name = 'impossible name'");

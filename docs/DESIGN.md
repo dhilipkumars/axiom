@@ -152,6 +152,19 @@ avoid torn reads during a concurrent scan.
   NULL. `IMPORT FOREIGN SCHEMA` writes the resolved `(group, version, kind)`
   into each generated table's options, which is what keeps discovery off the
   scan path entirely.
+- **Column types** (#79): a column's *declared* type decides how its value is
+  converted, both ways. A scan never discovers, so the DDL is the only
+  statement of what a field holds. Each column accepts a fixed set of types: a
+  kind's own top-level field takes `jsonb`, `text`, `bigint`, `boolean` or
+  `timestamptz`; a metadata or promoted column takes its type and, where that
+  changed, the one it had before (`creation_timestamp` is `timestamptz` or
+  `text`), so a table declared under the old rules keeps working unaltered. A
+  value that is not of the declared type reads as NULL rather than raising,
+  matching the strict-text rule: a malformed object is a property of that
+  object and must not make its whole table unqueryable. This replaces the
+  original "promote scalars as `text`" rule, whose objection -- that guessing
+  types from a loose OpenAPI schema makes a cast-error minefield -- is answered
+  by never guessing: types come from the declaration, and a mismatch is NULL.
 - **What a deployment serves** (added in Phase 4): removing the hardcoded kind
   registry would otherwise have widened the gateway to everything in the
   cluster, so the served set is an explicit `--serve` allowlist, with the
