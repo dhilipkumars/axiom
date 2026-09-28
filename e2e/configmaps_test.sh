@@ -282,7 +282,8 @@ got="$(psql_axiom "DROP FOREIGN TABLE IF EXISTS mistyped_gadgets;
   SELECT count(*) FROM mistyped_gadgets;" 2>&1 || true)"
 grep -q 'column "count" must be of type jsonb, text, bigint, boolean or timestamptz' <<<"$got" \
   || fail "integer is not bigint and must be refused naming the accepted types, got: $got"
-psql_axiom "DROP FOREIGN TABLE mistyped_gadgets;"
+# The refused SELECT rolled back the whole -c string, CREATE included.
+psql_axiom "DROP FOREIGN TABLE IF EXISTS mistyped_gadgets;"
 echo "refused: integer, naming jsonb, text, bigint, boolean and timestamptz"
 
 log "a later page larger than the first shrinks instead of failing the listing (#85)"
