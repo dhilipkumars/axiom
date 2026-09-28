@@ -46,7 +46,7 @@ struct Cluster {
     force_conflict_once: AtomicBool,
     /// While set, Subscribe is refused with UNAVAILABLE (gateway "down").
     refuse_subscribe: AtomicBool,
-    /// Whether the last ListKinds asked for typed columns (#79).
+    /// Whether the last `ListKinds` asked for typed columns (#79).
     asked_for_typed_columns: AtomicBool,
     /// Live watch feed: every Subscribe stream forwards these after its initial listing.
     events: tokio::sync::broadcast::Sender<SubscribeResponse>,
@@ -1120,7 +1120,42 @@ fn import_foreign_schema_generates_usable_tables() {
         ]
     );
 
-    // #79: the extension asked for typed columns, and the DDL declares them.
+    // An imported table scans through the ordinary path. The stub serves pods,
+    // so this exercises generated DDL end to end rather than only its text --
+    // with creation_timestamp declared timestamptz (see the test below), which
+    // the scan must accept.
+    let n: i64 = tx
+        .query_one(
+            "SELECT count(*) FROM k8s.core_pods WHERE namespace = 'shop'",
+            &[],
+        )
+        .expect("scan imported table")
+        .get(0);
+    assert_eq!(
+        n, 2,
+        "the imported pods table must scan like a hand-written one"
+    );
+
+    tx.rollback().expect("rollback");
+}
+
+/// LIMIT TO, EXCEPT, and the import options.
+/// #79: IMPORT asks the gateway for typed columns, and declares them.
+#[test]
+fn import_declares_the_typed_columns_it_asked_for() {
+    let stub = start_stub();
+    let mut pg = pg_client();
+    let ca = stub.ca_path.display();
+    let port = stub.addr.port();
+    let mut tx = pg.transaction().expect("begin");
+    tx.batch_execute(&format!(
+        "CREATE SERVER imp FOREIGN DATA WRAPPER axiom_fdw \
+           OPTIONS (endpoint 'https://localhost:{port}', ca_cert '{ca}', rpc_timeout_secs '5');
+         CREATE SCHEMA k8s;
+         IMPORT FOREIGN SCHEMA k8s LIMIT TO (core_configmaps) FROM SERVER imp INTO k8s;"
+    ))
+    .expect("import");
+
     assert!(
         stub.cluster.asked_for_typed_columns.load(Ordering::SeqCst),
         "IMPORT must ask the gateway for typed columns"
@@ -1150,25 +1185,9 @@ fn import_foreign_schema_generates_usable_tables() {
         .map(|(a, b)| (a.to_owned(), b.to_owned()))
     );
 
-    // An imported table scans through the ordinary path. The stub serves pods,
-    // so this exercises generated DDL end to end rather than only its text --
-    // with creation_timestamp declared timestamptz, which the scan must accept.
-    let n: i64 = tx
-        .query_one(
-            "SELECT count(*) FROM k8s.core_pods WHERE namespace = 'shop'",
-            &[],
-        )
-        .expect("scan imported table")
-        .get(0);
-    assert_eq!(
-        n, 2,
-        "the imported pods table must scan like a hand-written one"
-    );
-
     tx.rollback().expect("rollback");
 }
 
-/// LIMIT TO, EXCEPT, and the import options.
 #[test]
 fn import_foreign_schema_filters_and_options() {
     let stub = start_stub();

@@ -185,7 +185,7 @@ owner AS (
     FROM k8s.apps_replicasets r),
 warn AS (
   SELECT e.namespace, e.involved_object->>'name' AS pod,
-         count(*) AS warnings, maxe.reason AS why
+         count(*) AS warnings, max(e.reason) AS why
     FROM k8s.core_events e
    WHERE e.type = 'Warning' AND e.involved_object->>'kind' = 'Pod'
    GROUP BY 1, 2)
