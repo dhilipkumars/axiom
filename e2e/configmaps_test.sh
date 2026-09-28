@@ -243,7 +243,8 @@ psql_axiom "DROP FOREIGN TABLE IF EXISTS typed_gadgets;
 # snake_case name (#97).
 psql_axiom "INSERT INTO typed_gadgets (raw) VALUES
   ('{\"metadata\":{\"name\":\"t9\"},\"count\":9,\"seenAt\":\"2024-05-01T15:30:00+05:30\",\"note\":\"n\"}'),
-  ('{\"metadata\":{\"name\":\"t10\"},\"count\":10}');" || fail "INSERT of typed gadgets failed"
+  ('{\"metadata\":{\"name\":\"t10\"},\"count\":10,\"seenAt\":\"2024-01-01T00:00:00Z\"}');" \
+  || fail "INSERT of typed gadgets failed"
 got="$(psql_axiom "SELECT string_agg(name, ',' ORDER BY count DESC) FROM typed_gadgets WHERE name IN ('t9', 't10');")"
 [[ "$got" == "t10,t9" ]] || fail "ORDER BY count DESC gave '$got': 9 must sort below 10, as a number"
 got="$(psql_axiom "SELECT (seen_at = '2024-05-01 10:00:00+00') || '|' || note || '|' || (enabled IS NULL)
@@ -258,6 +259,8 @@ psql_axiom "UPDATE typed_gadgets SET enabled = true, count = count + 1 WHERE nam
 got="$(kubectl_e2e get clustergadget t9 -o jsonpath='{.enabled}|{.count}|{.seenAt}|{.note}')"
 [[ "$got" == "true|10|2024-05-01T15:30:00+05:30|n" ]] \
   || fail "the cluster has '$got': an untouched seenAt must keep its offset, and note its value"
+# t10 already has a seenAt: setting a field the object lacks would write it
+# under its snake_case name, which the API server prunes (#97).
 psql_axiom "UPDATE typed_gadgets SET seen_at = '2030-01-01 00:00:00+00' WHERE name = 't10';" \
   || fail "UPDATE of a timestamp was refused"
 got="$(kubectl_e2e get clustergadget t10 -o jsonpath='{.seenAt}')"
