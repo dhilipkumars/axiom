@@ -12,6 +12,7 @@ on:
     branches: [main]
     paths:
       - docs/**
+      - docs-overrides/**
       - mkdocs.yml
       - .github/workflows/pages.yml
   workflow_dispatch:
