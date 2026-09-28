@@ -26,6 +26,18 @@ spec:
             spec:
               type: object
               x-kubernetes-preserve-unknown-fields: true
+            # Typed top-level fields for #79's checks. The API server validates
+            # them, so a write that sent the string "10" for count, or "true"
+            # for enabled, would be refused rather than stored.
+            count:
+              type: integer
+            enabled:
+              type: boolean
+            seenAt:
+              type: string
+              format: date-time
+            note:
+              type: string
 ---
 # Only this gate writes ClusterGadgets; the shipped RBAC knows nothing of them.
 apiVersion: rbac.authorization.k8s.io/v1
