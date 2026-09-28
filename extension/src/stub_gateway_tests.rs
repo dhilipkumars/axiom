@@ -1264,6 +1264,124 @@ fn writes_through_a_short_name_reach_the_cluster() {
     tx.rollback().expect("rollback");
 }
 
+/// #79 through a real Postgres: typed columns read as Postgres values, order
+/// and compare as their types, write back as the matching JSON, and leave the
+/// fields an UPDATE did not touch exactly as they were.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear scenario: each write reads back what the one before left"
+)]
+fn typed_columns_read_and_write_as_their_types() {
+    let stub = start_stub();
+    let mut pg = pg_client();
+    let ca = stub.ca_path.display();
+    let port = stub.addr.port();
+    let mut tx = pg.transaction().expect("begin");
+    // `expires_at` and `count` are not ConfigMap fields; the stub keeps
+    // whatever it is given, which is what lets one kind exercise every type.
+    tx.batch_execute(&format!(
+        "SET LOCAL TimeZone = 'UTC';
+         CREATE SERVER typed FOREIGN DATA WRAPPER axiom_fdw \
+           OPTIONS (endpoint 'https://localhost:{port}', ca_cert '{ca}', rpc_timeout_secs '5');
+         CREATE FOREIGN TABLE cms (name text, namespace text, immutable boolean, \
+             expires_at timestamptz, count jsonb, raw jsonb) \
+           SERVER typed OPTIONS (resource 'configmaps');
+         -- The documented way to type a column of an imported table.
+         ALTER FOREIGN TABLE cms ALTER COLUMN count TYPE bigint;
+         INSERT INTO cms (name, namespace, raw) VALUES
+           ('ten', 'shop', '{{\"count\": 10, \"expiresAt\": \"2024-05-01T15:30:00+05:30\", \"data\": {{}}}}'),
+           ('nine', 'shop', '{{\"count\": 9, \"data\": {{}}}}');"
+    ))
+    .expect("setup");
+
+    // The issue's second example: as text, "9" sorted above "10".
+    let order: Vec<String> = tx
+        .query(
+            "SELECT name FROM cms WHERE namespace = 'shop' ORDER BY count DESC",
+            &[],
+        )
+        .expect("order")
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert_eq!(order, ["ten", "nine"]);
+
+    let row = tx
+        .query_one(
+            "SELECT expires_at::text, count, immutable FROM cms \
+             WHERE namespace = 'shop' AND name = 'ten'",
+            &[],
+        )
+        .expect("read");
+    assert_eq!(
+        row.get::<_, String>(0),
+        "2024-05-01 10:00:00+00",
+        "15:30 at +05:30, as the timestamptz Postgres itself would store"
+    );
+    assert_eq!(row.get::<_, i64>(1), 10);
+    assert_eq!(row.get::<_, Option<bool>>(2), None, "absent is NULL");
+    let n: i64 = tx
+        .query_one(
+            "SELECT count(*) FROM cms WHERE expires_at < '2024-06-01'",
+            &[],
+        )
+        .expect("compare")
+        .get(0);
+    assert_eq!(n, 1, "compared as a timestamp; the one without one is NULL");
+
+    let stored = |name: &str| {
+        stub.cluster.configmaps.lock().expect("lock")[&("shop".to_owned(), name.to_owned())].clone()
+    };
+
+    tx.execute(
+        "UPDATE cms SET immutable = true WHERE namespace = 'shop' AND name = 'ten'",
+        &[],
+    )
+    .expect("set a boolean");
+    let obj = stored("ten");
+    assert_eq!(
+        obj["immutable"],
+        json!(true),
+        "a JSON boolean, not \"true\""
+    );
+    assert_eq!(
+        obj["expiresAt"],
+        json!("2024-05-01T15:30:00+05:30"),
+        "an untouched timestamp keeps its spelling"
+    );
+    assert_eq!(obj["count"], json!(10), "an untouched count stays a number");
+
+    tx.execute(
+        "UPDATE cms SET count = count + 1, expires_at = '2030-01-01 00:00:00+00' \
+         WHERE namespace = 'shop' AND name = 'ten'",
+        &[],
+    )
+    .expect("set a count and a timestamp");
+    let obj = stored("ten");
+    assert_eq!(obj["count"], json!(11));
+    assert_eq!(obj["expiresAt"], json!("2030-01-01T00:00:00.000000Z"));
+
+    let err = tx
+        .execute(
+            "UPDATE cms SET expires_at = 'infinity' WHERE namespace = 'shop' AND name = 'ten'",
+            &[],
+        )
+        .expect_err("RFC 3339 has no infinity");
+    assert_eq!(
+        sqlstate(&err),
+        SqlState::DATETIME_FIELD_OVERFLOW.code(),
+        "{}",
+        message(&err)
+    );
+    assert!(
+        message(&err).contains("between years 1 and 9999"),
+        "{}",
+        message(&err)
+    );
+    tx.rollback().expect("rollback");
+}
+
 /// An import option that is not understood must fail the statement rather than
 /// silently producing tables configured differently than asked.
 #[test]

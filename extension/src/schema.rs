@@ -17,13 +17,23 @@
 
 use crate::resource::Resource;
 
-/// SQL type a column must be declared with.
+/// SQL type a column is declared with.
+///
+/// The declared type decides how a JSON value is converted (#79): a scan never
+/// runs discovery, so the table's DDL is the only statement of what a field
+/// holds. Each column accepts a fixed set of these; see [`Column::accepts`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqlType {
     /// `text`
     Text,
     /// `jsonb`
     Jsonb,
+    /// `bigint`
+    Int8,
+    /// `boolean`
+    Bool,
+    /// `timestamptz`
+    Timestamptz,
 }
 
 impl SqlType {
@@ -32,9 +42,31 @@ impl SqlType {
         match self {
             Self::Text => "text",
             Self::Jsonb => "jsonb",
+            Self::Int8 => "bigint",
+            Self::Bool => "boolean",
+            Self::Timestamptz => "timestamptz",
         }
     }
 }
+
+const TEXT: &[SqlType] = &[SqlType::Text];
+const JSONB: &[SqlType] = &[SqlType::Jsonb];
+/// A field Kubernetes models as a timestamp: `timestamptz`, or `text` for a
+/// table declared before #79, which keeps reading the string it always did.
+const TEXT_OR_TIMESTAMPTZ: &[SqlType] = &[SqlType::Timestamptz, SqlType::Text];
+/// A field Kubernetes models as an integer: `bigint`, or `text` for a table
+/// declared before #79, which keeps reading the rendered number.
+const TEXT_OR_BIGINT: &[SqlType] = &[SqlType::Int8, SqlType::Text];
+/// A kind's own top-level field. Its type is whatever the DDL declares, which
+/// is what lets a hand-written table type a CRD field. `jsonb` comes first as
+/// the type that can hold any value.
+const ANY: &[SqlType] = &[
+    SqlType::Jsonb,
+    SqlType::Text,
+    SqlType::Int8,
+    SqlType::Bool,
+    SqlType::Timestamptz,
+];
 
 /// Where a column's value comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,10 +76,11 @@ pub enum Projection {
     /// field whose type changed upstream is visible as missing instead of
     /// silently reinterpreted.
     Text(&'static str),
-    /// A JSON pointer into the object, read as text from any JSON scalar:
-    /// string, number or boolean. For fields Kubernetes models as numbers,
-    /// such as a Deployment's replica counts, which [`Projection::Text`]
-    /// would read as NULL. Objects, arrays and null read as SQL NULL.
+    /// A JSON pointer into the object, for fields Kubernetes models as
+    /// numbers, such as a Deployment's replica counts. Declared `bigint`, it
+    /// reads a JSON integer. Declared `text`, as tables made before #79 are, it
+    /// reads any JSON scalar rendered as text, which [`Projection::Text`] would
+    /// read as NULL. Anything else reads as SQL NULL.
     Scalar(&'static str),
     /// A JSON pointer into the object, read as JSON. Absent means SQL NULL
     /// unless `empty_object` is set, in which case an absent value reads as
@@ -61,7 +94,9 @@ pub enum Projection {
     /// The whole object.
     Raw,
     /// A top-level field of the object, found by matching the column name
-    /// against [`normalize_field_name`] of each key. Always JSON.
+    /// against [`normalize_field_name`] of each key, and converted to the
+    /// column's declared type. A value that is not of that type reads as SQL
+    /// NULL, as [`Projection::Text`] does.
     TopLevel,
 }
 
@@ -70,8 +105,9 @@ pub enum Projection {
 pub struct Column {
     /// SQL column name as declared.
     pub name: &'static str,
-    /// Required SQL type.
-    pub sql_type: SqlType,
+    /// The SQL types this column may be declared with, preferred first. A
+    /// declaration outside the set is refused when the table is scanned.
+    pub accepts: &'static [SqlType],
     /// How to read it.
     pub projection: Projection,
     /// Whether SQL may write it. Server-managed metadata is readable but not
@@ -83,7 +119,7 @@ pub struct Column {
 const fn text(name: &'static str, pointer: &'static str, writable: bool) -> Column {
     Column {
         name,
-        sql_type: SqlType::Text,
+        accepts: TEXT,
         projection: Projection::Text(pointer),
         writable,
     }
@@ -92,7 +128,7 @@ const fn text(name: &'static str, pointer: &'static str, writable: bool) -> Colu
 const fn scalar(name: &'static str, pointer: &'static str) -> Column {
     Column {
         name,
-        sql_type: SqlType::Text,
+        accepts: TEXT_OR_BIGINT,
         projection: Projection::Scalar(pointer),
         // Server-reported counts. spec.replicas is genuinely settable through
         // Kubernetes, but writing it here would mean reaching into a nested
@@ -104,7 +140,7 @@ const fn scalar(name: &'static str, pointer: &'static str) -> Column {
 const fn json(name: &'static str, pointer: &'static str, empty_object: bool) -> Column {
     Column {
         name,
-        sql_type: SqlType::Jsonb,
+        accepts: JSONB,
         projection: Projection::Json {
             pointer,
             empty_object,
@@ -129,12 +165,15 @@ const META_COLUMNS: &[Column] = &[
     text("namespace", "/metadata/namespace", true),
     text("uid", "/metadata/uid", false),
     text("resource_version", "/metadata/resourceVersion", false),
-    text("creation_timestamp", "/metadata/creationTimestamp", false),
+    Column {
+        accepts: TEXT_OR_TIMESTAMPTZ,
+        ..text("creation_timestamp", "/metadata/creationTimestamp", false)
+    },
     json("labels", "/metadata/labels", false),
     json("annotations", "/metadata/annotations", false),
     Column {
         name: "metadata",
-        sql_type: SqlType::Jsonb,
+        accepts: JSONB,
         projection: Projection::Json {
             pointer: "/metadata",
             empty_object: false,
@@ -150,8 +189,8 @@ const POD_PROMOTED: &[Column] = &[
 
 /// Deployments carry the numbers people actually filter on inside `spec` and
 /// `status`, deep enough that the generic top-level rule cannot reach them.
-/// They are text columns holding a rendered number, so `replicas::int` works
-/// and an absent field is NULL rather than zero.
+/// Declared `bigint` they order and compare as numbers; an absent field is
+/// NULL rather than zero either way.
 const DEPLOYMENT_PROMOTED: &[Column] = &[
     scalar("replicas", "/spec/replicas"),
     scalar("ready_replicas", "/status/readyReplicas"),
@@ -223,7 +262,7 @@ pub fn normalize_field_name(field: &str) -> String {
 
 /// Resolves a declared column name against a kind.
 ///
-/// Returns the column's required SQL type and how to read it. Every name
+/// Returns the SQL types the column may be declared with and how to read it. Every name
 /// resolves: one that matches no promoted column falls through to
 /// [`Projection::TopLevel`], which reads the object's top-level field of that
 /// name and is SQL NULL when the kind has no such field. That fallthrough is
@@ -233,7 +272,7 @@ pub fn column(r: &Resource, name: &str) -> Column {
     if name == "raw" {
         return Column {
             name: "raw",
-            sql_type: SqlType::Jsonb,
+            accepts: JSONB,
             projection: Projection::Raw,
             // `raw` is the UPDATE/DELETE identity carrier, not a settable
             // column: writes derive the body from it rather than storing it.
@@ -255,7 +294,7 @@ pub fn column(r: &Resource, name: &str) -> Column {
         // The name is borrowed from the caller's tuple descriptor, which
         // outlives the scan; callers that need an owned name keep their own.
         name: "",
-        sql_type: SqlType::Jsonb,
+        accepts: ANY,
         projection: Projection::TopLevel,
         writable: true,
     }
@@ -392,7 +431,12 @@ mod tests {
         // Projection::Text reads as NULL. Getting this wrong gives a column
         // that is silently always empty.
         for c in promoted_columns(&deployments()) {
-            assert_eq!(c.sql_type, SqlType::Text, "{} should be text", c.name);
+            assert_eq!(
+                c.accepts,
+                &[SqlType::Int8, SqlType::Text],
+                "{} is a bigint, or text in a table declared before #79",
+                c.name
+            );
             assert!(
                 matches!(c.projection, Projection::Scalar(_)),
                 "{} must use a Scalar projection to survive a numeric value",
@@ -426,8 +470,13 @@ mod tests {
                 column(&r, "name").projection,
                 Projection::Text("/metadata/name")
             );
-            assert_eq!(column(&r, "namespace").sql_type, SqlType::Text);
-            assert_eq!(column(&r, "labels").sql_type, SqlType::Jsonb);
+            assert_eq!(column(&r, "namespace").accepts, &[SqlType::Text]);
+            assert_eq!(column(&r, "labels").accepts, &[SqlType::Jsonb]);
+            assert_eq!(
+                column(&r, "creation_timestamp").accepts,
+                &[SqlType::Timestamptz, SqlType::Text],
+                "text must stay accepted, or every table made before #79 stops scanning"
+            );
             assert_eq!(column(&r, "raw").projection, Projection::Raw);
         }
     }
@@ -449,7 +498,7 @@ mod tests {
     #[test]
     fn pod_promoted_columns_win_over_the_top_level_fallthrough() {
         let c = column(&pods(), "phase");
-        assert_eq!(c.sql_type, SqlType::Text);
+        assert_eq!(c.accepts, &[SqlType::Text]);
         assert_eq!(c.projection, Projection::Text("/status/phase"));
         assert_eq!(
             column(&pods(), "node").projection,
@@ -463,7 +512,17 @@ mod tests {
     fn unknown_columns_fall_through_to_a_top_level_lookup() {
         let c = column(&widgets(), "spec");
         assert_eq!(c.projection, Projection::TopLevel);
-        assert_eq!(c.sql_type, SqlType::Jsonb);
+        assert_eq!(
+            c.accepts,
+            &[
+                SqlType::Jsonb,
+                SqlType::Text,
+                SqlType::Int8,
+                SqlType::Bool,
+                SqlType::Timestamptz
+            ],
+            "a top-level field takes the type its DDL declares"
+        );
         assert_eq!(
             column(&widgets(), "anything_at_all").projection,
             Projection::TopLevel
@@ -518,5 +577,8 @@ mod tests {
     fn sql_type_names_are_the_ddl_spellings() {
         assert_eq!(SqlType::Text.name(), "text");
         assert_eq!(SqlType::Jsonb.name(), "jsonb");
+        assert_eq!(SqlType::Int8.name(), "bigint");
+        assert_eq!(SqlType::Bool.name(), "boolean");
+        assert_eq!(SqlType::Timestamptz.name(), "timestamptz");
     }
 }

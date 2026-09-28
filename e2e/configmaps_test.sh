@@ -228,6 +228,64 @@ got="$(kubectl_e2e get clustergadget g1 -o jsonpath='{.spec.size}')"
 kubectl_e2e delete clustergadget g1 --ignore-not-found >/dev/null
 echo "inserted and updated with a namespace in raw; the cluster-scoped object has none"
 
+log "#79: columns read and write as the type they are declared"
+# count is declared jsonb and then altered, which is the documented way to type
+# a column of an imported table. The fixture's schema types count, enabled and
+# seenAt, so the API server itself refuses a write of the wrong JSON type: an
+# UPDATE that succeeds has written a number, a boolean and an RFC 3339 string.
+kubectl_e2e delete clustergadget t9 t10 --ignore-not-found >/dev/null
+psql_axiom "DROP FOREIGN TABLE IF EXISTS typed_gadgets;
+            CREATE FOREIGN TABLE typed_gadgets (name text, creation_timestamp timestamptz, count jsonb,
+              enabled boolean, seen_at timestamptz, note text, raw jsonb) SERVER kind
+            OPTIONS (resource 'clustergadgets', group 'example.com', version 'v1', kind 'ClusterGadget', namespaced 'false');
+            ALTER FOREIGN TABLE typed_gadgets ALTER COLUMN count TYPE bigint;"
+# Through raw: an INSERT with no base object would write seen_at under its
+# snake_case name (#97).
+psql_axiom "INSERT INTO typed_gadgets (raw) VALUES
+  ('{\"metadata\":{\"name\":\"t9\"},\"count\":9,\"seenAt\":\"2024-05-01T15:30:00+05:30\",\"note\":\"n\"}'),
+  ('{\"metadata\":{\"name\":\"t10\"},\"count\":10,\"seenAt\":\"2024-01-01T00:00:00Z\"}');" \
+  || fail "INSERT of typed gadgets failed"
+got="$(psql_axiom "SELECT string_agg(name, ',' ORDER BY count DESC) FROM typed_gadgets WHERE name IN ('t9', 't10');")"
+[[ "$got" == "t10,t9" ]] || fail "ORDER BY count DESC gave '$got': 9 must sort below 10, as a number"
+got="$(psql_axiom "SELECT (seen_at = '2024-05-01 10:00:00+00') || '|' || note || '|' || (enabled IS NULL)
+                     FROM typed_gadgets WHERE name = 't9';")"
+[[ "$got" == "true|n|true" ]] || fail "t9 read as '$got', want 'true|n|true': 15:30 at +05:30 is 10:00 UTC, and absent is NULL"
+got="$(psql_axiom "SELECT to_char(creation_timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+                     FROM typed_gadgets WHERE name = 't9';")"
+want="$(kubectl_e2e get clustergadget t9 -o jsonpath='{.metadata.creationTimestamp}')"
+[[ "$got" == "$want" ]] || fail "creation_timestamp reads '$got', the cluster says '$want'"
+psql_axiom "UPDATE typed_gadgets SET enabled = true, count = count + 1 WHERE name = 't9';" \
+  || fail "UPDATE of a boolean and an integer was refused"
+got="$(kubectl_e2e get clustergadget t9 -o jsonpath='{.enabled}|{.count}|{.seenAt}|{.note}')"
+[[ "$got" == "true|10|2024-05-01T15:30:00+05:30|n" ]] \
+  || fail "the cluster has '$got': an untouched seenAt must keep its offset, and note its value"
+# t10 already has a seenAt: setting a field the object lacks would write it
+# under its snake_case name, which the API server prunes (#97).
+psql_axiom "UPDATE typed_gadgets SET seen_at = '2030-01-01 00:00:00+00' WHERE name = 't10';" \
+  || fail "UPDATE of a timestamp was refused"
+got="$(kubectl_e2e get clustergadget t10 -o jsonpath='{.seenAt}')"
+[[ "$got" == "2030-01-01T00:00:00.000000Z" ]] || fail "seenAt was written as '$got'"
+got="$(psql_axiom "DO \$\$ BEGIN UPDATE typed_gadgets SET seen_at = 'infinity' WHERE name = 't10';
+  RAISE EXCEPTION 'unexpected success';
+  EXCEPTION WHEN datetime_field_overflow THEN RAISE NOTICE 'caught % %', SQLSTATE, SQLERRM; END \$\$;" 2>&1 || true)"
+grep -q "caught 22008 .*between years 1 and 9999" <<<"$got" \
+  || fail "a timestamp RFC 3339 cannot express must fail with 22008, got: $got"
+got="$(kubectl_e2e get clustergadget t10 -o jsonpath='{.seenAt}')"
+[[ "$got" == "2030-01-01T00:00:00.000000Z" ]] || fail "the refused UPDATE changed seenAt to '$got'"
+kubectl_e2e delete clustergadget t9 t10 --ignore-not-found >/dev/null
+echo "ordered as numbers, compared as timestamps, and written back as their JSON types"
+
+log "#79: a column declared with a type it does not accept is refused with the ones it does"
+got="$(psql_axiom "DROP FOREIGN TABLE IF EXISTS mistyped_gadgets;
+  CREATE FOREIGN TABLE mistyped_gadgets (name text, count integer) SERVER kind
+    OPTIONS (resource 'clustergadgets', group 'example.com', version 'v1', kind 'ClusterGadget', namespaced 'false');
+  SELECT count(*) FROM mistyped_gadgets;" 2>&1 || true)"
+grep -q 'column "count" must be of type jsonb, text, bigint, boolean or timestamptz' <<<"$got" \
+  || fail "integer is not bigint and must be refused naming the accepted types, got: $got"
+# The refused SELECT rolled back the whole -c string, CREATE included.
+psql_axiom "DROP FOREIGN TABLE IF EXISTS mistyped_gadgets;"
+echo "refused: integer, naming jsonb, text, bigint, boolean and timestamptz"
+
 log "a later page larger than the first shrinks instead of failing the listing (#85)"
 # Tiny ConfigMaps named a-*, then large ones named b-*. A namespaced list comes
 # back in name order, so at the extension's page size of 200 the first page is

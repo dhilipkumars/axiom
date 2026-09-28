@@ -102,18 +102,49 @@ Every table has the same universal columns, then the kind's own top-level
 fields, then `raw`. The [column reference](../generated/columns.md) has the
 full rules; the parts that matter in practice:
 
-**Everything is `text` or `jsonb`.** Numbers come back as text, so a numeric
-comparison is an explicit cast:
+**Imported columns are `text` or `jsonb`.** Numbers come back as text, so a
+numeric comparison is an explicit cast:
 
 ```sql
 SELECT name FROM k8s.apps_deployments
  WHERE ready_replicas::int < replicas::int;
 ```
 
-That is deliberate. An OpenAPI schema often does not constrain a field tightly
-enough to justify a numeric column, and a wrong guess turns the table into a
-cast-error minefield. It also makes an absent field NULL rather than zero,
-which is usually what you want.
+An absent field is NULL rather than zero, which is usually what you want.
+
+**A column's declared type decides how it reads.** Declare a field as the type
+it holds and it reads, compares and sorts as that type, with no cast. That
+works on a table you write yourself and on an imported one:
+
+```sql
+ALTER FOREIGN TABLE k8s.core_events ALTER COLUMN count TYPE bigint;
+ALTER FOREIGN TABLE k8s.core_events ALTER COLUMN type TYPE text;
+ALTER FOREIGN TABLE k8s.core_events ALTER COLUMN reason TYPE text;
+ALTER FOREIGN TABLE k8s.core_events ALTER COLUMN last_timestamp TYPE timestamptz;
+
+SELECT namespace, name, reason, count FROM k8s.core_events
+ WHERE type = 'Warning' AND last_timestamp > now() - interval '1 hour'
+ ORDER BY count DESC;
+```
+
+A kind's own top-level field can be `jsonb`, `text`, `bigint`, `boolean` or
+`timestamptz`. `creation_timestamp` can be `timestamptz` as well as `text`, and a
+Deployment's replica counts can be `bigint` as well as `text`. Any other
+declaration is refused when the table is first queried, with the types the
+column accepts.
+
+Postgres will not change the type of a column a view uses, which includes the
+short-name views `axiom_create_short_names` makes: drop the view, alter the
+table, and create the view again.
+
+The conversion is strict. `text` reads a JSON string, `bigint` a JSON integer,
+`boolean` a JSON boolean, and `timestamptz` an RFC 3339 string such as
+`2024-05-01T10:00:00Z`. A value that is not of the declared type reads as NULL,
+not as an error, so one malformed object cannot break every query on its table.
+Writes go the other way: `SET count = 5` writes the JSON number `5`, and
+`SET immutable = true` the boolean `true`. A timestamp is written in UTC with six
+fractional digits, which every Kubernetes timestamp field accepts, and an
+UPDATE leaves the fields it did not change exactly as they were.
 
 **`raw` always holds the whole object**, and is how to reach anything no column
 promotes:
