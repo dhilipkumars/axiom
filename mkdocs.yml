@@ -27,6 +27,9 @@ exclude_docs: |
 
 theme:
   name: material
+  # Template overrides: the <head> additions every page needs, such as site
+  # verification tags.
+  custom_dir: docs-overrides
   features:
     - navigation.sections
     - navigation.top
