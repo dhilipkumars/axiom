@@ -11,7 +11,7 @@ SELECT d.name, d.replicas, d.ready_replicas
   FROM k8s.apps_deployments d
   JOIN service_owners o ON o.service = d.name
  WHERE d.namespace = 'production'
-   AND d.ready_replicas::int < d.replicas::int;
+   AND d.ready_replicas < d.replicas;
 ```
 
 ## The shape of it

@@ -136,6 +136,50 @@ echo "core=$core_api  new=$new_api"
 # No table carries a bare plural: every name is qualified by its group.
 has_table events && fail "a bare 'events' table exists: $got"
 
+log "#79: imported columns take the types the API server's schemas give them"
+# col_types TABLE COL...: "col type" pairs, in the order given.
+col_types() {
+  local table="$1"; shift
+  local list; list="$(printf "'%s'," "$@")"
+  psql_axiom "SELECT string_agg(a.attname || ' ' || format_type(a.atttypid, NULL), ', ' ORDER BY array_position(ARRAY[${list%,}], a.attname::text))
+                FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+               WHERE n.nspname = '$SCHEMA' AND c.relname = '$table' AND a.attname::text IN (${list%,});"
+}
+got="$(col_types core_events type reason count last_timestamp event_time involved_object creation_timestamp)"
+want="type text, reason text, count bigint, last_timestamp timestamp with time zone, event_time timestamp with time zone, involved_object jsonb, creation_timestamp timestamp with time zone"
+[[ "$got" == "$want" ]] || fail "core_events types:
+  got  $got
+  want $want"
+got="$(col_types events_k8s_io_events note deprecated_count event_time regarding)"
+want="note text, deprecated_count bigint, event_time timestamp with time zone, regarding jsonb"
+[[ "$got" == "$want" ]] || fail "events_k8s_io_events types:
+  got  $got
+  want $want"
+got="$(col_types core_configmaps immutable data)"
+[[ "$got" == "immutable boolean, data jsonb" ]] || fail "core_configmaps types: $got"
+got="$(col_types apps_deployments replicas ready_replicas spec)"
+[[ "$got" == "replicas bigint, ready_replicas bigint, spec jsonb" ]] || fail "apps_deployments types: $got"
+echo "events, configmaps and deployments typed from their schemas"
+
+log "#79: the issue's query runs as written, and every value reads as its type"
+# Before #79, type was jsonb and this was "invalid input syntax for type json".
+psql_axiom "SELECT count(*) FROM $SCHEMA.core_events WHERE type = 'Warning';" >/dev/null \
+  || fail "WHERE type = 'Warning' failed on core_events"
+# A value the object has but the column reads as NULL would be a conversion
+# that does not match what the API server writes. Compared within one scan, so
+# events arriving meanwhile cannot race it.
+got="$(psql_axiom "SELECT count(*) FILTER (WHERE true) || '|' ||
+                          count(*) FILTER (WHERE raw ? 'type' AND type IS NULL) || '|' ||
+                          count(*) FILTER (WHERE raw ? 'count' AND count IS NULL) || '|' ||
+                          count(*) FILTER (WHERE raw->>'lastTimestamp' IS NOT NULL AND last_timestamp IS NULL) || '|' ||
+                          count(*) FILTER (WHERE raw->>'eventTime' IS NOT NULL AND event_time IS NULL) || '|' ||
+                          count(*) FILTER (WHERE creation_timestamp IS NULL)
+                     FROM $SCHEMA.core_events;")"
+IFS='|' read -r total rest <<<"$got"
+[[ "$total" -gt 0 ]] || fail "core_events is empty, so nothing was checked"
+[[ "$rest" == "0|0|0|0|0" ]] || fail "core_events had values reading as NULL (type|count|last|event_time|created): $rest of $total"
+echo "$total events: type, count, lastTimestamp, eventTime and creationTimestamp all read"
+
 # --- the universal columns ----------------------------------------------------------
 
 log "api_version, kind and metadata are populated on a built-in and on a CRD"

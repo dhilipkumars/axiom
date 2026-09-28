@@ -311,14 +311,23 @@ message SubscribeResponse {
   string resource_version = 3;
 }
 
-// SqlType is the Postgres type a discovered column must be declared with.
-// Deliberately narrow: docs/DESIGN.md §5.4 promotes scalars as text and keeps
-// everything structured in jsonb rather than guessing at numeric/date types
-// from an OpenAPI schema that may not constrain them.
+// SqlType is the Postgres type a discovered column is declared with.
+//
+// A field is typed only when its OpenAPI schema names exactly one scalar type
+// (docs/DESIGN.md §5.4, #79); anything structured or ambiguous is jsonb. The
+// declared type is what the extension converts each value to and from.
+//
+// BIGINT, BOOLEAN and TIMESTAMPTZ are sent only to a caller that sets
+// `typed_columns` on its request. An extension that predates them maps an
+// unknown value to "no column" and would silently drop the column from the
+// table it generates, so it gets TEXT and JSONB as before.
 enum SqlType {
   SQL_TYPE_UNSPECIFIED = 0;
   SQL_TYPE_TEXT = 1;
   SQL_TYPE_JSONB = 2;
+  SQL_TYPE_BIGINT = 3;
+  SQL_TYPE_BOOLEAN = 4;
+  SQL_TYPE_TIMESTAMPTZ = 5;
 }
 
 // ColumnSchema is one column of a kind's foreign table.
@@ -354,6 +363,10 @@ message KindSchema {
 
 message DiscoverSchemaRequest {
   GroupVersionKind gvk = 1;
+  // The caller understands SQL_TYPE_BIGINT, SQL_TYPE_BOOLEAN and
+  // SQL_TYPE_TIMESTAMPTZ. Unset, every column is TEXT or JSONB, as it was
+  // before those existed.
+  bool typed_columns = 2;
 }
 
 message DiscoverSchemaResponse {
@@ -369,6 +382,8 @@ message ListKindsRequest {
   // nothing are silently absent from the response rather than an error, so a
   // caller can pass a speculative list.
   repeated string plurals = 2;
+  // As DiscoverSchemaRequest.typed_columns.
+  bool typed_columns = 3;
 }
 
 message ListKindsResponse {

@@ -392,6 +392,9 @@ pub fn list_kinds(
     let req = ListKindsRequest {
         group: group.map(ToOwned::to_owned),
         plurals: plurals.to_vec(),
+        // This extension converts bigint, boolean and timestamptz columns
+        // (#79); without this a gateway sends only text and jsonb.
+        typed_columns: true,
     };
     call(server, |mut c| async move { c.list_kinds(req).await }).map(|resp| resp.kinds)
 }

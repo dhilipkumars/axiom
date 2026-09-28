@@ -1367,8 +1367,10 @@ fn import_options(opts: &[(String, String)]) -> ImportOptions {
 /// Converts one wire schema into the DDL generator's input.
 ///
 /// The column type comes from the wire enum rather than from a name, so a
-/// gateway sending an unspecified type yields no column instead of a column
-/// Postgres would reject at `CREATE` time.
+/// gateway sending an unspecified type -- or one newer than this extension
+/// knows -- yields no column instead of a column Postgres would reject at
+/// `CREATE` time. The gateway sends the typed values only because
+/// [`crate::client::list_kinds`] asks for them.
 fn import_kind_from_wire(k: &crate::proto::v1::KindSchema) -> Option<ImportKind> {
     let gvk = k.gvk.as_ref()?;
     let columns = k
@@ -1378,6 +1380,9 @@ fn import_kind_from_wire(k: &crate::proto::v1::KindSchema) -> Option<ImportKind>
             let sql_type = match crate::proto::v1::SqlType::try_from(c.sql_type).ok()? {
                 crate::proto::v1::SqlType::Text => "text",
                 crate::proto::v1::SqlType::Jsonb => "jsonb",
+                crate::proto::v1::SqlType::Bigint => "bigint",
+                crate::proto::v1::SqlType::Boolean => "boolean",
+                crate::proto::v1::SqlType::Timestamptz => "timestamptz",
                 crate::proto::v1::SqlType::Unspecified => return None,
             };
             Some(ImportColumn {

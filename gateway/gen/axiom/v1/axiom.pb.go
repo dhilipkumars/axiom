@@ -32,16 +32,25 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// SqlType is the Postgres type a discovered column must be declared with.
-// Deliberately narrow: docs/DESIGN.md §5.4 promotes scalars as text and keeps
-// everything structured in jsonb rather than guessing at numeric/date types
-// from an OpenAPI schema that may not constrain them.
+// SqlType is the Postgres type a discovered column is declared with.
+//
+// A field is typed only when its OpenAPI schema names exactly one scalar type
+// (docs/DESIGN.md §5.4, #79); anything structured or ambiguous is jsonb. The
+// declared type is what the extension converts each value to and from.
+//
+// BIGINT, BOOLEAN and TIMESTAMPTZ are sent only to a caller that sets
+// `typed_columns` on its request. An extension that predates them maps an
+// unknown value to "no column" and would silently drop the column from the
+// table it generates, so it gets TEXT and JSONB as before.
 type SqlType int32
 
 const (
 	SqlType_SQL_TYPE_UNSPECIFIED SqlType = 0
 	SqlType_SQL_TYPE_TEXT        SqlType = 1
 	SqlType_SQL_TYPE_JSONB       SqlType = 2
+	SqlType_SQL_TYPE_BIGINT      SqlType = 3
+	SqlType_SQL_TYPE_BOOLEAN     SqlType = 4
+	SqlType_SQL_TYPE_TIMESTAMPTZ SqlType = 5
 )
 
 // Enum value maps for SqlType.
@@ -50,11 +59,17 @@ var (
 		0: "SQL_TYPE_UNSPECIFIED",
 		1: "SQL_TYPE_TEXT",
 		2: "SQL_TYPE_JSONB",
+		3: "SQL_TYPE_BIGINT",
+		4: "SQL_TYPE_BOOLEAN",
+		5: "SQL_TYPE_TIMESTAMPTZ",
 	}
 	SqlType_value = map[string]int32{
 		"SQL_TYPE_UNSPECIFIED": 0,
 		"SQL_TYPE_TEXT":        1,
 		"SQL_TYPE_JSONB":       2,
+		"SQL_TYPE_BIGINT":      3,
+		"SQL_TYPE_BOOLEAN":     4,
+		"SQL_TYPE_TIMESTAMPTZ": 5,
 	}
 )
 
@@ -1288,8 +1303,12 @@ func (x *KindSchema) GetWatchable() bool {
 }
 
 type DiscoverSchemaRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Gvk           *GroupVersionKind      `protobuf:"bytes,1,opt,name=gvk,proto3" json:"gvk,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Gvk   *GroupVersionKind      `protobuf:"bytes,1,opt,name=gvk,proto3" json:"gvk,omitempty"`
+	// The caller understands SQL_TYPE_BIGINT, SQL_TYPE_BOOLEAN and
+	// SQL_TYPE_TIMESTAMPTZ. Unset, every column is TEXT or JSONB, as it was
+	// before those existed.
+	TypedColumns  bool `protobuf:"varint,2,opt,name=typed_columns,json=typedColumns,proto3" json:"typed_columns,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1329,6 +1348,13 @@ func (x *DiscoverSchemaRequest) GetGvk() *GroupVersionKind {
 		return x.Gvk
 	}
 	return nil
+}
+
+func (x *DiscoverSchemaRequest) GetTypedColumns() bool {
+	if x != nil {
+		return x.TypedColumns
+	}
+	return false
 }
 
 type DiscoverSchemaResponse struct {
@@ -1384,7 +1410,9 @@ type ListKindsRequest struct {
 	// If non-empty, only kinds whose plural name appears here. Names that match
 	// nothing are silently absent from the response rather than an error, so a
 	// caller can pass a speculative list.
-	Plurals       []string `protobuf:"bytes,2,rep,name=plurals,proto3" json:"plurals,omitempty"`
+	Plurals []string `protobuf:"bytes,2,rep,name=plurals,proto3" json:"plurals,omitempty"`
+	// As DiscoverSchemaRequest.typed_columns.
+	TypedColumns  bool `protobuf:"varint,3,opt,name=typed_columns,json=typedColumns,proto3" json:"typed_columns,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1431,6 +1459,13 @@ func (x *ListKindsRequest) GetPlurals() []string {
 		return x.Plurals
 	}
 	return nil
+}
+
+func (x *ListKindsRequest) GetTypedColumns() bool {
+	if x != nil {
+		return x.TypedColumns
+	}
+	return false
 }
 
 type ListKindsResponse struct {
@@ -1738,14 +1773,16 @@ const file_axiom_v1_axiom_proto_rawDesc = "" +
 	"namespaced\x120\n" +
 	"\acolumns\x18\x04 \x03(\v2\x16.axiom.v1.ColumnSchemaR\acolumns\x12\x1a\n" +
 	"\bwritable\x18\x05 \x01(\bR\bwritable\x12\x1c\n" +
-	"\twatchable\x18\x06 \x01(\bR\twatchable\"E\n" +
+	"\twatchable\x18\x06 \x01(\bR\twatchable\"j\n" +
 	"\x15DiscoverSchemaRequest\x12,\n" +
-	"\x03gvk\x18\x01 \x01(\v2\x1a.axiom.v1.GroupVersionKindR\x03gvk\"F\n" +
+	"\x03gvk\x18\x01 \x01(\v2\x1a.axiom.v1.GroupVersionKindR\x03gvk\x12#\n" +
+	"\rtyped_columns\x18\x02 \x01(\bR\ftypedColumns\"F\n" +
 	"\x16DiscoverSchemaResponse\x12,\n" +
-	"\x06schema\x18\x01 \x01(\v2\x14.axiom.v1.KindSchemaR\x06schema\"Q\n" +
+	"\x06schema\x18\x01 \x01(\v2\x14.axiom.v1.KindSchemaR\x06schema\"v\n" +
 	"\x10ListKindsRequest\x12\x19\n" +
 	"\x05group\x18\x01 \x01(\tH\x00R\x05group\x88\x01\x01\x12\x18\n" +
-	"\aplurals\x18\x02 \x03(\tR\apluralsB\b\n" +
+	"\aplurals\x18\x02 \x03(\tR\aplurals\x12#\n" +
+	"\rtyped_columns\x18\x03 \x01(\bR\ftypedColumnsB\b\n" +
 	"\x06_group\"?\n" +
 	"\x11ListKindsResponse\x12*\n" +
 	"\x05kinds\x18\x01 \x03(\v2\x14.axiom.v1.KindSchemaR\x05kinds\"\x0e\n" +
@@ -1763,11 +1800,14 @@ const file_axiom_v1_axiom_proto_rawDesc = "" +
 	"\x0fopenapi_fetches\x18\t \x01(\x04R\x0eopenapiFetches\x124\n" +
 	"\x16openapi_group_versions\x18\n" +
 	" \x01(\x04R\x14openapiGroupVersions\x12%\n" +
-	"\x0eaccess_reviews\x18\v \x01(\x04R\raccessReviews*J\n" +
+	"\x0eaccess_reviews\x18\v \x01(\x04R\raccessReviews*\x8f\x01\n" +
 	"\aSqlType\x12\x18\n" +
 	"\x14SQL_TYPE_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rSQL_TYPE_TEXT\x10\x01\x12\x12\n" +
-	"\x0eSQL_TYPE_JSONB\x10\x022\x86\x05\n" +
+	"\x0eSQL_TYPE_JSONB\x10\x02\x12\x13\n" +
+	"\x0fSQL_TYPE_BIGINT\x10\x03\x12\x14\n" +
+	"\x10SQL_TYPE_BOOLEAN\x10\x04\x12\x18\n" +
+	"\x14SQL_TYPE_TIMESTAMPTZ\x10\x052\x86\x05\n" +
 	"\x0eGatewayService\x125\n" +
 	"\x04Ping\x12\x15.axiom.v1.PingRequest\x1a\x16.axiom.v1.PingResponse\x122\n" +
 	"\x03Get\x12\x14.axiom.v1.GetRequest\x1a\x15.axiom.v1.GetResponse\x125\n" +

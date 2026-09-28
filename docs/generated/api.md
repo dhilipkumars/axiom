@@ -137,13 +137,20 @@ Errors: none beyond transport. Deliberately cheap and side-effect free, so it is
 
 ### SqlType
 
-SqlType is the Postgres type a discovered column must be declared with. Deliberately narrow: docs/DESIGN.md §5.4 promotes scalars as text and keeps everything structured in jsonb rather than guessing at numeric/date types from an OpenAPI schema that may not constrain them.
+SqlType is the Postgres type a discovered column is declared with.
+
+A field is typed only when its OpenAPI schema names exactly one scalar type (docs/DESIGN.md §5.4, #79); anything structured or ambiguous is jsonb. The declared type is what the extension converts each value to and from.
+
+BIGINT, BOOLEAN and TIMESTAMPTZ are sent only to a caller that sets `typed_columns` on its request. An extension that predates them maps an unknown value to "no column" and would silently drop the column from the table it generates, so it gets TEXT and JSONB as before.
 
 | Value | Number | Description |
 |---|---|---|
 | `SQL_TYPE_UNSPECIFIED` | 0 | — |
 | `SQL_TYPE_TEXT` | 1 | — |
 | `SQL_TYPE_JSONB` | 2 | — |
+| `SQL_TYPE_BIGINT` | 3 | — |
+| `SQL_TYPE_BOOLEAN` | 4 | — |
+| `SQL_TYPE_TIMESTAMPTZ` | 5 | — |
 
 ### SubscribeResponse.Type
 
@@ -201,6 +208,7 @@ _No fields._
 | Field | Type | Description |
 |---|---|---|
 | `gvk` | `GroupVersionKind` | — |
+| `typed_columns` | `bool` | The caller understands SQL_TYPE_BIGINT, SQL_TYPE_BOOLEAN and SQL_TYPE_TIMESTAMPTZ. Unset, every column is TEXT or JSONB, as it was before those existed. |
 
 ### DiscoverSchemaResponse
 
@@ -250,6 +258,7 @@ KindSchema is everything the extension needs to define and serve a foreign table
 | Field | Type | Description |
 |---|---|---|
 | `plurals` | repeated `string` | If non-empty, only kinds whose plural name appears here. Names that match nothing are silently absent from the response rather than an error, so a caller can pass a speculative list. |
+| `typed_columns` | `bool` | As DiscoverSchemaRequest.typed_columns. |
 
 ### ListKindsResponse
 

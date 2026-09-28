@@ -64,6 +64,64 @@ func TestDiscoverSchema(t *testing.T) {
 	}
 }
 
+// TestTypedColumnsOnlyForACallerThatAsks keeps typed columns away from an
+// extension that predates them (#79). It maps an unknown wire type to no column
+// at all, so a typed column sent to it would silently vanish from the table it
+// generates. Asked, it gets the types; not asked, what it always got.
+func TestTypedColumnsOnlyForACallerThatAsks(t *testing.T) {
+	t.Parallel()
+	s := discoverServer(t)
+	cm := &axiomv1.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}
+	typesOf := func(k *axiomv1.KindSchema) map[string]axiomv1.SqlType {
+		out := map[string]axiomv1.SqlType{}
+		for _, c := range k.GetColumns() {
+			if c.GetSqlType() == axiomv1.SqlType_SQL_TYPE_UNSPECIFIED {
+				t.Errorf("column %q has no SQL type", c.GetName())
+			}
+			out[c.GetName()] = c.GetSqlType()
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		typed               bool
+		creation, immutable axiomv1.SqlType
+	}{
+		{typed: true, creation: axiomv1.SqlType_SQL_TYPE_TIMESTAMPTZ, immutable: axiomv1.SqlType_SQL_TYPE_BOOLEAN},
+		{typed: false, creation: axiomv1.SqlType_SQL_TYPE_TEXT, immutable: axiomv1.SqlType_SQL_TYPE_JSONB},
+	} {
+		d, err := s.DiscoverSchema(context.Background(), &axiomv1.DiscoverSchemaRequest{Gvk: cm, TypedColumns: tc.typed})
+		if err != nil {
+			t.Fatalf("DiscoverSchema(typed=%v) = %v", tc.typed, err)
+		}
+		l, err := s.ListKinds(context.Background(), &axiomv1.ListKindsRequest{Plurals: []string{"configmaps"}, TypedColumns: tc.typed})
+		if err != nil || len(l.GetKinds()) != 1 {
+			t.Fatalf("ListKinds(typed=%v) = %v, %v", tc.typed, l, err)
+		}
+		for rpc, k := range map[string]*axiomv1.KindSchema{"DiscoverSchema": d.GetSchema(), "ListKinds": l.GetKinds()[0]} {
+			got := typesOf(k)
+			if got["creation_timestamp"] != tc.creation || got["immutable"] != tc.immutable {
+				t.Errorf("%s(typed=%v): creation_timestamp %v, immutable %v; want %v, %v",
+					rpc, tc.typed, got["creation_timestamp"], got["immutable"], tc.creation, tc.immutable)
+			}
+			if got["name"] != axiomv1.SqlType_SQL_TYPE_TEXT || got["data"] != axiomv1.SqlType_SQL_TYPE_JSONB {
+				t.Errorf("%s(typed=%v): name %v, data %v; the untyped columns must not change", rpc, tc.typed, got["name"], got["data"])
+			}
+		}
+	}
+}
+
+func TestEveryColumnTypeHasAWireName(t *testing.T) {
+	t.Parallel()
+	for _, ct := range []k8s.ColumnType{k8s.ColumnText, k8s.ColumnJSONB, k8s.ColumnBigint, k8s.ColumnBoolean, k8s.ColumnTimestamptz} {
+		if sqlTypeToProto(ct) == axiomv1.SqlType_SQL_TYPE_UNSPECIFIED {
+			t.Errorf("%v has no wire type", ct)
+		}
+	}
+	if got := sqlTypeToProto(k8s.ColumnType(99)); got != axiomv1.SqlType_SQL_TYPE_UNSPECIFIED {
+		t.Errorf("an unknown type went on the wire as %v", got)
+	}
+}
+
 func TestDiscoverSchemaErrors(t *testing.T) {
 	t.Parallel()
 	s := discoverServer(t)

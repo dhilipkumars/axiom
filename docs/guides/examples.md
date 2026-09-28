@@ -58,12 +58,12 @@ object — deployments that never finished rolling out:
 ```sql
 SELECT namespace, name, replicas, ready_replicas
 FROM k8s.apps_deployments
-WHERE coalesce(ready_replicas, '0')::int < replicas::int;
+WHERE coalesce(ready_replicas, 0) < replicas;
 ```
 
-Promoted columns are `text` on purpose, so the cast is yours and a missing
-field is `NULL` rather than `0`. Anything no column promotes is still reachable
-through `raw`:
+The replica counts are `bigint`, so they compare as numbers with no cast, and a
+missing field is `NULL` rather than `0`. Anything no column promotes is still
+reachable through `raw`:
 
 ```sql
 SELECT namespace, name

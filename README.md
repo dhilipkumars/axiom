@@ -81,13 +81,14 @@ a handful of field selectors. SQL gives you the whole object:
 -- deployments that never finished rolling out
 SELECT namespace, name, replicas, ready_replicas
 FROM k8s.apps_deployments
-WHERE coalesce(ready_replicas, '0')::int < replicas::int;
+WHERE coalesce(ready_replicas, 0) < replicas;
 ```
 
-Promoted columns are `text` on purpose — an OpenAPI schema rarely constrains a
-field tightly enough to justify a numeric column, so the cast is yours to make
-and a missing field is `NULL` rather than `0`. Anything no column promotes is
-still reachable through `raw`, the whole object as `jsonb`:
+Columns take the type the kind's schema gives them — `replicas` is a `bigint`,
+`creation_timestamp` a `timestamptz`, an event's `type` a `text` — so they
+compare and sort with no cast, and a missing field is `NULL` rather than `0`.
+Anything no column promotes is still reachable through `raw`, the whole object
+as `jsonb`:
 
 ```sql
 SELECT namespace, name

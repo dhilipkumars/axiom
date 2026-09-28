@@ -1,0 +1,126 @@
+{
+ "_source": "Trimmed from kubernetes/kubernetes v1.37.0 api/openapi-spec/v3/apis__events.k8s.io__v1_openapi.json: kinds whole bar descriptions, referenced components reduced to their own type. See testdata/openapi/README.md.",
+ "components": {
+  "schemas": {
+   "io.k8s.api.core.v1.EventSource": {
+    "type": "object"
+   },
+   "io.k8s.api.core.v1.ObjectReference": {
+    "type": "object"
+   },
+   "io.k8s.api.events.v1.Event": {
+    "properties": {
+     "action": {
+      "type": "string"
+     },
+     "apiVersion": {
+      "type": "string"
+     },
+     "deprecatedCount": {
+      "format": "int32",
+      "type": "integer"
+     },
+     "deprecatedFirstTimestamp": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.Time"
+       }
+      ]
+     },
+     "deprecatedLastTimestamp": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.Time"
+       }
+      ]
+     },
+     "deprecatedSource": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.api.core.v1.EventSource"
+       }
+      ]
+     },
+     "eventTime": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.MicroTime"
+       }
+      ]
+     },
+     "kind": {
+      "type": "string"
+     },
+     "metadata": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"
+       }
+      ]
+     },
+     "note": {
+      "type": "string"
+     },
+     "reason": {
+      "type": "string"
+     },
+     "regarding": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.api.core.v1.ObjectReference"
+       }
+      ]
+     },
+     "related": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.api.core.v1.ObjectReference"
+       }
+      ]
+     },
+     "reportingController": {
+      "type": "string"
+     },
+     "reportingInstance": {
+      "type": "string"
+     },
+     "series": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.api.events.v1.EventSeries"
+       }
+      ]
+     },
+     "type": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "eventTime"
+    ],
+    "type": "object",
+    "x-kubernetes-group-version-kind": [
+     {
+      "group": "events.k8s.io",
+      "kind": "Event",
+      "version": "v1"
+     }
+    ]
+   },
+   "io.k8s.api.events.v1.EventSeries": {
+    "type": "object"
+   },
+   "io.k8s.apimachinery.pkg.apis.meta.v1.MicroTime": {
+    "format": "date-time",
+    "type": "string"
+   },
+   "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta": {
+    "type": "object"
+   },
+   "io.k8s.apimachinery.pkg.apis.meta.v1.Time": {
+    "format": "date-time",
+    "type": "string"
+   }
+  }
+ }
+}

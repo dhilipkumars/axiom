@@ -165,6 +165,18 @@ avoid torn reads during a concurrent scan.
   original "promote scalars as `text`" rule, whose objection -- that guessing
   types from a loose OpenAPI schema makes a cast-error minefield -- is answered
   by never guessing: types come from the declaration, and a mismatch is NULL.
+  `IMPORT FOREIGN SCHEMA` declares those types from the kind's OpenAPI
+  schema: a top-level field is `text`, `bigint`, `boolean` or `timestamptz`
+  only when its schema names exactly that one scalar type, inline or through
+  one reference (how Kubernetes spells `meta.v1.Time`), and `jsonb` otherwise
+  -- including `oneOf`/`anyOf` (IntOrString, Quantity), int-or-string,
+  preserve-unknown-fields, and `number`, which the extension cannot hold
+  exactly. The gateway sends typed columns only to an extension that sets
+  `typed_columns` on its request: one that predates them maps an unknown wire
+  type to no column, so a newer gateway would otherwise silently drop columns
+  from the tables an older extension generates. Postgres may be upgraded on a
+  different schedule from the gateway, so the negotiation is per request, not
+  per release.
 - **What a deployment serves** (added in Phase 4): removing the hardcoded kind
   registry would otherwise have widened the gateway to everything in the
   cluster, so the served set is an explicit `--serve` allowlist, with the

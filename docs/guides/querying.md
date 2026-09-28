@@ -102,36 +102,40 @@ Every table has the same universal columns, then the kind's own top-level
 fields, then `raw`. The [column reference](../generated/columns.md) has the
 full rules; the parts that matter in practice:
 
-**Imported columns are `text` or `jsonb`.** Numbers come back as text, so a
-numeric comparison is an explicit cast:
+**Columns have the type the kind's schema gives them.** A field whose OpenAPI
+schema names one scalar type is `text`, `bigint`, `boolean` or `timestamptz`;
+anything else is `jsonb`. So the queries you would write just work:
 
 ```sql
-SELECT name FROM k8s.apps_deployments
- WHERE ready_replicas::int < replicas::int;
-```
-
-An absent field is NULL rather than zero, which is usually what you want.
-
-**A column's declared type decides how it reads.** Declare a field as the type
-it holds and it reads, compares and sorts as that type, with no cast. That
-works on a table you write yourself and on an imported one:
-
-```sql
-ALTER FOREIGN TABLE k8s.core_events ALTER COLUMN count TYPE bigint;
-ALTER FOREIGN TABLE k8s.core_events ALTER COLUMN type TYPE text;
-ALTER FOREIGN TABLE k8s.core_events ALTER COLUMN reason TYPE text;
-ALTER FOREIGN TABLE k8s.core_events ALTER COLUMN last_timestamp TYPE timestamptz;
-
 SELECT namespace, name, reason, count FROM k8s.core_events
  WHERE type = 'Warning' AND last_timestamp > now() - interval '1 hour'
  ORDER BY count DESC;
+
+SELECT name FROM k8s.apps_deployments WHERE ready_replicas < replicas;
 ```
 
-A kind's own top-level field can be `jsonb`, `text`, `bigint`, `boolean` or
-`timestamptz`. `creation_timestamp` can be `timestamptz` as well as `text`, and a
-Deployment's replica counts can be `bigint` as well as `text`. Any other
-declaration is refused when the table is first queried, with the types the
-column accepts.
+An absent field is NULL rather than zero, which is usually what you want. Fields
+that can hold more than one type, such as a quantity (`500m`) or a `maxSurge`
+(`25%` or `2`), stay `jsonb`; compare quantities with `axiom_quantity()`. The
+[column reference](../generated/columns.md) has the exact rule.
+
+**Tables imported before this keep their old types** — `text` for
+`creation_timestamp` and the replica counts, `jsonb` for every top-level field —
+and keep working unchanged. Re-import to get the types, or change one column in
+place; the declared type is what decides how a column reads:
+
+```sql
+ALTER FOREIGN TABLE k8s.core_events ALTER COLUMN count TYPE bigint;
+```
+
+A query written for the old types fails loudly after a re-import rather than
+answering differently: `type->>0` on a `text` column is `operator does not
+exist`. Write `type = 'Warning'` instead.
+
+A kind's own top-level field can be declared `jsonb`, `text`, `bigint`, `boolean`
+or `timestamptz`. `creation_timestamp` can be `timestamptz` or `text`, and a
+Deployment's replica counts `bigint` or `text`. Any other declaration is refused
+when the table is first queried, with the types the column accepts.
 
 Postgres will not change the type of a column a view uses, which includes the
 short-name views `axiom_create_short_names` makes: drop the view, alter the
