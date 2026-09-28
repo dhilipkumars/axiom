@@ -23,7 +23,8 @@ use crate::cache::CacheMode;
 pub struct ImportColumn {
     /// SQL column name.
     pub name: String,
-    /// SQL type name, already narrowed to `text` or `jsonb`.
+    /// SQL type name, already narrowed to one this extension converts:
+    /// `text`, `jsonb`, `bigint`, `boolean` or `timestamptz`.
     pub sql_type: &'static str,
 }
 

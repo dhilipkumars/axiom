@@ -1,0 +1,292 @@
+{
+ "_source": "Trimmed from kubernetes/kubernetes v1.37.0 api/openapi-spec/v3/api__v1_openapi.json: kinds whole bar descriptions, referenced components reduced to their own type. See testdata/openapi/README.md.",
+ "components": {
+  "schemas": {
+   "io.k8s.api.core.v1.ConfigMap": {
+    "properties": {
+     "apiVersion": {
+      "type": "string"
+     },
+     "binaryData": {
+      "additionalProperties": {},
+      "type": "object"
+     },
+     "data": {
+      "additionalProperties": {},
+      "type": "object"
+     },
+     "immutable": {
+      "type": "boolean"
+     },
+     "kind": {
+      "type": "string"
+     },
+     "metadata": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"
+       }
+      ]
+     }
+    },
+    "type": "object",
+    "x-kubernetes-group-version-kind": [
+     {
+      "group": "",
+      "kind": "ConfigMap",
+      "version": "v1"
+     }
+    ]
+   },
+   "io.k8s.api.core.v1.Event": {
+    "properties": {
+     "action": {
+      "type": "string"
+     },
+     "apiVersion": {
+      "type": "string"
+     },
+     "count": {
+      "format": "int32",
+      "type": "integer"
+     },
+     "eventTime": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.MicroTime"
+       }
+      ]
+     },
+     "firstTimestamp": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.Time"
+       }
+      ]
+     },
+     "involvedObject": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.api.core.v1.ObjectReference"
+       }
+      ]
+     },
+     "kind": {
+      "type": "string"
+     },
+     "lastTimestamp": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.Time"
+       }
+      ]
+     },
+     "message": {
+      "type": "string"
+     },
+     "metadata": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"
+       }
+      ]
+     },
+     "reason": {
+      "type": "string"
+     },
+     "related": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.api.core.v1.ObjectReference"
+       }
+      ]
+     },
+     "reportingComponent": {
+      "type": "string"
+     },
+     "reportingInstance": {
+      "type": "string"
+     },
+     "series": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.api.core.v1.EventSeries"
+       }
+      ]
+     },
+     "source": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.api.core.v1.EventSource"
+       }
+      ]
+     },
+     "type": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "metadata",
+     "involvedObject"
+    ],
+    "type": "object",
+    "x-kubernetes-group-version-kind": [
+     {
+      "group": "",
+      "kind": "Event",
+      "version": "v1"
+     }
+    ]
+   },
+   "io.k8s.api.core.v1.EventSeries": {
+    "type": "object"
+   },
+   "io.k8s.api.core.v1.EventSource": {
+    "type": "object"
+   },
+   "io.k8s.api.core.v1.ObjectReference": {
+    "type": "object"
+   },
+   "io.k8s.api.core.v1.Pod": {
+    "properties": {
+     "apiVersion": {
+      "type": "string"
+     },
+     "kind": {
+      "type": "string"
+     },
+     "metadata": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"
+       }
+      ]
+     },
+     "spec": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.api.core.v1.PodSpec"
+       }
+      ]
+     },
+     "status": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.api.core.v1.PodStatus"
+       }
+      ]
+     }
+    },
+    "type": "object",
+    "x-kubernetes-group-version-kind": [
+     {
+      "group": "",
+      "kind": "Pod",
+      "version": "v1"
+     }
+    ]
+   },
+   "io.k8s.api.core.v1.PodSpec": {
+    "type": "object"
+   },
+   "io.k8s.api.core.v1.PodStatus": {
+    "type": "object"
+   },
+   "io.k8s.api.core.v1.Secret": {
+    "properties": {
+     "apiVersion": {
+      "type": "string"
+     },
+     "data": {
+      "additionalProperties": {},
+      "type": "object"
+     },
+     "immutable": {
+      "type": "boolean"
+     },
+     "kind": {
+      "type": "string"
+     },
+     "metadata": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"
+       }
+      ]
+     },
+     "stringData": {
+      "additionalProperties": {},
+      "type": "object"
+     },
+     "type": {
+      "type": "string"
+     }
+    },
+    "type": "object",
+    "x-kubernetes-group-version-kind": [
+     {
+      "group": "",
+      "kind": "Secret",
+      "version": "v1"
+     }
+    ]
+   },
+   "io.k8s.api.core.v1.Service": {
+    "properties": {
+     "apiVersion": {
+      "type": "string"
+     },
+     "kind": {
+      "type": "string"
+     },
+     "metadata": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"
+       }
+      ]
+     },
+     "spec": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.api.core.v1.ServiceSpec"
+       }
+      ]
+     },
+     "status": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.api.core.v1.ServiceStatus"
+       }
+      ]
+     }
+    },
+    "type": "object",
+    "x-kubernetes-group-version-kind": [
+     {
+      "group": "",
+      "kind": "Service",
+      "version": "v1"
+     }
+    ]
+   },
+   "io.k8s.api.core.v1.ServiceSpec": {
+    "type": "object"
+   },
+   "io.k8s.api.core.v1.ServiceStatus": {
+    "type": "object"
+   },
+   "io.k8s.apimachinery.pkg.apis.meta.v1.MicroTime": {
+    "format": "date-time",
+    "type": "string"
+   },
+   "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta": {
+    "type": "object"
+   },
+   "io.k8s.apimachinery.pkg.apis.meta.v1.Time": {
+    "format": "date-time",
+    "type": "string"
+   }
+  }
+ }
+}

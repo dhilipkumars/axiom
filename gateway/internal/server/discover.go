@@ -12,20 +12,36 @@ import (
 )
 
 // sqlTypeToProto maps the discovered column type onto the wire enum.
+//
+// Unspecified for a type with no wire name, which the extension turns into no
+// column. Mapping it to jsonb instead would declare a column whose type nobody
+// chose.
 func sqlTypeToProto(t k8s.ColumnType) axiomv1.SqlType {
-	if t == k8s.ColumnText {
+	switch t {
+	case k8s.ColumnText:
 		return axiomv1.SqlType_SQL_TYPE_TEXT
+	case k8s.ColumnJSONB:
+		return axiomv1.SqlType_SQL_TYPE_JSONB
+	case k8s.ColumnBigint:
+		return axiomv1.SqlType_SQL_TYPE_BIGINT
+	case k8s.ColumnBoolean:
+		return axiomv1.SqlType_SQL_TYPE_BOOLEAN
+	case k8s.ColumnTimestamptz:
+		return axiomv1.SqlType_SQL_TYPE_TIMESTAMPTZ
 	}
-	return axiomv1.SqlType_SQL_TYPE_JSONB
+	return axiomv1.SqlType_SQL_TYPE_UNSPECIFIED
 }
 
-// kindToProto converts a discovered kind to its wire form.
-func kindToProto(k k8s.KindInfo) *axiomv1.KindSchema {
+// kindToProto converts a discovered kind to its wire form, with typed columns
+// only for a caller that said it understands them (#79). An extension that
+// predates them maps an unknown type to no column, so sending one would
+// silently drop the column from the table it generates.
+func kindToProto(k k8s.KindInfo, typed bool) *axiomv1.KindSchema {
 	cols := make([]*axiomv1.ColumnSchema, 0, len(k.Columns))
 	for _, c := range k.Columns {
 		cols = append(cols, &axiomv1.ColumnSchema{
 			Name:    c.Name,
-			SqlType: sqlTypeToProto(c.Type),
+			SqlType: sqlTypeToProto(c.TypeFor(typed)),
 			Source:  c.Source,
 		})
 	}
@@ -65,7 +81,7 @@ func (s *Server) DiscoverSchema(ctx context.Context, req *axiomv1.DiscoverSchema
 		slog.String("gvk", gvk.String()),
 		slog.String("plural", info.Plural),
 		slog.Int("columns", len(info.Columns)))
-	return &axiomv1.DiscoverSchemaResponse{Schema: kindToProto(info)}, nil
+	return &axiomv1.DiscoverSchemaResponse{Schema: kindToProto(info, req.GetTypedColumns())}, nil
 }
 
 // maxPluralFilter bounds the LIMIT TO list a caller may send. IMPORT FOREIGN
@@ -113,7 +129,7 @@ func (s *Server) ListKinds(ctx context.Context, req *axiomv1.ListKindsRequest) (
 	}
 	resp := &axiomv1.ListKindsResponse{Kinds: make([]*axiomv1.KindSchema, 0, len(kinds))}
 	for _, k := range kinds {
-		resp.Kinds = append(resp.Kinds, kindToProto(k))
+		resp.Kinds = append(resp.Kinds, kindToProto(k, req.GetTypedColumns()))
 	}
 	s.log.LogAttrs(ctx, slog.LevelInfo, "list_kinds",
 		slog.Bool("group_filter", group != nil),

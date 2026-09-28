@@ -58,12 +58,12 @@ object — deployments that never finished rolling out:
 ```sql
 SELECT namespace, name, replicas, ready_replicas
 FROM k8s.apps_deployments
-WHERE coalesce(ready_replicas, '0')::int < replicas::int;
+WHERE coalesce(ready_replicas, 0) < replicas;
 ```
 
-Promoted columns are `text` on purpose, so the cast is yours and a missing
-field is `NULL` rather than `0`. Anything no column promotes is still reachable
-through `raw`:
+The replica counts are `bigint`, so they compare as numbers with no cast, and a
+missing field is `NULL` rather than `0`. Anything no column promotes is still
+reachable through `raw`:
 
 ```sql
 SELECT namespace, name
@@ -133,17 +133,16 @@ and events arrive as `core_events` and `events_k8s_io_events`.
 The pod's live state and the warning that explains it, on one row:
 
 ```sql
-SELECT p.name, p.phase, e.reason #>> '{}' AS reason, e.message #>> '{}' AS message
+SELECT p.name, p.phase, e.reason AS reason, e.message AS message
   FROM k8s.core_events e
   JOIN k8s.core_pods p ON p.namespace = e.namespace
                       AND p.name = e.involved_object->>'name'
- WHERE e.type #>> '{}' = 'Warning'
+ WHERE e.type = 'Warning'
    AND e.involved_object->>'kind' = 'Pod';
 ```
 
-Event fields such as `type` and `reason` arrive as scalar `jsonb`, so
-`#>> '{}'` unwraps them to text. `type = 'Warning'` does not compare text
-with text; it tries to parse `Warning` as JSON and fails.
+Event fields such as `type`, `reason` and `message` are `text` columns, because
+the event's schema declares them strings, so they compare with no conversion.
 
 ### Quantities are strings until you convert them
 
@@ -186,9 +185,9 @@ owner AS (
     FROM k8s.apps_replicasets r),
 warn AS (
   SELECT e.namespace, e.involved_object->>'name' AS pod,
-         count(*) AS warnings, max(e.reason #>> '{}') AS why
+         count(*) AS warnings, max(e.reason) AS why
     FROM k8s.core_events e
-   WHERE e.type #>> '{}' = 'Warning' AND e.involved_object->>'kind' = 'Pod'
+   WHERE e.type = 'Warning' AND e.involved_object->>'kind' = 'Pod'
    GROUP BY 1, 2)
 SELECT coalesce(o.workload, s.pod) AS workload,
        count(*) AS pods,
@@ -291,12 +290,12 @@ CREATE TABLE tenants (namespace text PRIMARY KEY, customer text, plan text);
 Which customers are hit by a failing pod right now, and why:
 
 ```sql
-SELECT t.customer, t.plan, p.name AS pod, e.reason #>> '{}' AS reason
+SELECT t.customer, t.plan, p.name AS pod, e.reason AS reason
   FROM tenants t
   JOIN k8s.core_pods p ON p.namespace = t.namespace
   JOIN k8s.core_events e ON e.namespace = p.namespace
                         AND e.involved_object->>'name' = p.name
- WHERE e.type #>> '{}' = 'Warning'
+ WHERE e.type = 'Warning'
    AND e.involved_object->>'kind' = 'Pod';
 ```
 

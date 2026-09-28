@@ -275,6 +275,22 @@ got="$(kubectl_e2e get clustergadget t10 -o jsonpath='{.seenAt}')"
 kubectl_e2e delete clustergadget t9 t10 --ignore-not-found >/dev/null
 echo "ordered as numbers, compared as timestamps, and written back as their JSON types"
 
+log "#79: IMPORT types a CRD's top-level fields from the API server's own schema"
+# The fixture declares count an integer, enabled a boolean, seenAt a date-time
+# and note a string; spec preserves unknown fields and so promises nothing.
+psql_axiom "DROP SCHEMA IF EXISTS gadgets_import CASCADE; CREATE SCHEMA gadgets_import;
+            IMPORT FOREIGN SCHEMA k8s LIMIT TO (example_com_clustergadgets) FROM SERVER kind INTO gadgets_import;"
+got="$(psql_axiom "SELECT string_agg(a.attname || ' ' || format_type(a.atttypid, NULL), ', ' ORDER BY a.attname)
+                     FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'gadgets_import' AND c.relname = 'example_com_clustergadgets'
+                      AND a.attname IN ('count', 'enabled', 'note', 'seen_at', 'spec');")"
+want="count bigint, enabled boolean, note text, seen_at timestamp with time zone, spec jsonb"
+[[ "$got" == "$want" ]] || fail "imported ClusterGadget types:
+  got  $got
+  want $want"
+psql_axiom "DROP SCHEMA gadgets_import CASCADE;"
+echo "$got"
+
 log "#79: a column declared with a type it does not accept is refused with the ones it does"
 got="$(psql_axiom "DROP FOREIGN TABLE IF EXISTS mistyped_gadgets;
   CREATE FOREIGN TABLE mistyped_gadgets (name text, count integer) SERVER kind

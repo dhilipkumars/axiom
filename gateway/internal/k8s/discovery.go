@@ -133,7 +133,7 @@ type Discovery struct {
 	// re-fetches and re-parses each group-version's document once per kind in
 	// it: 65 listable kinds across 13 group-versions on a bare cluster, with
 	// the core/v1 document alone at 1.6 MB.
-	schemaCache map[schema.GroupVersion]map[schema.GroupVersionKind][]string
+	schemaCache map[schema.GroupVersion]map[schema.GroupVersionKind][]Field
 	// pathsCache is the /openapi/v3 index, which client-go refetches on every
 	// Paths() call.
 	pathsCache map[string]openapi.GroupVersion
@@ -165,7 +165,7 @@ func NewDiscovery(disco discovery.CachedDiscoveryInterface, allow Allowlist, acc
 		openapi:     disco.OpenAPIV3(),
 		allow:       allow,
 		cache:       make(map[schema.GroupVersion]resourceCacheEntry),
-		schemaCache: make(map[schema.GroupVersion]map[schema.GroupVersionKind][]string),
+		schemaCache: make(map[schema.GroupVersion]map[schema.GroupVersionKind][]Field),
 	}
 }
 
@@ -323,7 +323,7 @@ func hasVerb(verbs metav1.Verbs, want string) bool {
 }
 
 // kindInfo assembles a KindInfo from an APIResource plus its schema fields.
-func kindInfo(gvk schema.GroupVersionKind, r metav1.APIResource, topLevel []string) KindInfo {
+func kindInfo(gvk schema.GroupVersionKind, r metav1.APIResource, topLevel []Field) KindInfo {
 	return KindInfo{
 		GVK:        gvk,
 		Plural:     r.Name,
@@ -481,11 +481,14 @@ func (d *Discovery) Kinds(ctx context.Context, group *string, plurals []string) 
 }
 
 // openAPIDoc is the slice of an OpenAPI v3 document this package reads: the
-// component schemas, each tagged with the GVKs it describes.
+// component schemas, each tagged with the GVKs it describes. A component's own
+// type is read too, because a top-level field that references one -- a
+// timestamp referencing meta.v1.Time -- takes its type from it.
 type openAPIDoc struct {
 	Components struct {
 		Schemas map[string]struct {
-			Properties map[string]json.RawMessage `json:"properties"`
+			propSchema
+			Properties map[string]propSchema `json:"properties"`
 			GVKs       []struct {
 				Group   string `json:"group"`
 				Version string `json:"version"`
@@ -532,13 +535,14 @@ func (d *Discovery) forgetSchema(gv schema.GroupVersion) {
 }
 
 // schemaFor returns every kind described by one group-version's OpenAPI
-// document, mapped to its top-level property names, parsing the document once.
+// document, mapped to its top-level fields and the column type each supports,
+// parsing the document once.
 //
 // Kinds are located by their x-kubernetes-group-version-kind extension rather
 // than by the component key's Go-package-derived spelling, which differs
 // between built-ins ("io.k8s.api.core.v1.Pod") and CRDs and is not a stable
 // contract. Caller must hold schemaMu.
-func (d *Discovery) schemaFor(gv schema.GroupVersion) (map[schema.GroupVersionKind][]string, error) {
+func (d *Discovery) schemaFor(gv schema.GroupVersion) (map[schema.GroupVersionKind][]Field, error) {
 	if cached, ok := d.schemaCache[gv]; ok {
 		return cached, nil
 	}
@@ -554,8 +558,8 @@ func (d *Discovery) schemaFor(gv schema.GroupVersion) (map[schema.GroupVersionKi
 	if err != nil {
 		return nil, fmt.Errorf("openapi: schema for %s: %w", gv.String(), err)
 	}
-	var doc openAPIDoc
-	if err := json.Unmarshal(raw, &doc); err != nil {
+	out, schemas, err := fieldsByKind(raw)
+	if err != nil {
 		return nil, fmt.Errorf("openapi: parse schema for %s: %w", gv.String(), err)
 	}
 	d.openapiFetches.Add(1)
@@ -568,20 +572,45 @@ func (d *Discovery) schemaFor(gv schema.GroupVersion) (map[schema.GroupVersionKi
 	d.log.Info("openapi_fetch",
 		slog.String("group_version", gv.String()),
 		slog.Int("bytes", len(raw)),
-		slog.Int("schemas", len(doc.Components.Schemas)))
-	out := make(map[schema.GroupVersionKind][]string, len(doc.Components.Schemas))
+		slog.Int("schemas", schemas))
+	d.schemaCache[gv] = out
+	return out, nil
+}
+
+// fieldsByKind parses one group-version's OpenAPI document into every kind it
+// describes, each mapped to its top-level fields and the column type each
+// supports. It also returns how many component schemas the document holds.
+//
+// Kinds are located by their x-kubernetes-group-version-kind extension rather
+// than by the component key's spelling, which differs between built-ins and
+// CRDs and is not a stable contract. References resolve against the same
+// document, which is where Kubernetes puts meta.v1.Time and the rest.
+func fieldsByKind(raw []byte) (map[schema.GroupVersionKind][]Field, int, error) {
+	var doc openAPIDoc
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, 0, err
+	}
+	resolve := func(name string) (propSchema, bool) {
+		c, ok := doc.Components.Schemas[name]
+		return c.propSchema, ok
+	}
+	out := make(map[schema.GroupVersionKind][]Field, len(doc.Components.Schemas))
 	for _, sch := range doc.Components.Schemas {
-		fields := make([]string, 0, len(sch.Properties))
-		for name := range sch.Properties {
-			fields = append(fields, name)
+		if len(sch.GVKs) == 0 {
+			// Only a kind's own schema becomes a table; the rest are here to
+			// be referenced.
+			continue
 		}
-		sort.Strings(fields)
+		fields := make([]Field, 0, len(sch.Properties))
+		for name, prop := range sch.Properties {
+			fields = append(fields, Field{Name: name, Type: columnTypeOf(prop, resolve)})
+		}
+		sort.Slice(fields, func(i, j int) bool { return fields[i].Name < fields[j].Name })
 		for _, t := range sch.GVKs {
 			out[schema.GroupVersionKind{Group: t.Group, Version: t.Version, Kind: t.Kind}] = fields
 		}
 	}
-	d.schemaCache[gv] = out
-	return out, nil
+	return out, len(doc.Components.Schemas), nil
 }
 
 // OpenAPIFetches reports the total number of OpenAPI v3 document fetches performed.
@@ -612,9 +641,9 @@ func (d *Discovery) AccessReviews() uint64 {
 	return 0
 }
 
-// topLevelFields returns the names of a kind's own top-level schema properties,
-// served from the group-version's parsed document.
-func (d *Discovery) topLevelFields(_ context.Context, gvk schema.GroupVersionKind) ([]string, error) {
+// topLevelFields returns a kind's own top-level schema properties and the column
+// type each supports, served from the group-version's parsed document.
+func (d *Discovery) topLevelFields(_ context.Context, gvk schema.GroupVersionKind) ([]Field, error) {
 	if d.openapi == nil {
 		return nil, fmt.Errorf("openapi: gateway has no OpenAPI client configured")
 	}

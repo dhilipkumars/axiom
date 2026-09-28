@@ -1,0 +1,58 @@
+{
+ "_source": "Trimmed from kubernetes/kubernetes v1.37.0 api/openapi-spec/v3/apis__apps__v1_openapi.json: kinds whole bar descriptions, referenced components reduced to their own type. See testdata/openapi/README.md.",
+ "components": {
+  "schemas": {
+   "io.k8s.api.apps.v1.Deployment": {
+    "properties": {
+     "apiVersion": {
+      "type": "string"
+     },
+     "kind": {
+      "type": "string"
+     },
+     "metadata": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"
+       }
+      ]
+     },
+     "spec": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.api.apps.v1.DeploymentSpec"
+       }
+      ]
+     },
+     "status": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.api.apps.v1.DeploymentStatus"
+       }
+      ]
+     }
+    },
+    "required": [
+     "spec"
+    ],
+    "type": "object",
+    "x-kubernetes-group-version-kind": [
+     {
+      "group": "apps",
+      "kind": "Deployment",
+      "version": "v1"
+     }
+    ]
+   },
+   "io.k8s.api.apps.v1.DeploymentSpec": {
+    "type": "object"
+   },
+   "io.k8s.api.apps.v1.DeploymentStatus": {
+    "type": "object"
+   },
+   "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta": {
+    "type": "object"
+   }
+  }
+ }
+}

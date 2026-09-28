@@ -46,6 +46,8 @@ struct Cluster {
     force_conflict_once: AtomicBool,
     /// While set, Subscribe is refused with UNAVAILABLE (gateway "down").
     refuse_subscribe: AtomicBool,
+    /// Whether the last `ListKinds` asked for typed columns (#79).
+    asked_for_typed_columns: AtomicBool,
     /// Live watch feed: every Subscribe stream forwards these after its initial listing.
     events: tokio::sync::broadcast::Sender<SubscribeResponse>,
     /// Every emitted event with its resourceVersion, so a resume replays what
@@ -72,6 +74,7 @@ impl Default for Cluster {
             subscribe_calls: AtomicUsize::new(0),
             force_conflict_once: AtomicBool::new(false),
             refuse_subscribe: AtomicBool::new(false),
+            asked_for_typed_columns: AtomicBool::new(false),
             events,
             event_log: Mutex::new(Vec::new()),
             stream_generation,
@@ -407,8 +410,9 @@ impl GatewayService for Stub {
         &self,
         req: Request<DiscoverSchemaRequest>,
     ) -> Result<Response<DiscoverSchemaResponse>, Status> {
-        let gvk = req.into_inner().gvk.unwrap_or_default();
-        let schema = stub_kind(&gvk.kind)
+        let req = req.into_inner();
+        let gvk = req.gvk.unwrap_or_default();
+        let schema = stub_kind(&gvk.kind, req.typed_columns)
             .ok_or_else(|| Status::invalid_argument(format!("unsupported kind: {}", gvk.kind)))?;
         Ok(Response::new(DiscoverSchemaResponse {
             schema: Some(schema),
@@ -433,9 +437,12 @@ impl GatewayService for Stub {
         req: Request<ListKindsRequest>,
     ) -> Result<Response<ListKindsResponse>, Status> {
         let req = req.into_inner();
+        self.0
+            .asked_for_typed_columns
+            .store(req.typed_columns, Ordering::SeqCst);
         let kinds = ["Pod", "ConfigMap", "Widget"]
             .into_iter()
-            .filter_map(stub_kind)
+            .filter_map(|k| stub_kind(k, req.typed_columns))
             .filter(|k| {
                 let gvk = k.gvk.clone().unwrap_or_default();
                 req.group.as_ref().is_none_or(|g| *g == gvk.group)
@@ -447,17 +454,18 @@ impl GatewayService for Stub {
 }
 
 /// Builds the wire schema for one stub kind, mirroring what the real gateway's
-/// discovery would return.
-fn stub_kind(kind: &str) -> Option<KindSchema> {
-    let text = |name: &str, source: &str| ColumnSchema {
+/// discovery would return: typed columns only for a caller that asks (#79).
+fn stub_kind(kind: &str, typed: bool) -> Option<KindSchema> {
+    let column = |name: &str, t: SqlType, source: &str| ColumnSchema {
         name: name.to_owned(),
-        sql_type: SqlType::Text as i32,
+        sql_type: t as i32,
         source: source.to_owned(),
     };
-    let jsonb = |name: &str, source: &str| ColumnSchema {
-        name: name.to_owned(),
-        sql_type: SqlType::Jsonb as i32,
-        source: source.to_owned(),
+    let text = |name: &str, source: &str| column(name, SqlType::Text, source);
+    let jsonb = |name: &str, source: &str| column(name, SqlType::Jsonb, source);
+    // What a typed column becomes for a caller that did not ask.
+    let typed_or = |name: &str, t: SqlType, untyped: SqlType, source: &str| {
+        column(name, if typed { t } else { untyped }, source)
     };
     let meta = || {
         vec![
@@ -467,7 +475,12 @@ fn stub_kind(kind: &str) -> Option<KindSchema> {
             text("namespace", "metadata.namespace"),
             text("uid", "metadata.uid"),
             text("resource_version", "metadata.resourceVersion"),
-            text("creation_timestamp", "metadata.creationTimestamp"),
+            typed_or(
+                "creation_timestamp",
+                SqlType::Timestamptz,
+                SqlType::Text,
+                "metadata.creationTimestamp",
+            ),
             jsonb("labels", "metadata.labels"),
             jsonb("annotations", "metadata.annotations"),
             jsonb("metadata", "metadata"),
@@ -490,7 +503,12 @@ fn stub_kind(kind: &str) -> Option<KindSchema> {
         "ConfigMap" => {
             columns.push(jsonb("binary_data", "binaryData"));
             columns.push(jsonb("data", "data"));
-            columns.push(jsonb("immutable", "immutable"));
+            columns.push(typed_or(
+                "immutable",
+                SqlType::Boolean,
+                SqlType::Jsonb,
+                "immutable",
+            ));
         }
         _ => {
             columns.push(jsonb("spec", "spec"));
@@ -1103,7 +1121,9 @@ fn import_foreign_schema_generates_usable_tables() {
     );
 
     // An imported table scans through the ordinary path. The stub serves pods,
-    // so this exercises generated DDL end to end rather than only its text.
+    // so this exercises generated DDL end to end rather than only its text --
+    // with creation_timestamp declared timestamptz (see the test below), which
+    // the scan must accept.
     let n: i64 = tx
         .query_one(
             "SELECT count(*) FROM k8s.core_pods WHERE namespace = 'shop'",
@@ -1120,6 +1140,54 @@ fn import_foreign_schema_generates_usable_tables() {
 }
 
 /// LIMIT TO, EXCEPT, and the import options.
+/// #79: IMPORT asks the gateway for typed columns, and declares them.
+#[test]
+fn import_declares_the_typed_columns_it_asked_for() {
+    let stub = start_stub();
+    let mut pg = pg_client();
+    let ca = stub.ca_path.display();
+    let port = stub.addr.port();
+    let mut tx = pg.transaction().expect("begin");
+    tx.batch_execute(&format!(
+        "CREATE SERVER imp FOREIGN DATA WRAPPER axiom_fdw \
+           OPTIONS (endpoint 'https://localhost:{port}', ca_cert '{ca}', rpc_timeout_secs '5');
+         CREATE SCHEMA k8s;
+         IMPORT FOREIGN SCHEMA k8s LIMIT TO (core_configmaps) FROM SERVER imp INTO k8s;"
+    ))
+    .expect("import");
+
+    assert!(
+        stub.cluster.asked_for_typed_columns.load(Ordering::SeqCst),
+        "IMPORT must ask the gateway for typed columns"
+    );
+    let types: Vec<(String, String)> = tx
+        .query(
+            "SELECT a.attname::text, format_type(a.atttypid, a.atttypmod)
+               FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+               JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname = 'k8s' AND c.relname = 'core_configmaps'
+                AND a.attname IN ('name', 'creation_timestamp', 'data', 'immutable')
+              ORDER BY a.attnum",
+            &[],
+        )
+        .expect("column types")
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
+    assert_eq!(
+        types,
+        [
+            ("name", "text"),
+            ("creation_timestamp", "timestamp with time zone"),
+            ("data", "jsonb"),
+            ("immutable", "boolean"),
+        ]
+        .map(|(a, b)| (a.to_owned(), b.to_owned()))
+    );
+
+    tx.rollback().expect("rollback");
+}
+
 #[test]
 fn import_foreign_schema_filters_and_options() {
     let stub = start_stub();

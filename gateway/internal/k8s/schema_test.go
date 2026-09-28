@@ -158,7 +158,7 @@ func TestColumns(t *testing.T) {
 			if !strings.Contains(tc.want, ",namespace,") {
 				ns = false
 			}
-			got := Columns(tc.gvk, ns, tc.topLevel)
+			got := Columns(tc.gvk, ns, objectFields(tc.topLevel...))
 			if joined(got) != tc.want {
 				t.Errorf("Columns() = %s\n              want %s", joined(got), tc.want)
 			}
@@ -169,7 +169,7 @@ func TestColumns(t *testing.T) {
 func TestColumnsAlwaysEndsWithRawAndHasNoDuplicates(t *testing.T) {
 	t.Parallel()
 	got := Columns(schema.GroupVersionKind{Version: "v1", Kind: "Pod"}, true,
-		[]string{"spec", "status", "raw", "name", "metadata", "kind", "apiVersion"})
+		objectFields("spec", "status", "raw", "name", "metadata", "kind", "apiVersion"))
 	if got[len(got)-1].Name != "raw" {
 		t.Errorf("last column = %q, want raw", got[len(got)-1].Name)
 	}
@@ -195,6 +195,14 @@ func TestPromotedColumnsMatchTheExtension(t *testing.T) {
 			"replicas", "ready_replicas", "available_replicas", "updated_replicas",
 		},
 	}
+	// The extension accepts these types for these columns (Column::accepts in
+	// extension/src/schema.rs), and text for each, which is what a caller
+	// that predates typed columns is sent.
+	wantType := map[string]ColumnType{
+		"phase": ColumnText, "node": ColumnText,
+		"replicas": ColumnBigint, "ready_replicas": ColumnBigint,
+		"available_replicas": ColumnBigint, "updated_replicas": ColumnBigint,
+	}
 	if len(promoted) != len(want) {
 		t.Fatalf("promoted has %d kinds, want %d: update the extension's table too", len(promoted), len(want))
 	}
@@ -208,8 +216,11 @@ func TestPromotedColumnsMatchTheExtension(t *testing.T) {
 			if got[i].Name != n {
 				t.Errorf("%s column %d = %q, want %q", gvk, i, got[i].Name, n)
 			}
-			if got[i].Type != ColumnText {
-				t.Errorf("%s column %q is not text; the extension renders these as text", gvk, n)
+			if got[i].Type != wantType[n] {
+				t.Errorf("%s column %q is %v, want %v", gvk, n, got[i].Type, wantType[n])
+			}
+			if got[i].Untyped != ColumnText {
+				t.Errorf("%s column %q untyped is %v; before #79 it was text", gvk, n, got[i].Untyped)
 			}
 		}
 	}
@@ -218,23 +229,72 @@ func TestPromotedColumnsMatchTheExtension(t *testing.T) {
 func TestColumnTypes(t *testing.T) {
 	t.Parallel()
 	cols := Columns(schema.GroupVersionKind{Group: "example.com", Version: "v1", Kind: "Widget"}, true,
-		[]string{"spec", "status"})
-	want := map[string]ColumnType{
-		"api_version": ColumnText, "kind": ColumnText, "metadata": ColumnJSONB,
-		"name": ColumnText, "namespace": ColumnText, "uid": ColumnText,
-		"resource_version": ColumnText, "creation_timestamp": ColumnText,
-		"labels": ColumnJSONB, "annotations": ColumnJSONB,
-		"spec": ColumnJSONB, "status": ColumnJSONB, "raw": ColumnJSONB,
+		[]Field{
+			{Name: "spec", Type: ColumnJSONB},
+			{Name: "status", Type: ColumnJSONB},
+			{Name: "count", Type: ColumnBigint},
+			{Name: "enabled", Type: ColumnBoolean},
+			{Name: "seenAt", Type: ColumnTimestamptz},
+			{Name: "note", Type: ColumnText},
+			// A caller that did not say leaves it zero: jsonb holds anything.
+			{Name: "unknown"},
+		})
+	// Type, and what a caller that predates typed columns gets instead: its
+	// type before #79, text for a metadata scalar and jsonb for a top-level
+	// field.
+	want := map[string][2]ColumnType{
+		"api_version": {ColumnText, ColumnText}, "kind": {ColumnText, ColumnText},
+		"metadata": {ColumnJSONB, ColumnJSONB},
+		"name":     {ColumnText, ColumnText}, "namespace": {ColumnText, ColumnText},
+		"uid": {ColumnText, ColumnText}, "resource_version": {ColumnText, ColumnText},
+		"creation_timestamp": {ColumnTimestamptz, ColumnText},
+		"labels":             {ColumnJSONB, ColumnJSONB}, "annotations": {ColumnJSONB, ColumnJSONB},
+		"spec": {ColumnJSONB, ColumnJSONB}, "status": {ColumnJSONB, ColumnJSONB},
+		"count": {ColumnBigint, ColumnJSONB}, "enabled": {ColumnBoolean, ColumnJSONB},
+		"seen_at": {ColumnTimestamptz, ColumnJSONB}, "note": {ColumnText, ColumnJSONB},
+		"unknown": {ColumnJSONB, ColumnJSONB},
+		"raw":     {ColumnJSONB, ColumnJSONB},
+	}
+	if len(cols) != len(want) {
+		t.Errorf("got %d columns (%s), want %d", len(cols), joined(cols), len(want))
 	}
 	for _, c := range cols {
-		if want[c.Name] != c.Type {
-			t.Errorf("column %q type = %v, want %v", c.Name, c.Type, want[c.Name])
+		w, ok := want[c.Name]
+		if !ok {
+			t.Errorf("unexpected column %q", c.Name)
+			continue
+		}
+		if c.TypeFor(true) != w[0] || c.TypeFor(false) != w[1] {
+			t.Errorf("column %q types = %v/%v, want %v/%v", c.Name, c.TypeFor(true), c.TypeFor(false), w[0], w[1])
 		}
 		if c.Source == "" {
 			t.Errorf("column %q has no Source; generated DDL comments depend on it", c.Name)
 		}
 	}
-	if ColumnText.String() != "text" || ColumnJSONB.String() != "jsonb" {
-		t.Error("ColumnType.String must render SQL type names for generated DDL")
+}
+
+func TestColumnTypeNamesAreTheDDLSpellings(t *testing.T) {
+	t.Parallel()
+	for ct, want := range map[ColumnType]string{
+		ColumnText: "text", ColumnJSONB: "jsonb", ColumnBigint: "bigint",
+		ColumnBoolean: "boolean", ColumnTimestamptz: "timestamptz",
+	} {
+		if got := ct.String(); got != want {
+			t.Errorf("%d.String() = %q, want %q", int(ct), got, want)
+		}
 	}
+	// An unnamed type must not quietly render as a real one.
+	if got := ColumnType(99).String(); got != "ColumnType(99)" {
+		t.Errorf("an unknown type renders as %q", got)
+	}
+}
+
+// objectFields is top-level fields as a schema of objects would give them:
+// every one jsonb.
+func objectFields(names ...string) []Field {
+	out := make([]Field, 0, len(names))
+	for _, n := range names {
+		out = append(out, Field{Name: n, Type: ColumnJSONB})
+	}
+	return out
 }

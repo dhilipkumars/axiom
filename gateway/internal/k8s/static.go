@@ -75,12 +75,26 @@ func (m *StaticMapper) Kinds(_ context.Context, group *string, plurals []string)
 }
 
 // podTopLevel and configMapTopLevel are the top-level schema fields of the two
-// built-in kinds, as the API server's OpenAPI document reports them. They are
+// built-in kinds, with the types their OpenAPI schemas give them. They are
 // spelled out here so the static fallback produces exactly the columns
-// discovery would, rather than a subtly different table.
+// discovery would, rather than a subtly different table; a test holds them to
+// the real core/v1 document.
 var (
-	podTopLevel       = []string{"apiVersion", "kind", "metadata", "spec", "status"}
-	configMapTopLevel = []string{"apiVersion", "binaryData", "data", "immutable", "kind", "metadata"}
+	podTopLevel = []Field{
+		{Name: "apiVersion", Type: ColumnText},
+		{Name: "kind", Type: ColumnText},
+		{Name: "metadata", Type: ColumnJSONB},
+		{Name: "spec", Type: ColumnJSONB},
+		{Name: "status", Type: ColumnJSONB},
+	}
+	configMapTopLevel = []Field{
+		{Name: "apiVersion", Type: ColumnText},
+		{Name: "binaryData", Type: ColumnJSONB},
+		{Name: "data", Type: ColumnJSONB},
+		{Name: "immutable", Type: ColumnBoolean},
+		{Name: "kind", Type: ColumnText},
+		{Name: "metadata", Type: ColumnJSONB},
+	}
 )
 
 // BuiltinKinds returns the kinds Phases 1-3 served: Pods read-only at the SQL

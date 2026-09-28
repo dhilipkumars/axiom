@@ -136,6 +136,88 @@ echo "core=$core_api  new=$new_api"
 # No table carries a bare plural: every name is qualified by its group.
 has_table events && fail "a bare 'events' table exists: $got"
 
+log "#79: imported columns take the types the API server's schemas give them"
+# col_types TABLE COL...: "col type" pairs, in the order given.
+col_types() {
+  local table="$1"; shift
+  local list; list="$(printf "'%s'," "$@")"
+  psql_axiom "SELECT string_agg(a.attname || ' ' || format_type(a.atttypid, NULL), ', ' ORDER BY array_position(ARRAY[${list%,}], a.attname::text))
+                FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+               WHERE n.nspname = '$SCHEMA' AND c.relname = '$table' AND a.attname::text IN (${list%,});"
+}
+got="$(col_types core_events type reason count last_timestamp event_time involved_object creation_timestamp)"
+want="type text, reason text, count bigint, last_timestamp timestamp with time zone, event_time timestamp with time zone, involved_object jsonb, creation_timestamp timestamp with time zone"
+[[ "$got" == "$want" ]] || fail "core_events types:
+  got  $got
+  want $want"
+got="$(col_types events_k8s_io_events note deprecated_count event_time regarding)"
+want="note text, deprecated_count bigint, event_time timestamp with time zone, regarding jsonb"
+[[ "$got" == "$want" ]] || fail "events_k8s_io_events types:
+  got  $got
+  want $want"
+got="$(col_types core_configmaps immutable data)"
+[[ "$got" == "immutable boolean, data jsonb" ]] || fail "core_configmaps types: $got"
+got="$(col_types apps_deployments replicas ready_replicas spec)"
+[[ "$got" == "replicas bigint, ready_replicas bigint, spec jsonb" ]] || fail "apps_deployments types: $got"
+echo "events, configmaps and deployments typed from their schemas"
+
+log "#79: the issue's query runs as written, and every value reads as its type"
+# Before #79, type was jsonb and this was "invalid input syntax for type json".
+psql_axiom "SELECT count(*) FROM $SCHEMA.core_events WHERE type = 'Warning';" >/dev/null \
+  || fail "WHERE type = 'Warning' failed on core_events"
+# Not erroring is not enough: a filter that matched nothing would pass that. A
+# kind cluster always has Normal scheduling events, so the same filter on
+# Normal must return rows, and within one scan it must agree with raw.
+normal="$(psql_axiom "SELECT count(*) FROM $SCHEMA.core_events WHERE type = 'Normal';")"
+[[ "$normal" -gt 0 ]] || fail "WHERE type = 'Normal' returned no events on a kind cluster"
+got="$(psql_axiom "SELECT count(*) FILTER (WHERE type = 'Normal') = count(*) FILTER (WHERE raw->>'type' = 'Normal')
+                     FROM $SCHEMA.core_events;")"
+[[ "$got" == "t" ]] || fail "type = 'Normal' disagrees with raw->>'type' within one scan"
+echo "$normal Normal events through WHERE type = 'Normal'"
+
+log "#79: replica counts order as numbers, and an unreported one is NULL"
+# The issue's second example: as text, "9" sorted above "10". The pods can
+# never schedule, so nothing is pulled and nothing becomes ready.
+typed_deployments_down() {
+  kubectl_e2e -n "$NS" delete deployment typed-nine typed-ten --ignore-not-found --wait=false >/dev/null 2>&1 || true
+}
+e2e_on_teardown typed_deployments_down
+for pair in nine:9 ten:10; do
+  kubectl_e2e -n "$NS" apply -f - >/dev/null <<EOF || fail "create deployment typed-${pair%%:*}"
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: typed-${pair%%:*}}
+spec:
+  replicas: ${pair##*:}
+  selector: {matchLabels: {app: typed-${pair%%:*}}}
+  template:
+    metadata: {labels: {app: typed-${pair%%:*}}}
+    spec:
+      nodeSelector: {axiom-e2e/never: "true"}
+      containers: [{name: c, image: registry.invalid/axiom/never:1}]
+EOF
+done
+got="$(psql_axiom "SELECT string_agg(name || ':' || replicas || ':' || coalesce(ready_replicas::text, 'null'), ',' ORDER BY replicas DESC)
+                     FROM $SCHEMA.apps_deployments WHERE namespace = '$NS' AND name LIKE 'typed-%';")"
+[[ "$got" == "typed-ten:10:null,typed-nine:9:null" ]] \
+  || fail "ORDER BY replicas DESC gave '$got': 10 must sort above 9, and nothing is ready"
+typed_deployments_down
+echo "$got"
+# A value the object has but the column reads as NULL would be a conversion
+# that does not match what the API server writes. Compared within one scan, so
+# events arriving meanwhile cannot race it.
+got="$(psql_axiom "SELECT count(*) FILTER (WHERE true) || '|' ||
+                          count(*) FILTER (WHERE raw ? 'type' AND type IS NULL) || '|' ||
+                          count(*) FILTER (WHERE raw ? 'count' AND count IS NULL) || '|' ||
+                          count(*) FILTER (WHERE raw->>'lastTimestamp' IS NOT NULL AND last_timestamp IS NULL) || '|' ||
+                          count(*) FILTER (WHERE raw->>'eventTime' IS NOT NULL AND event_time IS NULL) || '|' ||
+                          count(*) FILTER (WHERE creation_timestamp IS NULL)
+                     FROM $SCHEMA.core_events;")"
+IFS='|' read -r total rest <<<"$got"
+[[ "$total" -gt 0 ]] || fail "core_events is empty, so nothing was checked"
+[[ "$rest" == "0|0|0|0|0" ]] || fail "core_events had values reading as NULL (type|count|last|event_time|created): $rest of $total"
+echo "$total events: type, count, lastTimestamp, eventTime and creationTimestamp all read"
+
 # --- the universal columns ----------------------------------------------------------
 
 log "api_version, kind and metadata are populated on a built-in and on a CRD"

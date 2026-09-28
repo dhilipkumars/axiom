@@ -146,9 +146,9 @@ ConfigMaps and nothing else.
 These aren't security issues, but they're worth putting in the agent's
 instructions:
 
-- **Numbers are text.** `replicas > '5'` compares strings, so `'10' < '5'`.
-  Cast (`replicas::int > 5`), and use `axiom_quantity()` for Kubernetes
-  quantities such as `500m` or `128Mi`
-  ([#79](https://github.com/dhilipkumars/axiom/issues/79)).
+- **Quantities are strings.** Integer, boolean and timestamp fields are typed
+  columns ([#79](https://github.com/dhilipkumars/axiom/issues/79)), but a
+  Kubernetes quantity such as `500m` or `128Mi` may be a string or a number, so
+  it stays `jsonb`: use `axiom_quantity()` to compare it.
 - **Table names carry the API group.** It's `k8s.core_pods`, not `k8s.pods`,
   unless someone created [short names](querying.md#short-names).

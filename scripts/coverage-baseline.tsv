@@ -7,7 +7,7 @@
 # Measured in CI: gateway figures with the Go version in gateway/go.mod, which
 # counts statements its own way, and extension figures on Postgres 16. A
 # local run on another toolchain is not comparable.
-gateway	unit	85.6
+gateway	unit	86.2
 gateway	e2e	69.9
 gateway	combined	89.4
 extension	unit	89.3

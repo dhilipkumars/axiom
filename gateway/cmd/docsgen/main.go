@@ -297,12 +297,18 @@ func genColumns(root string) ([]byte, error) {
 		"agree.\n\n")
 
 	w.WriteString("## Types\n\n" +
-		"Columns are `text` or `jsonb` and nothing else. An OpenAPI schema " +
-		"frequently does not constrain a field tightly enough to justify a " +
-		"numeric or timestamp column, and guessing wrong turns a queryable table " +
-		"into a cast-error minefield. Promoted scalars are `text`, so " +
-		"`replicas::int` is the caller's explicit choice and an absent field is " +
-		"NULL rather than zero.\n\n")
+		"A column is `text`, `bigint`, `boolean` or `timestamptz` when the field's " +
+		"OpenAPI schema names exactly that one scalar type, and `jsonb` otherwise. " +
+		"A timestamp counts: Kubernetes spells `meta.v1.Time` as a reference to a " +
+		"`date-time` string. Objects, arrays, anything that may hold more than one " +
+		"type (`IntOrString`, `Quantity`, `x-kubernetes-int-or-string`), " +
+		"`x-kubernetes-preserve-unknown-fields`, and `number` are `jsonb`, which " +
+		"holds any value. A value that is not of its column's type reads as NULL, " +
+		"and an absent field is NULL rather than zero.\n\n" +
+		"An extension that predates typed columns does not ask for them, and gets " +
+		"the types these columns had before: `text` for a universal or promoted " +
+		"column, `jsonb` for a top-level field. The tables below give the typed " +
+		"form.\n\n")
 
 	w.WriteString("## Universal columns\n\n" +
 		"Every kind gets these, whatever its schema, in this order. " +
@@ -328,8 +334,8 @@ func genColumns(root string) ([]byte, error) {
 
 	w.WriteString("## Top-level fields\n\n" +
 		"After the universal and promoted columns, each of the kind's own " +
-		"top-level fields becomes a column, in sorted order: `jsonb` for objects " +
-		"and arrays, `text` otherwise. Field names are normalised to SQL " +
+		"top-level fields becomes a column, in sorted order, typed as described " +
+		"under Types. Field names are normalised to SQL " +
 		"identifiers, so `camelCase` becomes `snake_case`, any character outside " +
 		"`[a-z0-9_]` becomes an underscore, runs collapse, and a leading digit is " +
 		"prefixed. Two fields that normalise to the same name produce no column " +

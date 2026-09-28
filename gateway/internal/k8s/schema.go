@@ -1,18 +1,19 @@
 package k8s
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// ColumnType is the Postgres type a discovered column must be declared with.
+// ColumnType is the Postgres type a discovered column is declared with.
 //
-// Deliberately narrow (docs/DESIGN.md §5.4): promoted scalars are text and
-// everything structured stays jsonb. An OpenAPI schema often does not constrain
-// a field tightly enough to justify a numeric or timestamp column, and guessing
-// wrong turns a queryable table into a cast-error minefield.
+// A field gets a scalar type only when its OpenAPI schema names exactly one
+// (see columnTypeOf); anything structured or ambiguous is jsonb (docs/DESIGN.md
+// §5.4, #79). The extension converts each value to and from the declared
+// type, and reads a value that is not of that type as NULL.
 type ColumnType int
 
 const (
@@ -20,26 +21,64 @@ const (
 	ColumnText ColumnType = iota + 1
 	// ColumnJSONB is SQL `jsonb`.
 	ColumnJSONB
+	// ColumnBigint is SQL `bigint`.
+	ColumnBigint
+	// ColumnBoolean is SQL `boolean`.
+	ColumnBoolean
+	// ColumnTimestamptz is SQL `timestamptz`.
+	ColumnTimestamptz
 )
 
 // String renders the SQL type name used in generated DDL.
 func (c ColumnType) String() string {
-	if c == ColumnText {
+	switch c {
+	case ColumnText:
 		return "text"
+	case ColumnJSONB:
+		return "jsonb"
+	case ColumnBigint:
+		return "bigint"
+	case ColumnBoolean:
+		return "boolean"
+	case ColumnTimestamptz:
+		return "timestamptz"
 	}
-	return "jsonb"
+	// Not "jsonb": a type added here without a name must not quietly become
+	// a different type in someone's DDL.
+	return fmt.Sprintf("ColumnType(%d)", int(c))
 }
 
 // Column is one column of a kind's foreign table.
 type Column struct {
 	// Name is the SQL column name, always a bare lowercase identifier.
 	Name string
-	// Type is the SQL type the column must be declared with.
+	// Type is the SQL type the column is declared with.
 	Type ColumnType
+	// Untyped is the type sent instead to a caller that predates bigint,
+	// boolean and timestamptz columns: what the column was before #79, text
+	// for a promoted scalar and jsonb for a top-level field. Such an extension
+	// drops a column whose type it does not know from the table it generates.
+	Untyped ColumnType
 	// Source names where the value comes from, for diagnostics and DDL
 	// comments. It is not a protocol: the extension's projection rule, keyed
 	// on Name alone, decides how a column is actually read.
 	Source string
+}
+
+// TypeFor is the column's type for a caller that does, or does not, accept
+// typed columns.
+func (c Column) TypeFor(typed bool) ColumnType {
+	if typed {
+		return c.Type
+	}
+	return c.Untyped
+}
+
+// Field is one top-level property of a kind's schema, with the column type
+// its schema supports.
+type Field struct {
+	Name string
+	Type ColumnType
 }
 
 // KindInfo is the discovered shape of one kind: enough for the extension to
@@ -141,16 +180,16 @@ const maxIdentLen = 63
 //
 // `namespace` is filtered out for cluster-scoped kinds by Columns.
 var universalColumns = []Column{
-	{Name: "api_version", Type: ColumnText, Source: "apiVersion"},
-	{Name: "kind", Type: ColumnText, Source: "kind"},
-	{Name: "name", Type: ColumnText, Source: "metadata.name"},
-	{Name: "namespace", Type: ColumnText, Source: "metadata.namespace"},
-	{Name: "uid", Type: ColumnText, Source: "metadata.uid"},
-	{Name: "resource_version", Type: ColumnText, Source: "metadata.resourceVersion"},
-	{Name: "creation_timestamp", Type: ColumnText, Source: "metadata.creationTimestamp"},
-	{Name: "labels", Type: ColumnJSONB, Source: "metadata.labels"},
-	{Name: "annotations", Type: ColumnJSONB, Source: "metadata.annotations"},
-	{Name: "metadata", Type: ColumnJSONB, Source: "metadata"},
+	{Name: "api_version", Type: ColumnText, Untyped: ColumnText, Source: "apiVersion"},
+	{Name: "kind", Type: ColumnText, Untyped: ColumnText, Source: "kind"},
+	{Name: "name", Type: ColumnText, Untyped: ColumnText, Source: "metadata.name"},
+	{Name: "namespace", Type: ColumnText, Untyped: ColumnText, Source: "metadata.namespace"},
+	{Name: "uid", Type: ColumnText, Untyped: ColumnText, Source: "metadata.uid"},
+	{Name: "resource_version", Type: ColumnText, Untyped: ColumnText, Source: "metadata.resourceVersion"},
+	{Name: "creation_timestamp", Type: ColumnTimestamptz, Untyped: ColumnText, Source: "metadata.creationTimestamp"},
+	{Name: "labels", Type: ColumnJSONB, Untyped: ColumnJSONB, Source: "metadata.labels"},
+	{Name: "annotations", Type: ColumnJSONB, Untyped: ColumnJSONB, Source: "metadata.annotations"},
+	{Name: "metadata", Type: ColumnJSONB, Untyped: ColumnJSONB, Source: "metadata"},
 }
 
 // promoted holds the hand-mapped columns for built-in kinds whose useful
@@ -165,18 +204,18 @@ var universalColumns = []Column{
 // sides assert the exact set.
 var promoted = map[schema.GroupVersionKind][]Column{
 	{Group: "", Version: "v1", Kind: "Pod"}: {
-		{Name: "phase", Type: ColumnText, Source: "status.phase"},
-		{Name: "node", Type: ColumnText, Source: "spec.nodeName"},
+		{Name: "phase", Type: ColumnText, Untyped: ColumnText, Source: "status.phase"},
+		{Name: "node", Type: ColumnText, Untyped: ColumnText, Source: "spec.nodeName"},
 	},
 	// A Deployment's replica counts are what people filter on, and they sit
-	// too deep for the generic top-level rule. They are text columns holding a
-	// rendered number (Kubernetes models them as JSON numbers), so
-	// `replicas::int` works and an absent field is NULL rather than zero.
+	// too deep for the generic top-level rule. Kubernetes models them as
+	// integers, so they are bigint and order as numbers; an absent field is
+	// NULL rather than zero.
 	{Group: "apps", Version: "v1", Kind: "Deployment"}: {
-		{Name: "replicas", Type: ColumnText, Source: "spec.replicas"},
-		{Name: "ready_replicas", Type: ColumnText, Source: "status.readyReplicas"},
-		{Name: "available_replicas", Type: ColumnText, Source: "status.availableReplicas"},
-		{Name: "updated_replicas", Type: ColumnText, Source: "status.updatedReplicas"},
+		{Name: "replicas", Type: ColumnBigint, Untyped: ColumnText, Source: "spec.replicas"},
+		{Name: "ready_replicas", Type: ColumnBigint, Untyped: ColumnText, Source: "status.readyReplicas"},
+		{Name: "available_replicas", Type: ColumnBigint, Untyped: ColumnText, Source: "status.availableReplicas"},
+		{Name: "updated_replicas", Type: ColumnBigint, Untyped: ColumnText, Source: "status.updatedReplicas"},
 	},
 }
 
@@ -189,7 +228,7 @@ var skipTopLevel = map[string]struct{}{
 }
 
 // Columns derives the foreign-table shape of one kind from its identity and the
-// top-level field names of its schema.
+// top-level fields of its schema.
 //
 // This is the whole of docs/DESIGN.md §5.4's mapping, kept pure so it is unit
 // tested without a cluster (docs/RULES.md §2). Column order is stable: the
@@ -206,7 +245,7 @@ var skipTopLevel = map[string]struct{}{
 // field. Dropping loses nothing: every field remains reachable through `raw`,
 // whereas a silently renamed column would be a column whose value the extension
 // could not find (docs/RULES.md §1, no silent degrade).
-func Columns(gvk schema.GroupVersionKind, namespaced bool, topLevel []string) []Column {
+func Columns(gvk schema.GroupVersionKind, namespaced bool, topLevel []Field) []Column {
 	cols := make([]Column, 0, len(universalColumns)+len(topLevel)+3)
 	taken := make(map[string]struct{}, len(universalColumns)+len(topLevel)+3)
 	add := func(c Column) bool {
@@ -236,28 +275,32 @@ func Columns(gvk schema.GroupVersionKind, namespaced bool, topLevel []string) []
 	// one column) drops both rather than letting sort order pick a winner.
 	counts := make(map[string]int, len(topLevel))
 	for _, f := range topLevel {
-		if _, skip := skipTopLevel[f]; skip {
+		if _, skip := skipTopLevel[f.Name]; skip {
 			continue
 		}
-		counts[NormalizeFieldName(f)]++
+		counts[NormalizeFieldName(f.Name)]++
 	}
 
-	fields := append([]string(nil), topLevel...)
-	sort.Strings(fields)
+	fields := append([]Field(nil), topLevel...)
+	sort.Slice(fields, func(i, j int) bool { return fields[i].Name < fields[j].Name })
 	for _, f := range fields {
-		if _, skip := skipTopLevel[f]; skip {
+		if _, skip := skipTopLevel[f.Name]; skip {
 			continue
 		}
-		name := NormalizeFieldName(f)
+		name := NormalizeFieldName(f.Name)
 		if name == "" || len(name) > maxIdentLen || counts[name] > 1 {
 			continue
 		}
-		add(Column{Name: name, Type: ColumnJSONB, Source: f})
+		t := f.Type
+		if t == 0 {
+			t = ColumnJSONB
+		}
+		add(Column{Name: name, Type: t, Untyped: ColumnJSONB, Source: f.Name})
 	}
 
 	// `raw` is last and always present: it is the escape hatch for everything
 	// the rules above dropped, and the carrier of identity and resourceVersion
 	// for the write path.
-	cols = append(cols, Column{Name: "raw", Type: ColumnJSONB, Source: "the whole object"})
+	cols = append(cols, Column{Name: "raw", Type: ColumnJSONB, Untyped: ColumnJSONB, Source: "the whole object"})
 	return cols
 }
