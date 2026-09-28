@@ -1368,6 +1368,12 @@ fn typed_columns_read_and_write_as_their_types() {
             &[],
         )
         .expect_err("RFC 3339 has no infinity");
+    assert_eq!(
+        sqlstate(&err),
+        SqlState::DATETIME_FIELD_OVERFLOW.code(),
+        "{}",
+        message(&err)
+    );
     assert!(
         message(&err).contains("between years 1 and 9999"),
         "{}",

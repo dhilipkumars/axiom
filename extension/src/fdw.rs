@@ -169,6 +169,8 @@ fn write_sqlstate(e: &WriteError) -> PgSqlErrorCode {
         | WriteError::DataValueNotString(_)
         | WriteError::WrongKind(..) => PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
         WriteError::BadOldRaw(_) => PgSqlErrorCode::ERRCODE_FDW_ERROR,
+        // What Postgres raises for a timestamp outside its own range.
+        WriteError::NotRepresentable(_) => PgSqlErrorCode::ERRCODE_DATETIME_FIELD_OVERFLOW,
     }
 }
 
