@@ -52,9 +52,13 @@ Any release works, not only the demo chart: the query keys on the
 
 ## What it can and cannot see
 
-- **Everything is joined by uid, not by name.** The next Pod of a Deployment
-  reuses nothing but the name pattern; a uid is never reused, so a timeline
-  never mixes two rollouts.
+- **Everything is joined by uid, not by name.** A Deployment deleted and
+  created again under the same name has a new uid, so its predecessor's
+  objects and events never leak into the timeline.
+- **Every rollout of the release is on it.** An upgrade or a
+  `rollout restart` keeps the Deployment's uid and adds a ReplicaSet, and the
+  old ReplicaSets stay (ten by default, `revisionHistoryLimit`). Each rollout's
+  rows carry its own ReplicaSet name; filter on it to see one rollout alone.
 - **Secrets are not on it.** The gateway's shipped RBAC excludes Secrets by
   design, so Helm's own release record, which it keeps in a Secret, is not
   visible. The release is identified by its labels instead.

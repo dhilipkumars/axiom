@@ -41,7 +41,8 @@ gosu postgres initdb -D "$data" -A trust >/dev/null
 # pg_ctl -w returns once the server accepts connections.
 gosu postgres pg_ctl -D "$data" -o "$PG_SETTINGS" -w -l /tmp/postgres.log start >/dev/null \
   || { tail -20 /tmp/postgres.log; exit 1; }
-gosu postgres pgbench -q -i -s 1 postgres >/dev/null 2>&1
+gosu postgres pgbench -q -i -s 1 postgres >/tmp/pgbench-init.log 2>&1 \
+  || { cat /tmp/pgbench-init.log; exit 1; }
 out="$(gosu postgres pgbench -c "$CLIENTS" -j "$CLIENTS" -T "$SECONDS_TO_RUN" postgres 2>&1)"
 tps="$(sed -n 's/^tps = \([0-9.]*\).*/\1/p' <<<"$out" | head -1)"
 lat="$(sed -n 's/^latency average = \([0-9.]*\) ms.*/\1/p' <<<"$out" | head -1)"

@@ -23,6 +23,8 @@ WITH latest_pod AS (
   SELECT DISTINCT ON (p.labels->>'axiom-lab/run')
          p.labels->>'axiom-lab/run' AS run,
          p.status->>'phase' AS phase,
+         -- Why a Pod failed before any container ran, e.g. Evicted.
+         concat_ws(': ', p.status->>'reason', p.status->>'message') AS pod_reason,
          (SELECT cs FROM jsonb_array_elements(p.status->'containerStatuses') cs
            WHERE cs->>'name' = 'pgbench') AS cs
     FROM lab.pods p
@@ -31,7 +33,7 @@ WITH latest_pod AS (
    ORDER BY p.labels->>'axiom-lab/run', p.creation_timestamp DESC
 ),
 result AS (
-  SELECT run, phase,
+  SELECT run, phase, pod_reason,
          -- Waiting to be created is normal on the way to starting; any other
          -- reason (ImagePullBackOff, CrashLoopBackOff, ...) is a problem.
          CASE WHEN cs->'state'->'waiting'->>'reason' NOT IN ('ContainerCreating', 'PodInitializing')
@@ -39,7 +41,12 @@ result AS (
          cs->'state'->'terminated' AS t,
          (cs->'state'->'terminated'->>'exitCode')::int AS exit_code,
          CASE WHEN cs->'state'->'terminated'->>'message' IS JSON OBJECT
-              THEN (cs->'state'->'terminated'->>'message')::jsonb END AS r
+              THEN (cs->'state'->'terminated'->>'message')::jsonb END AS r,
+         -- Finished with a result. coalesce, because `?` on a NULL result is
+         -- NULL, and NOT NULL would hide the failure it should report.
+         coalesce((cs->'state'->'terminated'->>'exitCode')::int = 0
+                  AND (cs->'state'->'terminated'->>'message') IS JSON OBJECT
+                  AND (cs->'state'->'terminated'->>'message')::jsonb ? 'tps', false) AS ok
     FROM latest_pod
 ),
 usage AS (
@@ -50,8 +57,8 @@ usage AS (
 )
 SELECT m.run, m.settings,
        CASE WHEN r.run IS NULL THEN 'not started'
-            WHEN r.t IS NOT NULL AND r.exit_code = 0 AND r.r ? 'tps' THEN 'done'
-            WHEN r.t IS NOT NULL THEN 'failed'
+            WHEN r.ok THEN 'done'
+            WHEN r.t IS NOT NULL OR r.phase = 'Failed' THEN 'failed'
             WHEN r.waiting IS NOT NULL THEN 'waiting'
             WHEN r.phase = 'Running' THEN 'running'
             ELSE 'pending' END AS state,
@@ -62,9 +69,10 @@ SELECT m.run, m.settings,
        pg_size_pretty(u.peak_memory) AS peak_memory,
        -- One line, so the table stays readable: a termination message is the
        -- tail of the container's output, newlines and all.
-       CASE WHEN r.t IS NOT NULL AND NOT (r.exit_code = 0 AND r.r ? 'tps')
-            THEN left(regexp_replace(coalesce(r.t->>'message', 'exit code ' || r.exit_code),
+       CASE WHEN r.t IS NOT NULL AND NOT r.ok
+            THEN left(regexp_replace(coalesce(nullif(r.t->>'message', ''), 'exit code ' || r.exit_code),
                                      '\s+', ' ', 'g'), 400)
+            WHEN r.phase = 'Failed' THEN nullif(r.pod_reason, '')
             WHEN r.waiting IS NOT NULL
             THEN concat_ws(': ', r.waiting->>'reason', r.waiting->>'message') END AS error
   FROM lab.matrix m

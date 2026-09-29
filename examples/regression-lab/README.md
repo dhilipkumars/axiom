@@ -46,9 +46,14 @@ Where metrics-server runs, `sample.sql` records each running benchmark's CPU
 and memory into `lab.usage`, and `results.sql` shows each run's peak beside
 its throughput. Run it on a loop while the matrix runs:
 
-```sh
-psql -v namespace=regression-lab -f sample.sql     # then, at the psql prompt: \watch 5
 ```
+$ psql -v namespace=regression-lab
+=> \i sample.sql
+=> \watch 5
+```
+
+`\watch` repeats the last statement every five seconds until you interrupt it.
+It needs an interactive session: `psql -f` would run the file once and exit.
 
 It has to sample while runs are going: `metrics.k8s.io` reports only pods
 that are running, so a finished run has nothing left to join.

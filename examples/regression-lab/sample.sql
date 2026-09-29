@@ -1,7 +1,9 @@
 -- Record each running benchmark's resource use once. Run it repeatedly while
 -- the matrix runs, for example with psql's \watch:
 --
---   psql -v namespace=regression-lab -f sample.sql     then, at the prompt:   \watch 5
+--   psql -v namespace=regression-lab
+--   => \i sample.sql
+--   => \watch 5
 --
 -- metrics-server copies a Pod's labels onto its PodMetrics, which is how a
 -- sample finds its run. axiom_quantity() turns "250m" and "64Mi" into numbers
