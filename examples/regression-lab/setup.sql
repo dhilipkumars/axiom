@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS lab.matrix (
 -- reports only running pods, so a finished run has nothing left to join.
 CREATE TABLE IF NOT EXISTS lab.usage (
   sampled_at timestamptz NOT NULL DEFAULT now(),
+  namespace  text NOT NULL,
   run        text NOT NULL,
   cpu_cores  numeric,
   memory     numeric
@@ -29,7 +30,7 @@ CREATE FOREIGN TABLE IF NOT EXISTS lab.jobs (
 ) SERVER :"server" OPTIONS (resource 'jobs', group 'batch', version 'v1', kind 'Job');
 
 CREATE FOREIGN TABLE IF NOT EXISTS lab.pods (
-  name text, namespace text, labels jsonb, status jsonb, raw jsonb
+  name text, namespace text, creation_timestamp timestamptz, labels jsonb, status jsonb, raw jsonb
 ) SERVER :"server" OPTIONS (resource 'pods');
 
 -- Only needed for sample.sql, and only works where metrics-server runs.

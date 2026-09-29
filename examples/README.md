@@ -14,6 +14,7 @@ e2e suite (`e2e/examples_test.sh`) exactly as shipped.
 They assume a working Axiom setup: the extension installed, a gateway it can
 reach, and a server created with `CREATE SERVER`. The
 [getting-started guide](https://dhilipkumars.github.io/axiom/guides/getting-started/)
-sets that up on a kind cluster in about ten minutes. Each example takes the
-server's name as a psql variable (`-v server=...`) and creates its own schema,
-so none of them touches your other tables.
+sets that up on a kind cluster in about ten minutes. The operator and the lab
+take the server's name as a psql variable (`-v server=...`) and create their
+own schema, `sqlop` and `lab`. The timeline reads tables from an ordinary
+`IMPORT FOREIGN SCHEMA` into `k8s`, which its README shows.

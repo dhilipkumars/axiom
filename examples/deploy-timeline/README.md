@@ -37,7 +37,8 @@ Pod condition as it came true.
 ## Running it
 
 ```sh
-# The tables it reads.
+# The tables it reads, in a schema of their own.
+psql -c "CREATE SCHEMA IF NOT EXISTS k8s"
 psql -c "IMPORT FOREIGN SCHEMA k8s
            LIMIT TO (apps_deployments, apps_replicasets, core_pods, core_services, core_events)
            FROM SERVER <your axiom server> INTO k8s"

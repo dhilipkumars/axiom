@@ -47,7 +47,7 @@ and memory into `lab.usage`, and `results.sql` shows each run's peak beside
 its throughput. Run it on a loop while the matrix runs:
 
 ```sh
-psql -f sample.sql     # then, at the psql prompt: \watch 5
+psql -v namespace=regression-lab -f sample.sql     # then, at the psql prompt: \watch 5
 ```
 
 It has to sample while runs are going: `metrics.k8s.io` reports only pods

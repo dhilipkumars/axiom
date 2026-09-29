@@ -188,6 +188,9 @@ psql_axiom "INSERT INTO lab.matrix (run, image, settings, seconds) VALUES
   ('buffers-16mb', '$LAB_IMAGE', '-c shared_buffers=16MB', 5),
   ('buffers-64mb', '$LAB_IMAGE', '-c shared_buffers=64MB', 5),
   ('broken', '$LAB_IMAGE', '-c shared_buffers=nonsense', 5);"
+# Before launching, every run is reported as not started, not as running.
+got="$(psql_file "$EX/regression-lab/results.sql" -v namespace="$LAB_NS" | cut -d'|' -f3 | sort | uniq -c | tr -s ' ')"
+[[ "$got" == " 3 not started" ]] || fail "before launch.sql, results.sql reported: $got"
 psql_file "$EX/regression-lab/launch.sql" -v namespace="$LAB_NS" >/dev/null
 jobs="$(kubectl_e2e -n "$LAB_NS" get jobs -o jsonpath='{.items[*].metadata.name}')"
 [[ "$(tr ' ' '\n' <<<"$jobs" | sort | paste -sd, -)" == "bench-broken,bench-buffers-16mb,bench-buffers-64mb" ]] \
@@ -201,7 +204,7 @@ log "regression-lab: results.sql reads each run's result, or its error, from the
 deadline=$((SECONDS + 240))
 while :; do
   results="$(psql_file "$EX/regression-lab/results.sql" -v namespace="$LAB_NS")"
-  grep -q '|running|' <<<"$results" || [[ "$(grep -c . <<<"$results")" -lt 3 ]] || break
+  grep -qE '\|(not started|pending|waiting|running)\|' <<<"$results" || [[ "$(grep -c . <<<"$results")" -lt 3 ]] || break
   (( SECONDS < deadline )) || fail "the runs did not all finish:
 $results"
   sleep 3

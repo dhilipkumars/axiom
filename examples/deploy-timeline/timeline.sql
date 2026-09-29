@@ -75,11 +75,13 @@ SELECT at, kind, name, step, detail
                                           WHEN 'ReplicaSet' THEN 3 ELSE 4 END
             WHEN 'ScalingReplicaSet' THEN 2
             WHEN 'SuccessfulCreate' THEN 4
+            -- The kubelet's order: the sandbox, then init containers, then
+            -- the app container's image, creation and start, then readiness.
             WHEN 'Scheduled' THEN 5 WHEN 'PodScheduled' THEN 5
-            WHEN 'Pulling' THEN 6 WHEN 'Pulled' THEN 7
-            WHEN 'Created' THEN 8 WHEN 'Started' THEN 9
-            WHEN 'PodReadyToStartContainers' THEN 10 WHEN 'Initialized' THEN 10
-            WHEN 'ContainersReady' THEN 11 WHEN 'Ready' THEN 12
-            ELSE 13
+            WHEN 'PodReadyToStartContainers' THEN 6 WHEN 'Initialized' THEN 7
+            WHEN 'Pulling' THEN 8 WHEN 'Pulled' THEN 9
+            WHEN 'Created' THEN 10 WHEN 'Started' THEN 11
+            WHEN 'ContainersReady' THEN 12 WHEN 'Ready' THEN 13
+            ELSE 14
           END,
           kind, name;
