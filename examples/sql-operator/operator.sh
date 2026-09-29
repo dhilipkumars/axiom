@@ -47,7 +47,9 @@ pipes="$(mktemp -d)"
 mkfifo "$pipes/in" "$pipes/out"
 listener=""
 trap '[[ -n "$listener" ]] && kill "$listener" 2>/dev/null; rm -rf "$pipes"' EXIT
-psql -X -At ${notify_db:+-d "$notify_db"} <"$pipes/in" >"$pipes/out" 2>&1 &
+# LC_ALL=C: psql translates its "Asynchronous notification" banner, and under
+# another locale the loop would never recognise one and fall back to the sweep.
+LC_ALL=C psql -X -At ${notify_db:+-d "$notify_db"} <"$pipes/in" >"$pipes/out" 2>&1 &
 listener=$!
 exec 3>"$pipes/in" 4<"$pipes/out"
 echo "LISTEN axiom_events;" >&3

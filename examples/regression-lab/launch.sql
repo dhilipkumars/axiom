@@ -43,7 +43,10 @@ gosu postgres pg_ctl -D "$data" -o "$PG_SETTINGS" -w -l /tmp/postgres.log start 
   || { tail -20 /tmp/postgres.log; exit 1; }
 gosu postgres pgbench -q -i -s 1 postgres >/tmp/pgbench-init.log 2>&1 \
   || { cat /tmp/pgbench-init.log; exit 1; }
-out="$(gosu postgres pgbench -c "$CLIENTS" -j "$CLIENTS" -T "$SECONDS_TO_RUN" postgres 2>&1)"
+# Under set -e a failing assignment would exit before its output is printed,
+# leaving the termination message empty; print it, then fail.
+out="$(gosu postgres pgbench -c "$CLIENTS" -j "$CLIENTS" -T "$SECONDS_TO_RUN" postgres 2>&1)" \
+  || { echo "$out"; exit 1; }
 tps="$(sed -n 's/^tps = \([0-9.]*\).*/\1/p' <<<"$out" | head -1)"
 lat="$(sed -n 's/^latency average = \([0-9.]*\) ms.*/\1/p' <<<"$out" | head -1)"
 if [[ -z "$tps" || -z "$lat" ]]; then echo "$out"; exit 1; fi
