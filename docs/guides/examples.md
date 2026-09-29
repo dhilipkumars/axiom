@@ -430,3 +430,20 @@ update and you get a SQL error rather than a lost write.
 
 Nothing here is CNPG-specific. Any CRD the gateway's RBAC permits becomes a
 table the same way, with `spec` as the field you write.
+
+## Whole programs
+
+The queries above are single statements. The repository's
+[`examples/`](https://github.com/dhilipkumars/axiom/tree/main/examples)
+directory has three small programs built from them. Each runs in the e2e
+suite exactly as shipped:
+
+- **[An operator in SQL](https://github.com/dhilipkumars/axiom/tree/main/examples/sql-operator).**
+  The reconcile step is one `UPDATE … FROM` a table you own. `NOTIFY` wakes
+  it, and a periodic sweep keeps it correct.
+- **[A deploy on one timeline](https://github.com/dhilipkumars/axiom/tree/main/examples/deploy-timeline).**
+  A Helm release's Deployment, ReplicaSet, Pods, events and Pod conditions,
+  in order, from one query.
+- **[A Postgres regression lab](https://github.com/dhilipkumars/axiom/tree/main/examples/regression-lab).**
+  A matrix table becomes `pgbench` Jobs, and the results come back from the
+  Pods' termination messages.

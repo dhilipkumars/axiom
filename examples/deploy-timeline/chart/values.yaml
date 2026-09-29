@@ -1,0 +1,9 @@
+# Any image will do. pause is tiny, starts instantly, and kind already has it,
+# so the timeline shows the Kubernetes steps rather than a slow pull. Point it
+# at a real image to see a Pulling/Pulled pair with the pull's duration.
+image: registry.k8s.io/pause:3.10
+replicas: 1
+# LoadBalancer adds the load-balancer steps to the timeline on a cluster that
+# can provision one. kind cannot without cloud-provider-kind or MetalLB, and
+# the Service then simply stays pending.
+serviceType: LoadBalancer

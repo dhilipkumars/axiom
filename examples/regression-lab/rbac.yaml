@@ -1,0 +1,35 @@
+# The regression lab creates and deletes Jobs, which the gateway's shipped RBAC
+# does not grant (it writes only what it enumerates). This grants exactly that,
+# in the lab's namespace only, to the gateway's ServiceAccount.
+#
+# Every SQL role that can use the Axiom server acts as this identity (#71), so
+# granting Jobs here lets them start arbitrary containers in this namespace.
+# Keep the namespace a lab.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: regression-lab
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: axiom-regression-lab
+  namespace: regression-lab
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: axiom-regression-lab
+  namespace: regression-lab
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: axiom-regression-lab
+subjects:
+  - kind: ServiceAccount
+    name: axiom-gateway
+    namespace: axiom-system
