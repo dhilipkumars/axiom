@@ -8,7 +8,9 @@ CREATE SCHEMA IF NOT EXISTS lab;
 -- test (anything with postgres and pgbench on its PATH), `settings` the
 -- server options it starts with. Add a row, launch, compare.
 CREATE TABLE IF NOT EXISTS lab.matrix (
-  run      text PRIMARY KEY CHECK (run ~ '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'),
+  -- A DNS label: it names the Job, bench-<run>, which the Job controller
+  -- also puts in a label value, and label values stop at 63 characters.
+  run      text PRIMARY KEY CHECK (length(run) <= 57 AND run ~ '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'),
   image    text NOT NULL,
   settings text NOT NULL DEFAULT '',
   clients  int  NOT NULL DEFAULT 2,

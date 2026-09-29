@@ -30,7 +30,8 @@ WITH latest_pod AS (
     FROM lab.pods p
    WHERE p.namespace = :'namespace'
      AND p.labels ? 'axiom-lab/run'
-   ORDER BY p.labels->>'axiom-lab/run', p.creation_timestamp DESC
+   -- Timestamps are whole seconds; the name breaks a tie deterministically.
+   ORDER BY p.labels->>'axiom-lab/run', p.creation_timestamp DESC, p.name DESC
 ),
 result AS (
   SELECT run, phase, pod_reason,
