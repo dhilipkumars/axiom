@@ -17,15 +17,16 @@ list:
  2026-09-29 20:58:07+00 | Pod        | demo-9b47f4794-hsfnw | Scheduled                 | Successfully assigned axiom-timeline/demo-9b47f4794-hsfnw to axiom-e2e-control-plane
  2026-09-29 20:58:07+00 | Pod        | demo-9b47f4794-hsfnw | PodScheduled              |
  2026-09-29 20:58:07+00 | Pod        | demo-9b47f4794-hsfnw | Initialized               |
+ 2026-09-29 20:58:08+00 | Pod        | demo-9b47f4794-hsfnw | PodReadyToStartContainers |
  2026-09-29 20:58:08+00 | Pod        | demo-9b47f4794-hsfnw | Pulled                    | Container image "registry.k8s.io/pause:3.10" already present on machine ...
  2026-09-29 20:58:08+00 | Pod        | demo-9b47f4794-hsfnw | Created                   | Container created
  2026-09-29 20:58:08+00 | Pod        | demo-9b47f4794-hsfnw | Started                   | Container started
- 2026-09-29 20:58:08+00 | Pod        | demo-9b47f4794-hsfnw | PodReadyToStartContainers |
  2026-09-29 20:58:08+00 | Pod        | demo-9b47f4794-hsfnw | ContainersReady           |
  2026-09-29 20:58:08+00 | Pod        | demo-9b47f4794-hsfnw | Ready                     |
 ```
 
-That is the demo chart on kind, as the e2e suite ran it: the whole rollout in
+That is the demo chart on kind, from the e2e suite's run, in the order the
+query sorts it: the whole rollout in
 about a second. The image was already on the node, so `Pulled` says so; with
 an image that has to be fetched, the row reads `pull took 3.214s` instead.
 

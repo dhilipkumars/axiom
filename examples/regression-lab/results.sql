@@ -42,11 +42,14 @@ result AS (
          (cs->'state'->'terminated'->>'exitCode')::int AS exit_code,
          CASE WHEN cs->'state'->'terminated'->>'message' IS JSON OBJECT
               THEN (cs->'state'->'terminated'->>'message')::jsonb END AS r,
-         -- Finished with a result. coalesce, because `?` on a NULL result is
-         -- NULL, and NOT NULL would hide the failure it should report.
-         coalesce((cs->'state'->'terminated'->>'exitCode')::int = 0
-                  AND (cs->'state'->'terminated'->>'message') IS JSON OBJECT
-                  AND (cs->'state'->'terminated'->>'message')::jsonb ? 'tps', false) AS ok
+         -- Finished with a result. A CASE, because it is the only place
+         -- Postgres guarantees evaluation order: in an AND the cast could run
+         -- before the IS JSON test and fail on a failed run's log text. Never
+         -- NULL, because NOT NULL would hide the failure it should report.
+         CASE WHEN (cs->'state'->'terminated'->>'exitCode')::int IS DISTINCT FROM 0 THEN false
+              WHEN (cs->'state'->'terminated'->>'message') IS JSON OBJECT
+              THEN coalesce((cs->'state'->'terminated'->>'message')::jsonb ? 'tps', false)
+              ELSE false END AS ok
     FROM latest_pod
 ),
 usage AS (

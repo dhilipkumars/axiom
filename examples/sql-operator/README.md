@@ -22,9 +22,10 @@ express.
 ## Running it
 
 ```sh
+export PGDATABASE=<your database>     # setup, the owners row and the operator all use it
 psql -v server=<your axiom server> -f setup.sql
 psql -c "INSERT INTO sqlop.owners VALUES ('default', 'payments')"
-PGDATABASE=<your database> ./operator.sh
+./operator.sh
 ```
 
 `operator.sh` needs only `bash` and `psql`, and reads its connection from the
