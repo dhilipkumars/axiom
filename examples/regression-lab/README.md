@@ -4,15 +4,18 @@ A benchmark matrix is a table: one row per run, with the Postgres build to
 test, the settings to start it with, and how long to run. One `INSERT` turns
 the rows into Kubernetes Jobs, and one query reads the results back.
 
-```sql
-SELECT run, settings, state, tps, latency_ms, server_version FROM ...;  -- results.sql
-
-      run      |        settings         | state |   tps   | latency_ms | server_version
----------------+-------------------------+-------+---------+------------+----------------
- buffers-256mb | -c shared_buffers=256MB | done  | 2204.61 |      0.907 | 17.6
- buffers-16mb  | -c shared_buffers=16MB  | done  | 1812.30 |      1.103 | 17.6
- broken        | -c shared_buffers=nope  | failed|         |            |
 ```
+     run      |         settings          | state  |   tps    | latency_ms | server_version | error
+--------------+---------------------------+--------+----------+------------+----------------+-------------------------------------------
+ buffers-16mb | -c shared_buffers=16MB    | done   | 2107.80  |      0.949 | 16.15          |
+ buffers-64mb | -c shared_buffers=64MB    | done   | 2086.72  |      0.958 | 16.15          |
+ broken       | -c shared_buffers=nonsense| failed |          |            |                | pg_ctl: could not start server ... FATAL: invalid value
+              |                           |        |          |            |                | for parameter "shared_buffers": "nonsense"
+```
+
+That is `results.sql` from the e2e suite's run on kind (the resource columns
+are left out; kind has no metrics-server). Five-second runs on a shared CI
+machine, so read the shape, not the numbers.
 
 Each Job starts a throwaway Postgres from the image under test, runs
 `pgbench` against it, and reports the result as its **termination message**.

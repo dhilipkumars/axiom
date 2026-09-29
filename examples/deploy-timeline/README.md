@@ -6,16 +6,28 @@ and `kubectl` shows each of them separately. `timeline.sql` puts them in one
 list:
 
 ```
-2026-09-29 10:01:02+00 | Deployment | demo            | created           |
-2026-09-29 10:01:02+00 | Deployment | demo            | ScalingReplicaSet | Scaled up replica set demo-6d4b7 from 0 to 1
-2026-09-29 10:01:02+00 | ReplicaSet | demo-6d4b7      | created           |
-2026-09-29 10:01:02+00 | ReplicaSet | demo-6d4b7      | SuccessfulCreate  | Created pod: demo-6d4b7-x2k9q
-2026-09-29 10:01:02+00 | Pod        | demo-6d4b7-x2k9q| created           |
-2026-09-29 10:01:02+00 | Pod        | demo-6d4b7-x2k9q| Scheduled         | Successfully assigned ...
-2026-09-29 10:01:03+00 | Pod        | demo-6d4b7-x2k9q| Pulled            | pull took 1.832s
-2026-09-29 10:01:04+00 | Pod        | demo-6d4b7-x2k9q| Started           | Started container app
-2026-09-29 10:01:05+00 | Pod        | demo-6d4b7-x2k9q| Ready             |
+           at           |    kind    |         name         |           step            |          detail
+------------------------+------------+----------------------+---------------------------+---------------------------
+ 2026-09-29 20:58:07+00 | Deployment | demo                 | created                   |
+ 2026-09-29 20:58:07+00 | Deployment | demo                 | ScalingReplicaSet         | Scaled up replica set demo-9b47f4794 from 0 to 1
+ 2026-09-29 20:58:07+00 | Service    | demo                 | created                   |
+ 2026-09-29 20:58:07+00 | ReplicaSet | demo-9b47f4794       | created                   |
+ 2026-09-29 20:58:07+00 | Pod        | demo-9b47f4794-hsfnw | created                   |
+ 2026-09-29 20:58:07+00 | ReplicaSet | demo-9b47f4794       | SuccessfulCreate          | Created pod: demo-9b47f4794-hsfnw
+ 2026-09-29 20:58:07+00 | Pod        | demo-9b47f4794-hsfnw | Scheduled                 | Successfully assigned axiom-timeline/demo-9b47f4794-hsfnw to axiom-e2e-control-plane
+ 2026-09-29 20:58:07+00 | Pod        | demo-9b47f4794-hsfnw | PodScheduled              |
+ 2026-09-29 20:58:07+00 | Pod        | demo-9b47f4794-hsfnw | Initialized               |
+ 2026-09-29 20:58:08+00 | Pod        | demo-9b47f4794-hsfnw | Pulled                    | Container image "registry.k8s.io/pause:3.10" already present on machine ...
+ 2026-09-29 20:58:08+00 | Pod        | demo-9b47f4794-hsfnw | Created                   | Container created
+ 2026-09-29 20:58:08+00 | Pod        | demo-9b47f4794-hsfnw | Started                   | Container started
+ 2026-09-29 20:58:08+00 | Pod        | demo-9b47f4794-hsfnw | PodReadyToStartContainers |
+ 2026-09-29 20:58:08+00 | Pod        | demo-9b47f4794-hsfnw | ContainersReady           |
+ 2026-09-29 20:58:08+00 | Pod        | demo-9b47f4794-hsfnw | Ready                     |
 ```
+
+That is the demo chart on kind, as the e2e suite ran it: the whole rollout in
+about a second. The image was already on the node, so `Pulled` says so; with
+an image that has to be fetched, the row reads `pull took 3.214s` instead.
 
 It is one query over five tables: find the release's Deployment and Service
 by label, follow `ownerReferences` from the Deployment to its ReplicaSets and
