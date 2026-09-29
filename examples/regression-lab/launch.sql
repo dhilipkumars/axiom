@@ -48,7 +48,7 @@ lat="$(sed -n 's/^latency average = \([0-9.]*\) ms.*/\1/p' <<<"$out" | head -1)"
 if [[ -z "$tps" || -z "$lat" ]]; then echo "$out"; exit 1; fi
 printf '{"tps": %s, "latency_ms": %s, "server_version": "%s"}' \
   "$tps" "$lat" "$(gosu postgres postgres --version | awk '{print $3}')" > /dev/termination-log
-$script$))))))
+$script$)))))))
 FROM lab.matrix m
 WHERE NOT EXISTS (
   SELECT 1 FROM lab.jobs j
