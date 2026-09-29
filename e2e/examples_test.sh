@@ -73,6 +73,16 @@ operator_stop() {
     >/dev/null 2>&1 || true
 }
 e2e_on_teardown operator_stop
+# logged PATTERN WHAT: wait for the operator to log PATTERN. The label can
+# reach the cluster a moment before the reconcile that wrote it returns and
+# logs, so this waits rather than reading the log once.
+logged() {
+  local deadline=$((SECONDS + 10))
+  until grep -q "$1" "$OP_LOG"; do
+    (( SECONDS < deadline )) || fail "$2: $(cat "$OP_LOG")"
+    sleep 1
+  done
+}
 # label_is CM WANT SECS WHAT: wait for a ConfigMap's team label.
 label_is() {
   local cm="$1" want="$2" deadline=$((SECONDS + $3)) got=""
@@ -98,7 +108,7 @@ done
 log "sql-operator: a new ConfigMap is labelled within seconds, through NOTIFY"
 kubectl_e2e -n "$OP_NS" create configmap op-a --from-literal=k=v >/dev/null
 label_is op-a payments 20 "NOTIFY path"
-grep -q "reconciled (notified)" "$OP_LOG" || fail "the label arrived, but not through a notified reconcile: $(cat "$OP_LOG")"
+logged "reconciled (notified)" "the label arrived, but not through a notified reconcile"
 
 log "sql-operator: a label removed by hand comes back"
 kubectl_e2e -n "$OP_NS" label configmap op-a team- >/dev/null
@@ -111,7 +121,7 @@ log "sql-operator: a change to the owners table reaches the cluster on the next 
 operator_start 3
 psql_axiom "UPDATE sqlop.owners SET team = 'platform' WHERE namespace = '$OP_NS';"
 label_is op-a platform 20 "sweep path"
-grep -q "reconciled (sweep)" "$OP_LOG" || fail "the relabel did not come from a sweep: $(cat "$OP_LOG")"
+logged "reconciled (sweep)" "the relabel did not come from a sweep"
 operator_stop
 echo "notified, drift-repaired and swept: $(grep -c reconciled "$OP_LOG") reconciles in the last run"
 
