@@ -53,17 +53,22 @@ psql_axiom "INSERT INTO sqlop.owners VALUES ('$OP_NS', 'payments');"
 compose exec -T "$E2E_SVC_POSTGRES" rm -rf /tmp/sql-operator >/dev/null
 compose cp "$EX/sql-operator" "$E2E_SVC_POSTGRES:/tmp/sql-operator" >/dev/null || fail "copy the operator into the Postgres container"
 
-OP_LOG="$(mktemp)"
-# operator_start SWEEP_SECONDS: run operator.sh in the Postgres container, in its
-# own session so operator_stop can end it and its psql children together.
+# op_log: what the operator has logged, read from inside the container. Its
+# output is written to a file there rather than streamed back through a
+# backgrounded `compose exec`, which delivered the first line and then none of
+# the rest -- the gateway's own log showed the reconciles happening.
+op_log() { compose exec -T "$E2E_SVC_POSTGRES" cat /tmp/sql-operator.log 2>/dev/null || true; }
+# operator_start SWEEP_SECONDS: run operator.sh detached in the Postgres
+# container, in its own session so operator_stop can end it and its psql
+# children together.
 operator_start() {
-  : > "$OP_LOG"
-  compose exec -T -e PGUSER="$E2E_PG_USER" -e PGDATABASE="$E2E_PG_DB" -e SWEEP_SECONDS="$1" \
-    "$E2E_SVC_POSTGRES" setsid bash -c 'echo $$ > /tmp/sql-operator.pid; exec bash /tmp/sql-operator/operator.sh' \
-    >>"$OP_LOG" 2>&1 &
+  compose exec -d -e PGUSER="$E2E_PG_USER" -e PGDATABASE="$E2E_PG_DB" -e SWEEP_SECONDS="$1" \
+    "$E2E_SVC_POSTGRES" setsid bash -c \
+    'echo $$ > /tmp/sql-operator.pid; exec bash /tmp/sql-operator/operator.sh > /tmp/sql-operator.log 2>&1' \
+    || fail "start the operator"
   local deadline=$((SECONDS + 60))
-  until grep -q "reconciled (startup)" "$OP_LOG"; do
-    (( SECONDS < deadline )) || fail "the operator did not complete its startup reconcile: $(cat "$OP_LOG")"
+  until op_log | grep -q "reconciled (startup)"; do
+    (( SECONDS < deadline )) || fail "the operator did not complete its startup reconcile: $(op_log)"
     sleep 1
   done
 }
@@ -78,8 +83,8 @@ e2e_on_teardown operator_stop
 # logs, so this waits rather than reading the log once.
 logged() {
   local deadline=$((SECONDS + 10))
-  until grep -q "$1" "$OP_LOG"; do
-    (( SECONDS < deadline )) || fail "$2: $(cat "$OP_LOG")"
+  until op_log | grep -q "$1"; do
+    (( SECONDS < deadline )) || fail "$2: $(op_log)"
     sleep 1
   done
 }
@@ -92,7 +97,7 @@ label_is() {
     sleep 1
   done
   fail "$4: configmap $cm has team='$got' after $3s, want '$want'. Operator log:
-$(cat "$OP_LOG")"
+$(op_log)"
 }
 
 # The first two checks run with a sweep far longer than their deadline, so the
@@ -123,7 +128,7 @@ psql_axiom "UPDATE sqlop.owners SET team = 'platform' WHERE namespace = '$OP_NS'
 label_is op-a platform 20 "sweep path"
 logged "reconciled (sweep)" "the relabel did not come from a sweep"
 operator_stop
-echo "notified, drift-repaired and swept: $(grep -c reconciled "$OP_LOG") reconciles in the last run"
+echo "notified, drift-repaired and swept: $(op_log | grep -c reconciled) reconciles in the last run"
 
 # --- deploy-timeline ------------------------------------------------------------------
 
