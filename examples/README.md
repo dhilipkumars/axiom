@@ -14,7 +14,7 @@ in CI exactly as shipped.
 The operator and the timeline run in every pull request's e2e suite
 (`e2e/examples_test.sh`). The lab needs CloudNativePG and metrics-server and
 takes minutes, so it has its own workflow (`e2e/lab_test.sh`): comment
-`/run-lab` on a pull request to run it; it also runs nightly, and on pull
+`/run-example-tests` on a pull request to run it; it also runs nightly, and on pull
 requests that change it.
 
 They assume a working Axiom setup: the extension installed, a gateway it can

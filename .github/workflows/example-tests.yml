@@ -1,30 +1,33 @@
-name: lab
+name: example-tests
 
-# The regression lab (examples/regression-lab), run as shipped: CloudNativePG
-# clusters of Postgres 16, 17 and 18 created from SQL, a pgbench Job against
-# each, and their resource use sampled while it runs (#104, #107).
+# Every program under examples/, run as shipped (#104, #107): the SQL
+# operator and the deploy timeline (e2e/examples_test.sh), and the
+# regression lab (e2e/lab_test.sh) -- CloudNativePG clusters of Postgres 16,
+# 17 and 18 created from SQL, a pgbench Job against each, and their resource
+# use sampled while it runs.
 #
-# Not part of every pull request's CI: it installs CloudNativePG and
-# metrics-server, pulls three Postgres images and runs minutes of benchmarks,
-# and it tests nothing that depends on which Postgres major Axiom is built
-# for. It runs:
+# The operator and the timeline also run in every pull request's CI; the lab
+# does not. It installs CloudNativePG and metrics-server, pulls three Postgres
+# images and runs minutes of benchmarks, and it tests nothing that depends on
+# which Postgres major Axiom is built for. This workflow runs all of them:
 #
-#   - on a pull request that changes the lab, so a change to it cannot merge
-#     untested;
-#   - when an owner, member or collaborator comments `/run-lab` on a pull
-#     request (tests its head) or an issue (tests the default branch), with
-#     the results posted back as a comment;
+#   - on a pull request that changes an example, so a change to one cannot
+#     merge untested;
+#   - when an owner, member or collaborator comments `/run-example-tests` on
+#     a pull request (tests its head) or an issue (tests the default branch),
+#     with the lab's results posted back as a comment;
 #   - nightly, so a break from outside -- a new CloudNativePG, a moved image --
 #     surfaces within a day; and by hand.
 
 on:
   pull_request:
     paths:
-      - examples/regression-lab/**
+      - examples/**
+      - e2e/examples_test.sh
       - e2e/lab_test.sh
       - e2e/lib/examples.sh
       - e2e/lib/kind.sh
-      - .github/workflows/lab.yml
+      - .github/workflows/example-tests.yml
       - .github/workflows/pr-command.yml
   schedule:
     - cron: "17 5 * * *"
@@ -40,7 +43,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: lab-${{ github.event.issue.number || github.ref }}
+  group: example-tests-${{ github.event.issue.number || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -48,7 +51,7 @@ jobs:
     name: command
     if: >-
       github.event_name != 'issue_comment' ||
-      (startsWith(github.event.comment.body, '/run-lab') &&
+      (startsWith(github.event.comment.body, '/run-example-tests') &&
        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
     permissions:
       contents: read
@@ -56,11 +59,11 @@ jobs:
       pull-requests: write
     uses: ./.github/workflows/pr-command.yml
     with:
-      what: the regression lab
+      what: the example tests, the regression lab included
       dispatch_ref: ${{ inputs.ref }}
 
-  lab:
-    name: regression lab
+  examples:
+    name: example tests
     needs: command
     runs-on: ubuntu-latest
     steps:
@@ -71,7 +74,8 @@ jobs:
       - uses: helm/kind-action@v1
         with:
           install_only: true
-      - run: make e2e-lab
+      # One image build and one kind cluster for both gates.
+      - run: ./e2e/run_all.sh examples lab
         env:
           E2E_TIMEOUT_SECS: "180"
           E2E_LAB_REPORT: ${{ runner.temp }}/lab-results.txt
@@ -84,7 +88,7 @@ jobs:
 
   report:
     name: report
-    needs: [command, lab]
+    needs: [command, examples]
     if: always() && needs.command.result == 'success'
     runs-on: ubuntu-latest
     permissions:
@@ -103,17 +107,17 @@ jobs:
           EVENT: ${{ github.event_name }}
           NUMBER: ${{ github.event.issue.number }}
           REF: ${{ needs.command.outputs.ref }}
-          OUTCOME: ${{ needs.lab.result }}
+          OUTCOME: ${{ needs.examples.result }}
         run: |
           {
-            echo "### Regression lab: \`$REF\` -- $OUTCOME"
+            echo "### Example tests: \`$REF\` -- $OUTCOME"
             echo
             if [[ -s results/lab-results.txt ]]; then
               echo '```'
               cat results/lab-results.txt
               echo '```'
             else
-              echo "The lab did not get as far as its results; the run's log says why."
+              echo "The regression lab did not get as far as its results; the run's log says why."
             fi
             echo
             echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

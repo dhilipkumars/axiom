@@ -1,8 +1,8 @@
 name: pr-command
 
 # The shared start of a workflow that a comment command can trigger, such as
-# pg-matrix's /cover-all-pg-versions and lab's /run-lab: decide what to test,
-# and tell the commenter it has started.
+# pg-matrix's /cover-all-pg-versions and example-tests' /run-example-tests:
+# decide what to test, and tell the commenter it has started.
 #
 # Called, not run on its own. The caller keeps the `if:` that decides whether
 # a comment is its command from someone allowed to run it, because that check

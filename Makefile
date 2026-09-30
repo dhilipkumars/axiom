@@ -252,7 +252,7 @@ e2e-examples:
 	./e2e/examples_test.sh
 
 # The regression lab: CloudNativePG, metrics-server and minutes of pgbench, so
-# not part of `make e2e`. The lab workflow runs it on demand (#107).
+# not part of `make e2e`. The example-tests workflow runs it on demand (#107).
 e2e-lab:
 	./e2e/lab_test.sh
 

@@ -26,7 +26,7 @@ the components natively you also need the Go and Rust toolchains.
 - For every gate but Phase 0: [`kind`](https://kind.sigs.k8s.io) and `kubectl`
 - `make e2e-lab` runs the regression lab, which is not part of `make e2e`: it
   installs CloudNativePG and metrics-server and runs minutes of `pgbench`. In
-  CI it has its own workflow, triggered by commenting `/run-lab` on a pull
+  CI it has its own workflow, triggered by commenting `/run-example-tests` on a pull
   request
 - `helm` is optional. The examples gate installs a chart with it when it is
   on your `PATH`, and otherwise runs a pinned `alpine/helm` image on kind's

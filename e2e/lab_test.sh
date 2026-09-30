@@ -6,8 +6,9 @@
 # benchmark runs; and results.sql joins the two.
 #
 # Not in ALL_GATES: it installs two operators, pulls three Postgres images and
-# runs minutes of benchmarks. The lab workflow (.github/workflows/lab.yml)
-# runs it on demand, nightly, and on pull requests that touch the lab.
+# runs minutes of benchmarks. The example-tests workflow
+# (.github/workflows/example-tests.yml) runs it on demand, nightly, and on
+# pull requests that touch an example.
 #
 #   E2E_LAB_REPORT   write the results table here as well as printing it
 set -euo pipefail
