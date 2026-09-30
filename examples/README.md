@@ -9,7 +9,7 @@ e2e suite (`e2e/examples_test.sh`) exactly as shipped.
 |---|---|
 | [`sql-operator/`](sql-operator/) | A Kubernetes operator whose whole reconcile step is one `UPDATE`, driven by a table you own, woken by `NOTIFY` and kept correct by a sweep. |
 | [`deploy-timeline/`](deploy-timeline/) | Everything that happened to a Helm release — Deployment, ReplicaSet, Pod, scheduling, image pull, readiness — on one timeline, from one query. |
-| [`regression-lab/`](regression-lab/) | A Postgres benchmark matrix as a table: one `INSERT` starts a `pgbench` Job per row, and one query reads the results back from the cluster. |
+| [`regression-lab/`](regression-lab/) | Postgres clusters created by CloudNativePG from a table, `pgbench` Jobs launched against them from another, and one query that puts each run's throughput beside the CPU and memory its Postgres used while it ran. |
 
 They assume a working Axiom setup: the extension installed, a gateway it can
 reach, and a server created with `CREATE SERVER`. The

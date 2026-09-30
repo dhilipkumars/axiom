@@ -1,50 +1,52 @@
 # A Postgres regression lab
 
-A benchmark matrix is a table: one row per run, with the Postgres build to
-test, the settings to start it with, and how long to run. One `INSERT` turns
-the rows into Kubernetes Jobs, and one query reads the results back.
+Benchmark Postgres on Kubernetes, and see what it cost, from SQL. The lab is
+two tables:
+
+- **`lab.clusters`**: the Postgres clusters under test. CloudNativePG builds
+  one from each row.
+- **`lab.runs`**: `pgbench` runs against them. Each row becomes a Job.
+
+While the runs go, a sampler records what the Postgres Pods use. One query then
+puts each run's throughput beside the CPU and memory its Postgres used while
+the benchmark was running:
 
 ```
-     run      |         settings          | state  |   tps    | latency_ms | server_version | error
---------------+---------------------------+--------+----------+------------+----------------+-------------------------------------------
- buffers-16mb | -c shared_buffers=16MB    | done   | 2107.80  |      0.949 | 16.15          |
- buffers-64mb | -c shared_buffers=64MB    | done   | 2086.72  |      0.958 | 16.15          |
- broken       | -c shared_buffers=nonsense| failed |          |            |                | pg_ctl: could not start server ... FATAL: invalid value
-              |                           |        |          |            |                | for parameter "shared_buffers": "nonsense"
+OUTPUT-FROM-THE-E2E-RUN
 ```
 
-That is `results.sql` from the e2e suite's run on kind (the resource columns
-are left out; kind has no metrics-server). Five-second runs on a shared CI
-machine, so read the shape, not the numbers.
+Every step is SQL through Axiom:
 
-Each Job starts a throwaway Postgres from the image under test, runs
-`pgbench` against it, and reports the result as its **termination message**.
-Kubernetes keeps that in the Pod's status, so SQL reads it straight back: no
-log access, no results database the Job has to reach, nothing to collect. When
-a run fails, the message is the tail of its output instead, and `results.sql`
-shows it as the error.
+- **Clusters.** `clusters.sql` writes a CloudNativePG `Cluster` custom resource
+  for each row of `lab.clusters`.
+- **Benchmarks.** `launch.sql` writes a `Job` for each run.
+- **Usage.** `sample.sql` reads `metrics.k8s.io`.
+- **Results.** `results.sql` reads each run's result back from its Pod's
+  termination message, and joins it to the samples.
+
+Nothing is collected, exported or scraped outside Postgres.
 
 ## Running it
 
+It needs [CloudNativePG](https://cloudnative-pg.io) and, for the resource
+columns, [metrics-server](https://github.com/kubernetes-sigs/metrics-server).
+The gateway must serve the kinds it uses:
+`--serve ...,jobs.batch,clusters.postgresql.cnpg.io,pods.metrics.k8s.io`.
+
 ```sh
-kubectl apply -f rbac.yaml       # lets the gateway create Jobs in regression-lab
+kubectl apply -f rbac.yaml                        # lets the gateway create Clusters and Jobs in regression-lab
 psql -v server=<your axiom server> -f setup.sql
-psql -v image=postgres:17-bookworm -f matrix-example.sql
-psql -v namespace=regression-lab -f launch.sql
-psql -v namespace=regression-lab -f results.sql   # again, until every run is done
+psql -f lab-example.sql                           # two clusters, 500m and 2 CPUs; a run against each
+psql -v namespace=regression-lab -f clusters.sql
 ```
 
-`image` is any image with `postgres`, `initdb` and `pgbench` on its `PATH` and
-`gosu` to drop root, which the official images have — including a build of
-your own. To compare two builds, add a row per image. `launch.sql` starts a
-Job only for runs that do not have one, so adding a row and launching again
-runs just the new one.
+Wait until both clusters are healthy:
 
-### Resource use
+```sql
+SELECT name, status->>'phase' FROM lab.pg_clusters WHERE namespace = 'regression-lab';
+```
 
-Where metrics-server runs, `sample.sql` records each running benchmark's CPU
-and memory into `lab.usage`, and `results.sql` shows each run's peak beside
-its throughput. Run it on a loop while the matrix runs:
+Then start the sampler in one session and the runs from another:
 
 ```
 $ psql -v namespace=regression-lab
@@ -52,23 +54,44 @@ $ psql -v namespace=regression-lab
 => \watch 5
 ```
 
-`\watch` repeats the last statement every five seconds until you interrupt it.
-It needs an interactive session: `psql -f` would run the file once and exit.
+```sh
+psql -v namespace=regression-lab -f launch.sql
+psql -v namespace=regression-lab -f results.sql   # again, until the runs are done
+```
 
-It has to sample while runs are going: `metrics.k8s.io` reports only pods
-that are running, so a finished run has nothing left to join.
-`axiom_quantity()` turns the API's `250m` and `64Mi` into numbers.
+`\watch` repeats the sample until you interrupt it. It needs an interactive
+session: `psql -f` would run the file once and exit.
+
+## How the numbers are matched
+
+- **The benchmark window.** Each Job records the UTC times immediately before
+  and after the timed `pgbench -T` run, and reports them with its result.
+  `results.sql` counts only the samples whose whole window falls between them.
+  Waiting for the cluster and building the pgbench tables don't dilute the
+  average. `samples` shows how many samples that left.
+- **Only real samples.** metrics-server reports a Pod about every 15 seconds,
+  as an average over that window. `sample.sql` keys each sample on its own
+  timestamp, so polling faster records nothing twice.
+- **The right Pods.** Postgres is CloudNativePG's instance Pods
+  (`cnpg.io/podRole=instance`). Its one-off `initdb` Job carries the cluster's
+  label too, and is left out. The `pgbench` client's own CPU is shown
+  separately, so you can see whether the client, not the server, was the
+  bottleneck.
+- **No password in SQL.** Each Job reads its cluster's password from the
+  `<cluster>-app` Secret that CloudNativePG creates, through `secretKeyRef`.
+  Kubernetes injects it into the container; neither SQL nor the gateway ever
+  reads a Secret.
 
 ## Limits
 
-- **Termination messages are capped at 4 KiB.** Enough for a JSON result or
-  the tail of an error, not for `regression.diffs`. Reading whole logs from
-  SQL is #105.
-- **It acts as the gateway.** `rbac.yaml` lets the gateway create Jobs in
-  `regression-lab`, and every SQL role that can use the server acts as the
-  gateway (#71), so any of them can start containers there. Keep it a lab.
-- **Numbers from a shared cluster are noisy.** Pin the Jobs to dedicated nodes
-  and give them resource requests before reading much into a few percent.
-- **The e2e suite checks the results, not the sampler.** It runs the matrix,
-  the launch and the results as shipped on kind, which has no metrics-server;
-  `sample.sql` is exercised only by hand.
+- **Runs on one cluster take turns.** `pgbench -i` rebuilds its tables, so
+  `launch.sql` won't start a run while another run on the same cluster is
+  unfinished. Launch again once it's done.
+- **Termination messages are capped at 4 KiB.** That's enough for the JSON
+  result, or the tail of an error. Reading whole logs from SQL is #105.
+- **It acts as the gateway.** `rbac.yaml` lets the gateway create Clusters and
+  Jobs in `regression-lab`. Every SQL role that can use the server acts as the
+  gateway (#71), so any of them can do the same. Keep it a lab.
+- **Shared clusters are noisy.** Pin the Pods to dedicated nodes before reading
+  much into a few percent. The e2e suite runs this on a CI machine's kind
+  cluster, so its numbers show the shape, not a benchmark.

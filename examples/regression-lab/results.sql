@@ -1,21 +1,20 @@
--- Every run in the matrix, with where it has got to and its result once it
--- has one.
+-- Every run: where it has got to, its result, and what the Postgres under test
+-- used while it ran.
 --
 --   psql -v namespace=regression-lab -f results.sql
 --
 -- state is one of:
 --   not started  no Pod for the run yet: not launched, or not yet created
---   pending      a Pod, not yet scheduled or started
---   waiting      scheduled, but the container cannot start; `error` says why
---                (ImagePullBackOff, CrashLoopBackOff, ...)
+--   pending      a Pod, not yet started
+--   waiting      the container cannot start; `error` says why
 --   running      the benchmark is going
 --   done         finished, with a result
 --   failed       finished without one; `error` is the tail of its output
 --
--- A finished container's termination message is in the Pod's status. It is
--- JSON when pgbench succeeded and the tail of the container's output when it
--- did not. Resource use comes from lab.usage, which sample.sql fills while
--- runs are going; without metrics-server those columns stay empty.
+-- Resource use is taken from lab.usage (sample.sql) for the run's cluster,
+-- counting only the samples whose whole window falls inside the timed run --
+-- not the Job's start and end, which also cover waiting for the cluster and
+-- building the pgbench tables. `samples` says how many that was.
 \set ON_ERROR_STOP on
 
 WITH latest_pod AS (
@@ -36,7 +35,7 @@ WITH latest_pod AS (
 result AS (
   SELECT run, phase, pod_reason,
          -- Waiting to be created is normal on the way to starting; any other
-         -- reason (ImagePullBackOff, CrashLoopBackOff, ...) is a problem.
+         -- reason (ImagePullBackOff, CreateContainerConfigError, ...) is not.
          CASE WHEN cs->'state'->'waiting'->>'reason' NOT IN ('ContainerCreating', 'PodInitializing')
               THEN cs->'state'->'waiting' END AS waiting,
          cs->'state'->'terminated' AS t,
@@ -53,33 +52,48 @@ result AS (
               ELSE false END AS ok
     FROM latest_pod
 ),
-usage AS (
-  SELECT run, max(cpu_cores) AS peak_cpu_cores, max(memory) AS peak_memory
-    FROM lab.usage
-   WHERE namespace = :'namespace'
-   GROUP BY run
+used AS (
+  SELECT r.run, u.role,
+         count(*) AS samples,
+         avg(u.cpu_cores) AS cpu_avg,
+         max(u.cpu_cores) AS cpu_peak,
+         max(u.memory) AS memory_peak
+    FROM result r
+    JOIN lab.runs x USING (run)
+    JOIN lab.usage u
+      ON u.namespace = :'namespace'
+     AND u.cluster = x.cluster
+     AND u.sampled_at - make_interval(secs => coalesce(u.window_s, 15))
+           >= (r.r->>'started_at')::timestamptz
+     AND u.sampled_at <= (r.r->>'finished_at')::timestamptz
+   WHERE r.ok
+   GROUP BY r.run, u.role
 )
-SELECT m.run, m.settings,
+SELECT x.run, x.cluster, c.cpu AS cpu_limit, x.clients,
        CASE WHEN r.run IS NULL THEN 'not started'
             WHEN r.ok THEN 'done'
             WHEN r.t IS NOT NULL OR r.phase = 'Failed' THEN 'failed'
             WHEN r.waiting IS NOT NULL THEN 'waiting'
             WHEN r.phase = 'Running' THEN 'running'
             ELSE 'pending' END AS state,
-       (r.r->>'tps')::numeric AS tps,
+       round((r.r->>'tps')::numeric) AS tps,
        (r.r->>'latency_ms')::numeric AS latency_ms,
-       r.r->>'server_version' AS server_version,
-       u.peak_cpu_cores,
-       pg_size_pretty(u.peak_memory) AS peak_memory,
+       round(pg.cpu_avg, 2) AS pg_cpu_avg,
+       round(pg.cpu_peak, 2) AS pg_cpu_peak,
+       pg_size_pretty(round(pg.memory_peak)) AS pg_memory_peak,
+       pg.samples,
+       round(bench.cpu_avg, 2) AS pgbench_cpu_avg,
        -- One line, so the table stays readable: a termination message is the
        -- tail of the container's output, newlines and all.
        CASE WHEN r.t IS NOT NULL AND NOT r.ok
             THEN left(regexp_replace(coalesce(nullif(r.t->>'message', ''), 'exit code ' || r.exit_code),
-                                     '\s+', ' ', 'g'), 400)
+                                     '\s+', ' ', 'g'), 300)
             WHEN r.phase = 'Failed' THEN nullif(r.pod_reason, '')
             WHEN r.waiting IS NOT NULL
             THEN concat_ws(': ', r.waiting->>'reason', r.waiting->>'message') END AS error
-  FROM lab.matrix m
+  FROM lab.runs x
+  LEFT JOIN lab.clusters c ON c.name = x.cluster
   LEFT JOIN result r USING (run)
-  LEFT JOIN usage u USING (run)
- ORDER BY tps DESC NULLS LAST, m.run;
+  LEFT JOIN used pg ON pg.run = x.run AND pg.role = 'postgres'
+  LEFT JOIN used bench ON bench.run = x.run AND bench.role = 'pgbench'
+ ORDER BY x.run;

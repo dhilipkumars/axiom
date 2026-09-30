@@ -1,21 +1,48 @@
-# The regression lab creates and deletes Jobs, which the gateway's shipped RBAC
-# does not grant (it writes only what it enumerates). This grants exactly that,
-# in the lab's namespace only, to the gateway's ServiceAccount.
+# What the regression lab needs beyond the gateway's shipped RBAC.
 #
-# Every SQL role that can use the Axiom server acts as this identity (#71), so
-# granting Jobs here lets them start arbitrary containers in this namespace.
-# Keep the namespace a lab.
+# Every SQL role that can use the Axiom server acts as the gateway's
+# ServiceAccount (#71), so these grants are what those roles can do. Writes
+# are confined to the lab's namespace; keep it a lab.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: regression-lab
 ---
+# Reading CloudNativePG Clusters, cluster-wide: the gateway checks it may list
+# a kind before it serves it, and CloudNativePG does not necessarily add its
+# kinds to the `view` role the shipped RBAC aggregates.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: axiom-regression-lab-read
+rules:
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["clusters"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: axiom-regression-lab-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: axiom-regression-lab-read
+subjects:
+  - kind: ServiceAccount
+    name: axiom-gateway
+    namespace: axiom-system
+---
+# Creating the target clusters and the benchmark Jobs, in the lab only.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: axiom-regression-lab
   namespace: regression-lab
 rules:
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["clusters"]
+    verbs: ["create", "delete"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "list", "watch", "create", "delete"]

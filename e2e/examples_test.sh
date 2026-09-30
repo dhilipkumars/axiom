@@ -23,18 +23,29 @@ EX="$E2E_ROOT/examples"
 OP_NS="axiom-sqlop"
 TL_NS="axiom-timeline"
 LAB_NS="regression-lab"   # fixed by examples/regression-lab/rbac.yaml
-LAB_IMAGE="axiom-lab-postgres:e2e"
 
 kind_up
 e2e_on_teardown kind_down
 stack_up
-kind_deploy_gateway "configmaps,pods,events,services,deployments.apps,replicasets.apps,jobs.batch"
+# The lab's operators first: their startup overlaps the other examples, and
+# the Cluster CRD must exist before the gateway looks for the kinds it serves.
+kind_cnpg
+kind_metrics_server
+kind_deploy_gateway "configmaps,pods,events,services,deployments.apps,replicasets.apps,jobs.batch,clusters.postgresql.cnpg.io,pods.metrics.k8s.io"
 
 # psql_file FILE [-v name=value ...]: run one of the example files as shipped.
 psql_file() {
   local file="$1"; shift
   compose exec -T "$E2E_SVC_POSTGRES" psql -X -q -v ON_ERROR_STOP=1 -U "$E2E_PG_USER" -d "$E2E_PG_DB" -At \
     -v server=kind "$@" -f - < "$file"
+}
+
+# psql_table FILE [-v name=value ...]: the same, printed as psql's aligned
+# table, for the output the READMEs quote.
+psql_table() {
+  local file="$1"; shift
+  compose exec -T "$E2E_SVC_POSTGRES" psql -X -q -v ON_ERROR_STOP=1 -U "$E2E_PG_USER" -d "$E2E_PG_DB" \
+    -P pager=off -v server=kind "$@" -f - < "$file"
 }
 
 psql_axiom "CREATE EXTENSION IF NOT EXISTS axiom;"
@@ -118,6 +129,7 @@ logged "reconciled (notified)" "the label arrived, but not through a notified re
 log "sql-operator: a label removed by hand comes back"
 kubectl_e2e -n "$OP_NS" label configmap op-a team- >/dev/null
 label_is op-a payments 20 "drift repair"
+op_log
 operator_stop
 
 log "sql-operator: a change to the owners table reaches the cluster on the next sweep"
@@ -127,7 +139,9 @@ operator_start 3
 psql_axiom "UPDATE sqlop.owners SET team = 'platform' WHERE namespace = '$OP_NS';"
 label_is op-a platform 20 "sweep path"
 logged "reconciled (sweep)" "the relabel did not come from a sweep"
+op_log
 operator_stop
+kubectl_e2e -n "$OP_NS" get configmaps -L team
 echo "notified, drift-repaired and swept: $(op_log | grep -c reconciled) reconciles in the last run"
 
 # --- deploy-timeline ------------------------------------------------------------------
@@ -152,7 +166,7 @@ while :; do
 $timeline"
   sleep 2
 done
-echo "$timeline"
+psql_table "$EX/deploy-timeline/timeline.sql" -v namespace="$TL_NS" -v release=demo
 # at_of KIND STEP: the first time that kind reached that step.
 at_of() { awk -F'|' -v k="$1" -v s="$2" '$2 == k && $4 == s { print $1; exit }' <<<"$timeline"; }
 prev=""
@@ -169,59 +183,77 @@ echo "Deployment, ReplicaSet and Pod created, scheduled, started and ready, in o
 
 # --- regression-lab -------------------------------------------------------------------
 
-log "regression-lab: the Postgres image under test, side-loaded into kind"
-# The Postgres image this suite just built has postgres and pgbench, and is
-# already here, so the lab pulls nothing.
-pg_image_id="$(docker inspect -f '{{.Image}}' "$(compose ps -q "$E2E_SVC_POSTGRES")")" \
-  || fail "find the Postgres image the stack runs"
-docker tag "$pg_image_id" "$LAB_IMAGE" >/dev/null || fail "tag the Postgres image for the lab"
-kind_load_gateway_image "$LAB_IMAGE" "$LAB_IMAGE"
+log "regression-lab: two CloudNativePG clusters, created from SQL"
 kind_apply "$EX/regression-lab/rbac.yaml"
-lab_down() { kubectl_e2e delete namespace "$LAB_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true; }
+lab_down() {
+  [[ -n "${SAMPLER_PID:-}" ]] && kill "$SAMPLER_PID" 2>/dev/null || true
+  kubectl_e2e delete namespace "$LAB_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+}
 e2e_on_teardown lab_down
-kubectl_e2e -n "$LAB_NS" delete jobs --all --ignore-not-found >/dev/null
-
-log "regression-lab: two settings and a broken one become Jobs through launch.sql"
 psql_axiom "DROP SCHEMA IF EXISTS lab CASCADE;"
 psql_file "$EX/regression-lab/setup.sql" >/dev/null
-psql_axiom "INSERT INTO lab.matrix (run, image, settings, seconds) VALUES
-  ('buffers-16mb', '$LAB_IMAGE', '-c shared_buffers=16MB', 5),
-  ('buffers-64mb', '$LAB_IMAGE', '-c shared_buffers=64MB', 5),
-  ('broken', '$LAB_IMAGE', '-c shared_buffers=nonsense', 5);"
-# Before launching, every run is reported as not started, not as running.
-got="$(psql_file "$EX/regression-lab/results.sql" -v namespace="$LAB_NS" | cut -d'|' -f3 | sort | uniq -c | tr -s ' ')"
-[[ "$got" == " 3 not started" ]] || fail "before launch.sql, results.sql reported: $got"
+psql_file "$EX/regression-lab/lab-example.sql" >/dev/null
+# The operator's admission webhook can refuse a Cluster for a few seconds
+# after the operator reports ready. Retry that, and only that.
+deadline=$((SECONDS + 90))
+until out="$(psql_file "$EX/regression-lab/clusters.sql" -v namespace="$LAB_NS" 2>&1)"; do
+  grep -qi "webhook" <<<"$out" || fail "clusters.sql failed: $out"
+  (( SECONDS < deadline )) || fail "the CloudNativePG webhook kept refusing clusters.sql: $out"
+  sleep 3
+done
+deadline=$((SECONDS + 420))
+until [[ "$(psql_axiom "SELECT count(*) FROM lab.pg_clusters
+                         WHERE namespace = '$LAB_NS' AND status->>'phase' = 'Cluster in healthy state';")" == 2 ]]; do
+  (( SECONDS < deadline )) || fail "the clusters did not become healthy: $(psql_axiom "SELECT name, status->>'phase' FROM lab.pg_clusters WHERE namespace = '$LAB_NS';")"
+  sleep 5
+done
+echo "pg-small and pg-large are healthy"
+
+log "regression-lab: pgbench against each, sampled while it runs"
+# Sampled from the host every five seconds for as long as the runs go, as a
+# reader would with \watch; a failed sample is retried by the next one.
+( while :; do psql_file "$EX/regression-lab/sample.sql" -v namespace="$LAB_NS" >/dev/null 2>&1 || true; sleep 5; done ) &
+SAMPLER_PID=$!
 psql_file "$EX/regression-lab/launch.sql" -v namespace="$LAB_NS" >/dev/null
 jobs="$(kubectl_e2e -n "$LAB_NS" get jobs -o jsonpath='{.items[*].metadata.name}')"
-[[ "$(tr ' ' '\n' <<<"$jobs" | sort | paste -sd, -)" == "bench-broken,bench-buffers-16mb,bench-buffers-64mb" ]] \
+[[ "$(tr ' ' '\n' <<<"$jobs" | sort | paste -sd, -)" == "bench-large-8-clients,bench-missing-cluster,bench-small-8-clients" ]] \
   || fail "launch.sql created jobs '$jobs'"
-# Launching again starts nothing new.
 psql_file "$EX/regression-lab/launch.sql" -v namespace="$LAB_NS" >/dev/null
 [[ "$(kubectl_e2e -n "$LAB_NS" get jobs --no-headers | wc -l | tr -d ' ')" == 3 ]] \
   || fail "a second launch.sql started more Jobs"
 
-log "regression-lab: results.sql reads each run's result, or its error, from the Pod"
-deadline=$((SECONDS + 240))
-while :; do
-  results="$(psql_file "$EX/regression-lab/results.sql" -v namespace="$LAB_NS")"
-  grep -qE '\|(not started|pending|waiting|running)\|' <<<"$results" || [[ "$(grep -c . <<<"$results")" -lt 3 ]] || break
-  (( SECONDS < deadline )) || fail "the runs did not all finish:
-$results"
-  sleep 3
+# Wait for the two real runs only: the run against a cluster that does not
+# exist waits for its Secret forever, which is what it is there to show.
+state_of() { psql_file "$EX/regression-lab/results.sql" -v namespace="$LAB_NS" | awk -F'|' -v r="$1" '$1 == r { print $5 }'; }
+deadline=$((SECONDS + 420))
+until [[ "$(state_of small-8-clients)" =~ ^(done|failed)$ && "$(state_of large-8-clients)" =~ ^(done|failed)$ ]]; do
+  (( SECONDS < deadline )) || fail "the runs did not finish: $(psql_file "$EX/regression-lab/results.sql" -v namespace="$LAB_NS")"
+  sleep 5
 done
-echo "$results"
-for run in buffers-16mb buffers-64mb; do
-  row="$(grep "^$run|" <<<"$results")"
-  IFS='|' read -r _ _ state tps latency version _ _ error <<<"$row"
-  [[ "$state" == done ]] || fail "$run is '$state', want done: $error"
+# One more sample, so the last window of each run is in.
+sleep 20
+psql_file "$EX/regression-lab/sample.sql" -v namespace="$LAB_NS" >/dev/null 2>&1 || true
+kill "$SAMPLER_PID" 2>/dev/null || true; SAMPLER_PID=""
+psql_table "$EX/regression-lab/results.sql" -v namespace="$LAB_NS"
+
+results="$(psql_file "$EX/regression-lab/results.sql" -v namespace="$LAB_NS")"
+for run in small-8-clients large-8-clients; do
+  IFS='|' read -r _ _ _ _ state tps latency _ peak _ samples _ error <<<"$(grep "^$run|" <<<"$results")"
+  [[ "$state" == done ]] || fail "$run is '$state': $error"
   [[ "$(psql_axiom "SELECT '$tps'::numeric > 0 AND '$latency'::numeric > 0;")" == t ]] \
     || fail "$run reported tps '$tps' and latency '$latency'"
-  [[ -n "$version" ]] || fail "$run reported no server version"
+  # The claim the example makes: resource use of the Postgres under test,
+  # from inside the benchmark's window. At least two samples from there.
+  [[ "${samples:-0}" -ge 2 ]] || fail "$run has ${samples:-0} Postgres samples inside its benchmark window"
 done
-row="$(grep "^broken|" <<<"$results")"
-IFS='|' read -r _ _ state tps _ _ _ _ error <<<"$row"
-[[ "$state" == failed && -z "$tps" ]] || fail "the broken run is '$state' with tps '$tps', want failed and none"
-grep -qi "shared_buffers" <<<"$error" || fail "the broken run's error does not say why: '$error'"
-echo "two results with tps and latency; the broken run failed with its reason"
+# And that they are the right Pods: the small cluster cannot use more CPU
+# than its limit, give or take the averaging window.
+IFS='|' read -r _ _ _ _ _ _ _ _ peak _ <<<"$(grep "^small-8-clients|" <<<"$results")"
+[[ "$(psql_axiom "SELECT '$peak'::numeric <= 0.5 * 1.25;")" == t ]] \
+  || fail "pg-small peaked at $peak cores with a 500m limit: those samples are not its Pods"
+IFS='|' read -r _ _ _ _ state _ _ _ _ _ _ _ error <<<"$(grep "^missing-cluster|" <<<"$results")"
+[[ "$state" == waiting ]] && grep -q "pg-missing-app" <<<"$error" \
+  || fail "the run against a missing cluster is '$state' with '$error', want waiting on its Secret"
+echo "two runs with TPS, latency and in-window Postgres CPU; the missing cluster's run waits on its Secret"
 
 log "EXAMPLES E2E PASSED"

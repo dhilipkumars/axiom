@@ -445,5 +445,6 @@ suite exactly as shipped:
   A Helm release's Deployment, ReplicaSet, Pods, events and Pod conditions,
   in order, from one query.
 - **[A Postgres regression lab](https://github.com/dhilipkumars/axiom/tree/main/examples/regression-lab).**
-  A matrix table becomes `pgbench` Jobs, and the results come back from the
-  Pods' termination messages.
+  CloudNativePG clusters created from a table, and `pgbench` Jobs launched
+  against them. One query shows each run's throughput beside the CPU and
+  memory its Postgres used while the benchmark ran.
