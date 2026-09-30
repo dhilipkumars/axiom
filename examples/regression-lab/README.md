@@ -69,7 +69,14 @@ Wait until the clusters are healthy:
 SELECT name, status->>'phase' FROM lab.pg_clusters WHERE namespace = 'regression-lab';
 ```
 
-Then start the sampler in one session and the queue in another:
+Then start the sampler in one session and, once it has recorded the clusters,
+the queue in another. metrics-server reports a new Pod only after its first
+scrape, so a benchmark started before then loses its first windows:
+
+```sql
+SELECT cluster, count(*) FROM lab.usage WHERE role = 'postgres' GROUP BY cluster;  -- a row per cluster
+```
+
 
 ```
 $ psql -v namespace=regression-lab             $ psql -v namespace=regression-lab
@@ -129,7 +136,7 @@ The tables are the experiment. Change the rows, then run `clusters.sql` and
 - **One run at a time, lab-wide.** Runs never overlap, not even on different
   clusters. That keeps them from competing for the same nodes, and keeps
   `pgbench -i` from rebuilding tables under a run in progress. The cost is
-  time: three one-minute runs take about four minutes.
+  time: three 90-second runs take about six minutes.
 - **A run that never finishes holds up the queue.** A run whose Pod can't
   start, such as one naming a cluster that doesn't exist, stays unfinished,
   and `results.sql` shows it as `waiting` with the reason. Delete its Job, or
@@ -140,7 +147,7 @@ The tables are the experiment. Change the rows, then run `clusters.sql` and
   Jobs in `regression-lab`. Every SQL role that can use the server acts as the
   gateway (#71), so any of them can do the same. Keep it a lab.
 - **These numbers are not a benchmark.** The table above comes from a CI
-  machine: a four-vCPU virtual machine shared with other tenants, one-minute
+  machine: a four-vCPU virtual machine shared with other tenants, short
   runs, each run once.
   Differences between majors at that scale are mostly noise. For a real
   comparison, pin each cluster to a dedicated node, run longer, and repeat each

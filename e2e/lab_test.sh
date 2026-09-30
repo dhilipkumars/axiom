@@ -70,6 +70,14 @@ log "regression-lab: pgbench against each, sampled while it runs"
 # reader would with \watch; a failed sample is retried by the next one.
 ( while :; do psql_file "$EX/regression-lab/sample.sql" -v namespace="$LAB_NS" >/dev/null 2>&1 || true; sleep 5; done ) &
 SAMPLER_PID=$!
+# metrics-server reports a new Pod only after it has scraped it; a benchmark
+# started before then loses its first windows. Start the queue once every
+# cluster's Postgres has been sampled at least once.
+deadline=$((SECONDS + 180))
+until [[ "$(psql_axiom "SELECT count(DISTINCT cluster) FROM lab.usage WHERE namespace = '$LAB_NS' AND role = 'postgres';")" == 3 ]]; do
+  (( SECONDS < deadline )) || fail "metrics-server never reported all three clusters: $(psql_axiom "SELECT cluster, count(*) FROM lab.usage GROUP BY 1;")"
+  sleep 5
+done
 # results.sql's columns, as the reads below take them:
 #   1 run  2 cluster  3 server_version  4 cpu_limit  5 clients  6 state  7 tps
 #   8 latency_ms  9 pg_cpu_avg  10 tps_per_core  11 pg_cpu_peak
@@ -117,7 +125,10 @@ for run in $RUNS; do
   [[ "$version" == "${run:2:2}".* ]] || fail "$run measured server version '$version'"
   # The claim the example makes: resource use of the Postgres under test,
   # from inside the benchmark's window. At least two samples from there.
-  [[ "${samples:-0}" -ge 2 ]] || fail "$run has ${samples:-0} Postgres samples inside its benchmark window"
+  [[ "${samples:-0}" -ge 2 ]] || fail "$run has ${samples:-0} Postgres samples inside its benchmark window.
+Its result: $(grep "^$run|" <<<"$got")
+Every sample of its cluster:
+$(psql_axiom "SELECT u.pod, u.sampled_at, u.window_s, round(u.cpu_cores, 2) FROM lab.usage u JOIN lab.runs r ON r.cluster = u.cluster WHERE r.run = '$run' ORDER BY u.sampled_at;")"
   # And that they are the right Pods: no cluster can use more CPU than its
   # 2-CPU limit, give or take the averaging window.
   [[ "$(psql_axiom "SELECT '$peak'::numeric <= 2 * 1.25;")" == t ]] \

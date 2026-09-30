@@ -10,7 +10,7 @@ INSERT INTO lab.clusters (name, image, cpu, memory, parameters) VALUES
   ('pg18', 'ghcr.io/cloudnative-pg/postgresql:18.4',  '2', '512Mi', '{"shared_buffers": "128MB"}')
 ON CONFLICT (name) DO NOTHING;
 INSERT INTO lab.runs (run, cluster, clients, seconds, client_image) VALUES
-  ('pg16-8-clients', 'pg16', 8, 60, 'ghcr.io/cloudnative-pg/postgresql:18.4'),
-  ('pg17-8-clients', 'pg17', 8, 60, 'ghcr.io/cloudnative-pg/postgresql:18.4'),
-  ('pg18-8-clients', 'pg18', 8, 60, 'ghcr.io/cloudnative-pg/postgresql:18.4')
+  ('pg16-8-clients', 'pg16', 8, 90, 'ghcr.io/cloudnative-pg/postgresql:18.4'),
+  ('pg17-8-clients', 'pg17', 8, 90, 'ghcr.io/cloudnative-pg/postgresql:18.4'),
+  ('pg18-8-clients', 'pg18', 8, 90, 'ghcr.io/cloudnative-pg/postgresql:18.4')
 ON CONFLICT (run) DO NOTHING;
