@@ -9,16 +9,15 @@ CREATE SCHEMA IF NOT EXISTS lab;
 -- the server parameters, the image.
 CREATE TABLE IF NOT EXISTS lab.clusters (
   name       text PRIMARY KEY CHECK (length(name) <= 40 AND name ~ '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'),
-  image      text NOT NULL DEFAULT 'ghcr.io/cloudnative-pg/postgresql:17.11',
+  image      text NOT NULL DEFAULT 'ghcr.io/cloudnative-pg/postgresql:18.4',
   cpu        text NOT NULL,              -- the limit: '500m', '2'
   memory     text NOT NULL,              -- request and limit: '512Mi'
   storage    text NOT NULL DEFAULT '1Gi',
   parameters jsonb NOT NULL DEFAULT '{}' -- postgresql.conf, as strings
 );
 
--- The benchmark runs, one pgbench Job per row (launch.sql). `cluster` names a
--- row of lab.clusters; a run for a cluster that does not exist waits, and
--- results.sql says why.
+-- The benchmark runs, one pgbench Job per row, started one at a time in the
+-- order they were queued (launch.sql). `cluster` names a row of lab.clusters.
 CREATE TABLE IF NOT EXISTS lab.runs (
   -- It names the Job, bench-<run>, which the Job controller copies into a
   -- label value, and label values stop at 63 characters.
@@ -26,7 +25,11 @@ CREATE TABLE IF NOT EXISTS lab.runs (
   cluster text NOT NULL,
   clients int  NOT NULL DEFAULT 4 CHECK (clients > 0),
   seconds int  NOT NULL DEFAULT 60 CHECK (seconds > 0),
-  scale   int  NOT NULL DEFAULT 5 CHECK (scale > 0)
+  scale   int  NOT NULL DEFAULT 5 CHECK (scale > 0),
+  -- The pgbench client's image; the cluster's own when NULL. Comparing
+  -- servers, fix it, so one pgbench version measures them all.
+  client_image text,
+  queued_at    timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 
 -- What the benchmarked Pods used, as metrics-server reported it (sample.sql).

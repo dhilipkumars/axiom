@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Examples E2E (#104): the three programs under examples/ run as shipped
+# Examples E2E (#104): two of the programs under examples/ run as shipped
 # against a kind cluster. Every file the READMEs tell a reader to run is the
 # file run here, so the examples cannot drift from what works.
 #
@@ -7,8 +7,10 @@
 #                    NOTIFY axiom_events and kept correct by a periodic sweep
 #   deploy-timeline  a Helm release's Deployment, ReplicaSet, Pod and events
 #                    on one timeline, from one query
-#   regression-lab   a matrix table that becomes pgbench Jobs, with results
-#                    read back from the Pods' termination messages
+#
+# The third, the regression lab, installs CloudNativePG and metrics-server and
+# runs minutes of benchmarks, so it is its own gate, e2e/lab_test.sh, run on
+# demand rather than on every pull request (#107).
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,31 +24,13 @@ E2E_COMPOSE_OVERLAYS="${E2E_COMPOSE_OVERLAYS:-} $E2E_ROOT/deploy/compose/docker-
 EX="$E2E_ROOT/examples"
 OP_NS="axiom-sqlop"
 TL_NS="axiom-timeline"
-LAB_NS="regression-lab"   # fixed by examples/regression-lab/rbac.yaml
 
 kind_up
 e2e_on_teardown kind_down
 stack_up
-# The lab's operators first: their startup overlaps the other examples, and
-# the Cluster CRD must exist before the gateway looks for the kinds it serves.
-kind_cnpg
-kind_metrics_server
-kind_deploy_gateway "configmaps,pods,events,services,deployments.apps,replicasets.apps,jobs.batch,clusters.postgresql.cnpg.io,pods.metrics.k8s.io"
+kind_deploy_gateway "configmaps,pods,events,services,deployments.apps,replicasets.apps"
 
-# psql_file FILE [-v name=value ...]: run one of the example files as shipped.
-psql_file() {
-  local file="$1"; shift
-  compose exec -T "$E2E_SVC_POSTGRES" psql -X -q -v ON_ERROR_STOP=1 -U "$E2E_PG_USER" -d "$E2E_PG_DB" -At \
-    -v server=kind "$@" -f - < "$file"
-}
-
-# psql_table FILE [-v name=value ...]: the same, printed as psql's aligned
-# table, for the output the READMEs quote.
-psql_table() {
-  local file="$1"; shift
-  compose exec -T "$E2E_SVC_POSTGRES" psql -X -q -v ON_ERROR_STOP=1 -U "$E2E_PG_USER" -d "$E2E_PG_DB" \
-    -P pager=off -v server=kind "$@" -f - < "$file"
-}
+source "$here/lib/examples.sh"
 
 psql_axiom "CREATE EXTENSION IF NOT EXISTS axiom;"
 psql_axiom "DROP SERVER IF EXISTS kind CASCADE;"
@@ -70,11 +54,14 @@ compose cp "$EX/sql-operator" "$E2E_SVC_POSTGRES:/tmp/sql-operator" >/dev/null |
 # the rest -- the gateway's own log showed the reconciles happening.
 op_log() { compose exec -T "$E2E_SVC_POSTGRES" cat /tmp/sql-operator.log 2>/dev/null || true; }
 # operator_start SWEEP_SECONDS: run operator.sh detached in the Postgres
-# container, in its own session so operator_stop can end it and its psql
-# children together.
+# container.
 operator_start() {
+  # Drop the last run's log first: the detached shell truncates it only once
+  # it starts, and until then its "reconciled (startup)" would satisfy the
+  # wait below.
+  compose exec -T "$E2E_SVC_POSTGRES" rm -f /tmp/sql-operator.log || fail "clear the operator log"
   compose exec -d -e PGUSER="$E2E_PG_USER" -e PGDATABASE="$E2E_PG_DB" -e SWEEP_SECONDS="$1" \
-    "$E2E_SVC_POSTGRES" setsid bash -c \
+    "$E2E_SVC_POSTGRES" bash -c \
     'echo $$ > /tmp/sql-operator.pid; exec bash /tmp/sql-operator/operator.sh > /tmp/sql-operator.log 2>&1' \
     || fail "start the operator"
   local deadline=$((SECONDS + 60))
@@ -83,12 +70,28 @@ operator_start() {
     sleep 1
   done
 }
+# operator_stop: end the operator and wait until it has gone. Only the
+# operator is signalled, never its process group: it reaps its own psql
+# children, whereas a psql signalled alongside it could outlive it, be adopted
+# by the postmaster (PID 1 here), and restart the server when it is reaped --
+# the next step then finds "the database system is not yet accepting
+# connections". Fails if it is still running after 30s, rather than leave it
+# sweeping alongside the next one: a SIGKILL would orphan its psql children,
+# which is the restart above.
 operator_stop() {
-  compose exec -T "$E2E_SVC_POSTGRES" bash -c \
-    '[[ -f /tmp/sql-operator.pid ]] && kill -TERM -- -"$(cat /tmp/sql-operator.pid)" 2>/dev/null; rm -f /tmp/sql-operator.pid' \
-    >/dev/null 2>&1 || true
+  compose exec -T "$E2E_SVC_POSTGRES" bash -c '
+    [[ -f /tmp/sql-operator.pid ]] || exit 0
+    pid="$(cat /tmp/sql-operator.pid)"
+    kill -TERM "$pid" 2>/dev/null
+    for _ in $(seq 150); do
+      kill -0 "$pid" 2>/dev/null || { rm -f /tmp/sql-operator.pid; exit 0; }
+      sleep 0.2
+    done
+    exit 1' >/dev/null 2>&1
 }
-e2e_on_teardown operator_stop
+# At teardown the stack may already be gone; nothing is left to stop then.
+operator_stop_quietly() { operator_stop || true; }
+e2e_on_teardown operator_stop_quietly
 # logged PATTERN WHAT: wait for the operator to log PATTERN. The label can
 # reach the cluster a moment before the reconcile that wrote it returns and
 # logs, so this waits rather than reading the log once.
@@ -130,7 +133,7 @@ log "sql-operator: a label removed by hand comes back"
 kubectl_e2e -n "$OP_NS" label configmap op-a team- >/dev/null
 label_is op-a payments 20 "drift repair"
 op_log
-operator_stop
+operator_stop || fail "the operator did not stop within 30s: $(op_log)"
 
 log "sql-operator: a change to the owners table reaches the cluster on the next sweep"
 # Nothing in the cluster changes here, so no notification can fire: only the
@@ -140,7 +143,7 @@ psql_axiom "UPDATE sqlop.owners SET team = 'platform' WHERE namespace = '$OP_NS'
 label_is op-a platform 20 "sweep path"
 logged "reconciled (sweep)" "the relabel did not come from a sweep"
 op_log
-operator_stop
+operator_stop || fail "the operator did not stop within 30s: $(op_log)"
 kubectl_e2e -n "$OP_NS" get configmaps -L team
 echo "notified, drift-repaired and swept: $(op_log | grep -c reconciled) reconciles in the last run"
 
@@ -180,80 +183,5 @@ for step in "Deployment created" "ReplicaSet created" "Pod created" "Pod PodSche
   prev="$at"
 done
 echo "Deployment, ReplicaSet and Pod created, scheduled, started and ready, in order"
-
-# --- regression-lab -------------------------------------------------------------------
-
-log "regression-lab: two CloudNativePG clusters, created from SQL"
-kind_apply "$EX/regression-lab/rbac.yaml"
-lab_down() {
-  [[ -n "${SAMPLER_PID:-}" ]] && kill "$SAMPLER_PID" 2>/dev/null || true
-  kubectl_e2e delete namespace "$LAB_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-}
-e2e_on_teardown lab_down
-psql_axiom "DROP SCHEMA IF EXISTS lab CASCADE;"
-psql_file "$EX/regression-lab/setup.sql" >/dev/null
-psql_file "$EX/regression-lab/lab-example.sql" >/dev/null
-# The operator's admission webhook can refuse a Cluster for a few seconds
-# after the operator reports ready. Retry that, and only that.
-deadline=$((SECONDS + 90))
-until out="$(psql_file "$EX/regression-lab/clusters.sql" -v namespace="$LAB_NS" 2>&1)"; do
-  grep -qi "webhook" <<<"$out" || fail "clusters.sql failed: $out"
-  (( SECONDS < deadline )) || fail "the CloudNativePG webhook kept refusing clusters.sql: $out"
-  sleep 3
-done
-deadline=$((SECONDS + 420))
-until [[ "$(psql_axiom "SELECT count(*) FROM lab.pg_clusters
-                         WHERE namespace = '$LAB_NS' AND status->>'phase' = 'Cluster in healthy state';")" == 2 ]]; do
-  (( SECONDS < deadline )) || fail "the clusters did not become healthy: $(psql_axiom "SELECT name, status->>'phase' FROM lab.pg_clusters WHERE namespace = '$LAB_NS';")"
-  sleep 5
-done
-echo "pg-small and pg-large are healthy"
-
-log "regression-lab: pgbench against each, sampled while it runs"
-# Sampled from the host every five seconds for as long as the runs go, as a
-# reader would with \watch; a failed sample is retried by the next one.
-( while :; do psql_file "$EX/regression-lab/sample.sql" -v namespace="$LAB_NS" >/dev/null 2>&1 || true; sleep 5; done ) &
-SAMPLER_PID=$!
-psql_file "$EX/regression-lab/launch.sql" -v namespace="$LAB_NS" >/dev/null
-jobs="$(kubectl_e2e -n "$LAB_NS" get jobs -o jsonpath='{.items[*].metadata.name}')"
-[[ "$(tr ' ' '\n' <<<"$jobs" | sort | paste -sd, -)" == "bench-large-8-clients,bench-missing-cluster,bench-small-8-clients" ]] \
-  || fail "launch.sql created jobs '$jobs'"
-psql_file "$EX/regression-lab/launch.sql" -v namespace="$LAB_NS" >/dev/null
-[[ "$(kubectl_e2e -n "$LAB_NS" get jobs --no-headers | wc -l | tr -d ' ')" == 3 ]] \
-  || fail "a second launch.sql started more Jobs"
-
-# Wait for the two real runs only: the run against a cluster that does not
-# exist waits for its Secret forever, which is what it is there to show.
-state_of() { psql_file "$EX/regression-lab/results.sql" -v namespace="$LAB_NS" | awk -F'|' -v r="$1" '$1 == r { print $5 }'; }
-deadline=$((SECONDS + 420))
-until [[ "$(state_of small-8-clients)" =~ ^(done|failed)$ && "$(state_of large-8-clients)" =~ ^(done|failed)$ ]]; do
-  (( SECONDS < deadline )) || fail "the runs did not finish: $(psql_file "$EX/regression-lab/results.sql" -v namespace="$LAB_NS")"
-  sleep 5
-done
-# One more sample, so the last window of each run is in.
-sleep 20
-psql_file "$EX/regression-lab/sample.sql" -v namespace="$LAB_NS" >/dev/null 2>&1 || true
-kill "$SAMPLER_PID" 2>/dev/null || true; SAMPLER_PID=""
-psql_table "$EX/regression-lab/results.sql" -v namespace="$LAB_NS"
-
-results="$(psql_file "$EX/regression-lab/results.sql" -v namespace="$LAB_NS")"
-for run in small-8-clients large-8-clients; do
-  IFS='|' read -r _ _ _ _ state tps latency _ peak _ samples _ error <<<"$(grep "^$run|" <<<"$results")"
-  [[ "$state" == done ]] || fail "$run is '$state': $error"
-  [[ "$(psql_axiom "SELECT '$tps'::numeric > 0 AND '$latency'::numeric > 0;")" == t ]] \
-    || fail "$run reported tps '$tps' and latency '$latency'"
-  # The claim the example makes: resource use of the Postgres under test,
-  # from inside the benchmark's window. At least two samples from there.
-  [[ "${samples:-0}" -ge 2 ]] || fail "$run has ${samples:-0} Postgres samples inside its benchmark window"
-done
-# And that they are the right Pods: the small cluster cannot use more CPU
-# than its limit, give or take the averaging window.
-IFS='|' read -r _ _ _ _ _ _ _ _ peak _ <<<"$(grep "^small-8-clients|" <<<"$results")"
-[[ "$(psql_axiom "SELECT '$peak'::numeric <= 0.5 * 1.25;")" == t ]] \
-  || fail "pg-small peaked at $peak cores with a 500m limit: those samples are not its Pods"
-IFS='|' read -r _ _ _ _ state _ _ _ _ _ _ _ error <<<"$(grep "^missing-cluster|" <<<"$results")"
-[[ "$state" == waiting ]] && grep -q "pg-missing-app" <<<"$error" \
-  || fail "the run against a missing cluster is '$state' with '$error', want waiting on its Secret"
-echo "two runs with TPS, latency and in-window Postgres CPU; the missing cluster's run waits on its Secret"
 
 log "EXAMPLES E2E PASSED"

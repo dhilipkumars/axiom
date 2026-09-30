@@ -1,0 +1,131 @@
+name: example-tests
+
+# Every program under examples/, run as shipped (#104, #107): the SQL
+# operator and the deploy timeline (e2e/examples_test.sh), and the
+# regression lab (e2e/lab_test.sh) -- CloudNativePG clusters of Postgres 16,
+# 17 and 18 created from SQL, a pgbench Job against each, and their resource
+# use sampled while it runs.
+#
+# The operator and the timeline also run in every pull request's CI; the lab
+# does not. It installs CloudNativePG and metrics-server, pulls three Postgres
+# images and runs minutes of benchmarks, and it tests nothing that depends on
+# which Postgres major Axiom is built for. This workflow runs all of them:
+#
+#   - on a pull request that changes an example, so a change to one cannot
+#     merge untested;
+#   - when an owner, member or collaborator comments `/run-example-tests` on
+#     a pull request (tests its head) or an issue (tests the default branch),
+#     with the lab's results posted back as a comment;
+#   - nightly, so a break from outside -- a new CloudNativePG, a moved image --
+#     surfaces within a day; and by hand.
+
+on:
+  pull_request:
+    paths:
+      - examples/**
+      - e2e/examples_test.sh
+      - e2e/lab_test.sh
+      - e2e/lib/examples.sh
+      - e2e/lib/kind.sh
+      - .github/workflows/example-tests.yml
+      - .github/workflows/pr-command.yml
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit to test
+        default: main
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+# One run per pull request, whether a push or a comment started it: a comment's
+# event carries the number as issue.number, a push's as pull_request.number.
+concurrency:
+  group: example-tests-${{ github.event.issue.number || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  command:
+    name: command
+    if: >-
+      github.event_name != 'issue_comment' ||
+      (startsWith(github.event.comment.body, '/run-example-tests') &&
+       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    uses: ./.github/workflows/pr-command.yml
+    with:
+      what: the example tests, the regression lab included
+      dispatch_ref: ${{ inputs.ref }}
+
+  examples:
+    name: example tests
+    needs: command
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.command.outputs.ref }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: helm/kind-action@v1
+        with:
+          install_only: true
+      # One image build and one kind cluster for both gates.
+      - run: ./e2e/run_all.sh examples lab
+        env:
+          E2E_TIMEOUT_SECS: "180"
+          E2E_LAB_REPORT: ${{ runner.temp }}/lab-results.txt
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lab-results
+          path: ${{ runner.temp }}/lab-results.txt
+          if-no-files-found: ignore
+
+  report:
+    name: report
+    needs: [command, examples]
+    if: always() && needs.command.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: lab-results
+          path: results
+      - name: results
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          NUMBER: ${{ github.event.issue.number }}
+          REF: ${{ needs.command.outputs.ref }}
+          OUTCOME: ${{ needs.examples.result }}
+        run: |
+          {
+            echo "### Example tests: \`$REF\` -- $OUTCOME"
+            echo
+            if [[ -s results/lab-results.txt ]]; then
+              echo '```'
+              cat results/lab-results.txt
+              echo '```'
+            else
+              echo "The regression lab did not get as far as its results; the run's log says why."
+            fi
+            echo
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > body.md
+          cat body.md >> "$GITHUB_STEP_SUMMARY"
+          cat body.md
+          if [[ "$EVENT" == "issue_comment" ]]; then
+            gh issue comment "$NUMBER" --repo "$GITHUB_REPOSITORY" --body-file body.md
+          fi

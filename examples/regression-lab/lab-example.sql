@@ -1,13 +1,16 @@
--- An example lab: the same Postgres with two CPU limits, one benchmark run
--- against each, and a run against a cluster that was never created.
+-- An example lab: has Postgres 17 or 18 regressed against 16 on pgbench's
+-- default workload? The same cluster three times, differing only in its
+-- major version, each with 2 CPUs, and every run measured by the same
+-- pgbench 18 client. The runs are queued in this order and run one at a time.
 --   psql -f lab-example.sql
 \set ON_ERROR_STOP on
-INSERT INTO lab.clusters (name, cpu, memory, parameters) VALUES
-  ('pg-small', '500m', '512Mi', '{"shared_buffers": "128MB"}'),
-  ('pg-large', '2',    '512Mi', '{"shared_buffers": "128MB"}')
+INSERT INTO lab.clusters (name, image, cpu, memory, parameters) VALUES
+  ('pg16', 'ghcr.io/cloudnative-pg/postgresql:16.15', '2', '512Mi', '{"shared_buffers": "128MB"}'),
+  ('pg17', 'ghcr.io/cloudnative-pg/postgresql:17.11', '2', '512Mi', '{"shared_buffers": "128MB"}'),
+  ('pg18', 'ghcr.io/cloudnative-pg/postgresql:18.4',  '2', '512Mi', '{"shared_buffers": "128MB"}')
 ON CONFLICT (name) DO NOTHING;
-INSERT INTO lab.runs (run, cluster, clients, seconds) VALUES
-  ('small-8-clients', 'pg-small', 8, 60),
-  ('large-8-clients', 'pg-large', 8, 60),
-  ('missing-cluster', 'pg-missing', 8, 60)
+INSERT INTO lab.runs (run, cluster, clients, seconds, client_image) VALUES
+  ('pg16-8-clients', 'pg16', 8, 90, 'ghcr.io/cloudnative-pg/postgresql:18.4'),
+  ('pg17-8-clients', 'pg17', 8, 90, 'ghcr.io/cloudnative-pg/postgresql:18.4'),
+  ('pg18-8-clients', 'pg18', 8, 90, 'ghcr.io/cloudnative-pg/postgresql:18.4')
 ON CONFLICT (run) DO NOTHING;

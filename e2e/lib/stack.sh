@@ -94,7 +94,8 @@ stack_dump() {
   # and it cost real time diagnosing a CI failure that had printed a blank
   # "gateway logs" heading.
   log "gateway logs";                 stack_logs "$E2E_SVC_GATEWAY" 2>/dev/null || true
-  log "postgres logs (axiom lines)";  compose logs --no-color "$E2E_SVC_POSTGRES" 2>/dev/null | grep -i axiom || true
+  log "postgres logs (axiom lines, crashes)";  compose logs --no-color "$E2E_SVC_POSTGRES" 2>/dev/null \
+    | grep -iE 'axiom|terminated by signal|exited with exit code|PANIC|crash|terminating any other' || true
 }
 
 # stack_down: tear the stack down including volumes (the generated certs).

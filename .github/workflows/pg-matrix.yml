@@ -50,46 +50,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  setup:
-    name: setup
+  # Deciding what to test and acknowledging the comment are shared with the
+  # other comment commands (pr-command.yml).
+  command:
+    name: command
     if: >-
       github.event_name != 'issue_comment' ||
       (startsWith(github.event.comment.body, '/cover-all-pg-versions') &&
        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
-    runs-on: ubuntu-latest
-    # pull-requests: write because acknowledging a comment on a pull request
-    # is a pull-request write: issues: write covers only comments on issues.
     permissions:
       contents: read
       issues: write
       pull-requests: write
+    uses: ./.github/workflows/pr-command.yml
+    with:
+      what: every supported Postgres major and the next one
+      dispatch_ref: ${{ inputs.ref }}
+
+  setup:
+    name: setup
+    needs: command
+    runs-on: ubuntu-latest
     outputs:
-      ref: ${{ steps.ref.outputs.ref }}
+      ref: ${{ needs.command.outputs.ref }}
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
-      - name: what to test
-        id: ref
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EVENT: ${{ github.event_name }}
-          IS_PR: ${{ github.event.issue.pull_request != null }}
-          NUMBER: ${{ github.event.issue.number }}
-          INPUT_REF: ${{ inputs.ref }}
-        run: |
-          case "$EVENT" in
-            issue_comment)
-              if [[ "$IS_PR" == "true" ]]; then
-                ref="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER" -q .head.sha)"
-              else
-                ref="$(gh api "repos/$GITHUB_REPOSITORY" -q .default_branch)"
-              fi ;;
-            # An input cleared to "" would leave nothing to check out.
-            workflow_dispatch) ref="${INPUT_REF:-main}" ;;
-            *) ref="$GITHUB_SHA" ;;
-          esac
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "testing $ref"
-
       # The next major's image tag moves with every beta and release
       # candidate, so it is looked up rather than written down. Its release
       # image is preferred once it exists.
@@ -127,18 +112,6 @@ jobs:
           print("matrix=" + json.dumps(matrix))
           PY
           cat "$GITHUB_OUTPUT"
-
-      # A courtesy; failing to post it must not cancel the run it announces.
-      - name: acknowledge the comment
-        if: github.event_name == 'issue_comment'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          NUMBER: ${{ github.event.issue.number }}
-          REF: ${{ steps.ref.outputs.ref }}
-        run: |
-          gh issue comment "$NUMBER" --repo "$GITHUB_REPOSITORY" --body \
-            "Running every supported Postgres major and the next one against \`$REF\`: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Results will be posted here."
 
   extension:
     name: extension pg${{ matrix.pg }}${{ matrix.label }}

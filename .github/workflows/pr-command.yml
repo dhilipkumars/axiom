@@ -1,0 +1,83 @@
+name: pr-command
+
+# The shared start of a workflow that a comment command can trigger, such as
+# pg-matrix's /cover-all-pg-versions and example-tests' /run-example-tests:
+# decide what to test, and tell the commenter it has started.
+#
+# Called, not run on its own. The caller keeps the `if:` that decides whether
+# a comment is its command from someone allowed to run it, because that check
+# has to happen before any job starts. Only repository owners, members and
+# collaborators may: a comment on a pull request from a fork runs the fork's
+# code, so it runs because a maintainer asked, and the jobs that run it get a
+# read-only token and no secrets.
+#
+# GitHub reads issue_comment workflows from the default branch, so a change to
+# how a command is handled takes effect once it is merged.
+
+on:
+  workflow_call:
+    inputs:
+      what:
+        description: What the run does, for the acknowledgement ("the regression lab")
+        type: string
+        required: true
+      dispatch_ref:
+        description: The ref a workflow_dispatch asked for
+        type: string
+        default: ""
+    outputs:
+      ref:
+        description: The commit or branch to test
+        value: ${{ jobs.resolve.outputs.ref }}
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: what to test
+    runs-on: ubuntu-latest
+    # pull-requests: write because acknowledging a comment on a pull request
+    # is a pull-request write: issues: write covers only comments on issues.
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    outputs:
+      ref: ${{ steps.ref.outputs.ref }}
+    steps:
+      - name: what to test
+        id: ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          IS_PR: ${{ github.event.issue.pull_request != null }}
+          NUMBER: ${{ github.event.issue.number }}
+          DISPATCH_REF: ${{ inputs.dispatch_ref }}
+        run: |
+          case "$EVENT" in
+            issue_comment)
+              if [[ "$IS_PR" == "true" ]]; then
+                ref="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER" -q .head.sha)"
+              else
+                ref="$(gh api "repos/$GITHUB_REPOSITORY" -q .default_branch)"
+              fi ;;
+            # An input cleared to "" would leave nothing to check out.
+            workflow_dispatch) ref="${DISPATCH_REF:-main}" ;;
+            *) ref="$GITHUB_SHA" ;;
+          esac
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "testing $ref"
+
+      # A courtesy; failing to post it must not cancel the run it announces.
+      - name: acknowledge the comment
+        if: github.event_name == 'issue_comment'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.issue.number }}
+          REF: ${{ steps.ref.outputs.ref }}
+          WHAT: ${{ inputs.what }}
+        run: |
+          gh issue comment "$NUMBER" --repo "$GITHUB_REPOSITORY" --body \
+            "Running $WHAT against \`$REF\`: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Results will be posted here."
