@@ -54,11 +54,10 @@ compose cp "$EX/sql-operator" "$E2E_SVC_POSTGRES:/tmp/sql-operator" >/dev/null |
 # the rest -- the gateway's own log showed the reconciles happening.
 op_log() { compose exec -T "$E2E_SVC_POSTGRES" cat /tmp/sql-operator.log 2>/dev/null || true; }
 # operator_start SWEEP_SECONDS: run operator.sh detached in the Postgres
-# container, in its own session so operator_stop can end it and its psql
-# children together.
+# container.
 operator_start() {
   compose exec -d -e PGUSER="$E2E_PG_USER" -e PGDATABASE="$E2E_PG_DB" -e SWEEP_SECONDS="$1" \
-    "$E2E_SVC_POSTGRES" setsid bash -c \
+    "$E2E_SVC_POSTGRES" bash -c \
     'echo $$ > /tmp/sql-operator.pid; exec bash /tmp/sql-operator/operator.sh > /tmp/sql-operator.log 2>&1' \
     || fail "start the operator"
   local deadline=$((SECONDS + 60))
@@ -67,10 +66,19 @@ operator_start() {
     sleep 1
   done
 }
+# operator_stop: end the operator and wait until it has gone. Only the
+# operator is signalled, never its process group: it reaps its own psql
+# children, whereas a psql signalled alongside it could outlive it, be adopted
+# by the postmaster (PID 1 here), and restart the server when it is reaped --
+# the next step then finds "the database system is not yet accepting
+# connections".
 operator_stop() {
-  compose exec -T "$E2E_SVC_POSTGRES" bash -c \
-    '[[ -f /tmp/sql-operator.pid ]] && kill -TERM -- -"$(cat /tmp/sql-operator.pid)" 2>/dev/null; rm -f /tmp/sql-operator.pid' \
-    >/dev/null 2>&1 || true
+  compose exec -T "$E2E_SVC_POSTGRES" bash -c '
+    [[ -f /tmp/sql-operator.pid ]] || exit 0
+    pid="$(cat /tmp/sql-operator.pid)"
+    kill -TERM "$pid" 2>/dev/null
+    for _ in $(seq 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+    rm -f /tmp/sql-operator.pid' >/dev/null 2>&1 || true
 }
 e2e_on_teardown operator_stop
 # logged PATTERN WHAT: wait for the operator to log PATTERN. The label can

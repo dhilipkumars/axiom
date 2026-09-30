@@ -46,7 +46,11 @@ psql -X -q -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM sqlop.configmaps_watc
 pipes="$(mktemp -d)"
 mkfifo "$pipes/in" "$pipes/out"
 listener=""
-trap '[[ -n "$listener" ]] && kill "$listener" 2>/dev/null; rm -rf "$pipes"' EXIT
+# Reap the listener, not just signal it. A child left behind is adopted by
+# PID 1, and where that is a postmaster (this script run inside a Postgres
+# container) a psql that died of a signal looks like a crashed backend: every
+# session is dropped and the server goes through crash recovery.
+trap '[[ -n "$listener" ]] && { kill "$listener" 2>/dev/null; wait "$listener" 2>/dev/null; }; rm -rf "$pipes"' EXIT
 # Bash skips the EXIT trap when a signal it does not handle kills it; turning
 # INT and TERM into an exit runs the cleanup above.
 trap 'exit 130' INT
