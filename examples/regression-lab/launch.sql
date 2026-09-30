@@ -5,8 +5,8 @@
 -- Each Job connects to its cluster's read-write Service, <cluster>-rw, as the
 -- `app` user, with the password CloudNativePG put in the <cluster>-app Secret.
 -- Kubernetes injects that password into the container itself; neither SQL nor
--- the gateway ever reads the Secret. The client is the cluster's own image, so
--- pgbench and the server are the same version.
+-- the gateway ever reads the Secret. The client is the run's client_image, or
+-- the cluster's own image when that is NULL.
 --
 -- The result is the container's termination message, which Kubernetes keeps in
 -- the Pod's status for results.sql to read back: TPS, latency, and the UTC
@@ -36,7 +36,7 @@ SELECT DISTINCT ON (r.cluster)
         'restartPolicy', 'Never',
         'containers', jsonb_build_array(jsonb_build_object(
           'name', 'pgbench',
-          'image', coalesce(c.image, 'ghcr.io/cloudnative-pg/postgresql:17.11'),
+          'image', coalesce(r.client_image, c.image, 'ghcr.io/cloudnative-pg/postgresql:18.4'),
           'imagePullPolicy', 'IfNotPresent',
           'terminationMessagePolicy', 'FallbackToLogsOnError',
           'env', jsonb_build_array(

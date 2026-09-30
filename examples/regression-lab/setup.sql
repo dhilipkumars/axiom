@@ -9,7 +9,7 @@ CREATE SCHEMA IF NOT EXISTS lab;
 -- the server parameters, the image.
 CREATE TABLE IF NOT EXISTS lab.clusters (
   name       text PRIMARY KEY CHECK (length(name) <= 40 AND name ~ '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'),
-  image      text NOT NULL DEFAULT 'ghcr.io/cloudnative-pg/postgresql:17.11',
+  image      text NOT NULL DEFAULT 'ghcr.io/cloudnative-pg/postgresql:18.4',
   cpu        text NOT NULL,              -- the limit: '500m', '2'
   memory     text NOT NULL,              -- request and limit: '512Mi'
   storage    text NOT NULL DEFAULT '1Gi',
@@ -26,7 +26,10 @@ CREATE TABLE IF NOT EXISTS lab.runs (
   cluster text NOT NULL,
   clients int  NOT NULL DEFAULT 4 CHECK (clients > 0),
   seconds int  NOT NULL DEFAULT 60 CHECK (seconds > 0),
-  scale   int  NOT NULL DEFAULT 5 CHECK (scale > 0)
+  scale   int  NOT NULL DEFAULT 5 CHECK (scale > 0),
+  -- The pgbench client's image; the cluster's own when NULL. Comparing
+  -- servers, fix it, so one pgbench version measures them all.
+  client_image text
 );
 
 -- What the benchmarked Pods used, as metrics-server reported it (sample.sql).

@@ -10,7 +10,7 @@ COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 
 .PHONY: all proto proto-check gateway-build gateway-test gateway-lint gateway-vuln \
         ext-build ext-test ext-lint ext-fmt ext-audit unit lint docs-generate docs-check \
-        version changelog release-check release-notes up down local-dev-up local-dev-down local-dev-psql e2e-preload package e2e-tarball e2e-package e2e-install e2e-ping e2e-phase0 e2e-pods e2e-phase1 e2e-configmaps e2e-phase2 e2e-watch e2e-phase3 e2e-crd e2e-phase4 e2e-cluster e2e-phase5 e2e-metrics e2e-agent e2e-examples e2e
+        version changelog release-check release-notes up down local-dev-up local-dev-down local-dev-psql e2e-preload package e2e-tarball e2e-package e2e-install e2e-ping e2e-phase0 e2e-pods e2e-phase1 e2e-configmaps e2e-phase2 e2e-watch e2e-phase3 e2e-crd e2e-phase4 e2e-cluster e2e-phase5 e2e-metrics e2e-agent e2e-examples e2e-lab e2e
 
 all: lint unit
 
@@ -250,6 +250,11 @@ e2e-agent:
 # The programs under examples/, run as shipped (#104).
 e2e-examples:
 	./e2e/examples_test.sh
+
+# The regression lab: CloudNativePG, metrics-server and minutes of pgbench, so
+# not part of `make e2e`. The lab workflow runs it on demand (#107).
+e2e-lab:
+	./e2e/lab_test.sh
 
 # Every completed phase's gate, oldest first (regression order per RULES.md §4),
 # sharing one image build and one kind cluster across all of them. The

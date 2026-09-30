@@ -69,7 +69,7 @@ used AS (
    WHERE r.ok
    GROUP BY r.run, u.role
 )
-SELECT x.run, x.cluster, c.cpu AS cpu_limit, x.clients,
+SELECT x.run, x.cluster, r.r->>'server_version' AS server_version, c.cpu AS cpu_limit, x.clients,
        CASE WHEN r.run IS NULL THEN 'not started'
             WHEN r.ok THEN 'done'
             WHEN r.t IS NOT NULL OR r.phase = 'Failed' THEN 'failed'
@@ -79,6 +79,9 @@ SELECT x.run, x.cluster, c.cpu AS cpu_limit, x.clients,
        round((r.r->>'tps')::numeric) AS tps,
        (r.r->>'latency_ms')::numeric AS latency_ms,
        round(pg.cpu_avg, 2) AS pg_cpu_avg,
+       -- Work per core actually used: comparable across runs even when the
+       -- server did not use all it was given.
+       round((r.r->>'tps')::numeric / nullif(pg.cpu_avg, 0)) AS tps_per_core,
        round(pg.cpu_peak, 2) AS pg_cpu_peak,
        pg_size_pretty(round(pg.memory_peak)) AS pg_memory_peak,
        pg.samples,

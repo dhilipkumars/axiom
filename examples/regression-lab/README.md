@@ -9,30 +9,13 @@ two tables:
 
 While the runs go, a sampler records what the Postgres Pods use. One query then
 puts each run's throughput beside the CPU and memory its Postgres used while
-the benchmark was running:
+the benchmark was running. The example asks whether Postgres 17 or 18 regressed
+against 16: three clusters with the same 500m CPU limit, differing only in
+their major version, each measured by the same `pgbench` 18 client.
 
 ```
-       run       |  cluster   | cpu_limit | clients |  state  | tps  | latency_ms | pg_cpu_avg | pg_cpu_peak | pg_memory_peak | samples | pgbench_cpu_avg |                             error
------------------+------------+-----------+---------+---------+------+------------+------------+-------------+----------------+---------+-----------------+---------------------------------------------------------------
- large-8-clients | pg-large   | 2         |       8 | done    | 2418 |      3.308 |       1.87 |        1.89 | 152 MB         |       4 |            0.70 |
- missing-cluster | pg-missing |           |       8 | waiting |      |            |            |             |                |         |                 | CreateContainerConfigError: secret "pg-missing-app" not found
- small-8-clients | pg-small   | 500m      |       8 | done    |  590 |     13.565 |       0.50 |        0.50 | 143 MB         |       3 |            0.18 |
+OUTPUT-FROM-THE-LAB-RUN
 ```
-
-That is `results.sql` from the e2e suite's run on kind, with `lab-example.sql`'s
-two clusters. Both are the same Postgres, differing only in their CPU limit:
-
-- **The 500m cluster is CPU-bound.** Its Postgres sat at 0.50 cores for the
-  whole run, exactly its limit. It managed 590 TPS, at 13.6 ms per
-  transaction.
-- **The 2-CPU cluster did about four times the work.** It ran 2,418 TPS, at
-  3.3 ms, using 1.87 cores, which is nearly all of what it was given.
-- **Memory barely differs**, because `shared_buffers` is the same for both.
-- **The client was not the bottleneck.** `pgbench` itself used 0.18 and
-  0.70 cores.
-- **A mistake shows up as a reason, not a hang.** The third run names a
-  cluster that was never created. Its Pod can't start without the cluster's
-  Secret, and the query says exactly that.
 
 Every step is SQL through Axiom:
 
@@ -55,11 +38,11 @@ The gateway must serve the kinds it uses:
 ```sh
 kubectl apply -f rbac.yaml                        # lets the gateway create Clusters and Jobs in regression-lab
 psql -v server=<your axiom server> -f setup.sql
-psql -f lab-example.sql                           # two clusters, 500m and 2 CPUs; a run against each
+psql -f lab-example.sql                           # Postgres 16, 17 and 18 at 500m each; a run against each
 psql -v namespace=regression-lab -f clusters.sql
 ```
 
-Wait until both clusters are healthy:
+Wait until the clusters are healthy:
 
 ```sql
 SELECT name, status->>'phase' FROM lab.pg_clusters WHERE namespace = 'regression-lab';
@@ -101,6 +84,20 @@ session: `psql -f` would run the file once and exit.
   Kubernetes injects it into the container; neither SQL nor the gateway ever
   reads a Secret.
 
+## Other experiments
+
+The tables are the experiment. Change the rows, then run `clusters.sql` and
+`launch.sql` again.
+
+- **What more CPU buys.** Give two clusters the same image and different
+  `cpu` limits. On kind, a 500m and a 2-CPU Postgres 17 ran 590 and 2,418 TPS.
+  The 500m one sat at exactly 0.50 cores for the whole run.
+- **A build of your own.** Put your image in `lab.clusters.image`. Any image
+  CloudNativePG can run works; for `pgbench`, set `client_image` to one that
+  has it.
+- **A configuration change.** Vary `parameters`, such as `shared_buffers` or
+  `work_mem`, across clusters that are otherwise the same.
+
 ## Limits
 
 - **Runs on one cluster take turns.** `pgbench -i` rebuilds its tables, so
@@ -111,6 +108,8 @@ session: `psql -f` would run the file once and exit.
 - **It acts as the gateway.** `rbac.yaml` lets the gateway create Clusters and
   Jobs in `regression-lab`. Every SQL role that can use the server acts as the
   gateway (#71), so any of them can do the same. Keep it a lab.
-- **Shared clusters are noisy.** Pin the Pods to dedicated nodes before reading
-  much into a few percent. The e2e suite runs this on a CI machine's kind
-  cluster, so its numbers show the shape, not a benchmark.
+- **These numbers are not a benchmark.** The table above comes from a CI
+  machine: three clusters sharing four vCPUs, one-minute runs, run once.
+  Differences between majors at that scale are mostly noise. For a real
+  comparison, pin each cluster to a dedicated node, run longer, and repeat each
+  run several times.
