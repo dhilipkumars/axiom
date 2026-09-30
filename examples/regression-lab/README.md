@@ -145,8 +145,17 @@ The tables are the experiment. Change the rows, then run `clusters.sql` and
   time: three 90-second runs take about six minutes.
 - **A run that never finishes holds up the queue.** A run whose Pod can't
   start, such as one naming a cluster that doesn't exist, stays unfinished,
-  and `results.sql` shows it as `waiting` with the reason. Delete its Job, or
-  its row, to let the queue move on.
+  and `results.sql` shows it as `waiting` with the reason. The queue waits for
+  its Job, not its row, so clear the Job:
+
+  ```sql
+  -- Retry it: the next launch.sql starts it again.
+  DELETE FROM lab.jobs WHERE namespace = 'regression-lab' AND name = 'bench-<run>';
+  -- Drop it: delete the Job as above, then the run.
+  DELETE FROM lab.runs WHERE run = '<run>';
+  ```
+
+  Deleting only the row leaves the Job unfinished, and the queue stuck.
 - **Termination messages are capped at 4 KiB.** That's enough for the JSON
   result, or the tail of an error. Reading whole logs from SQL is #105.
 - **It acts as the gateway.** `rbac.yaml` lets the gateway create Clusters and
