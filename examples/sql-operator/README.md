@@ -19,6 +19,37 @@ ConfigMap in that namespace is relabelled. The desired state lives in your
 database, next to the rest of your data, and can come from anything SQL can
 express.
 
+## What it looks like
+
+The e2e suite runs it on kind. With `owners` saying `axiom-sqlop` belongs to
+`payments`, it creates a ConfigMap, and later removes its label by hand. The
+operator's log:
+
+```
+13:21:10 reconciled (startup)
+13:21:11 reconciled (notified)     <- op-a created; labelled team=payments
+13:21:12 reconciled (notified)     <- its own write, notified back; nothing left to do
+```
+
+The suite then changes the owner in Postgres, `UPDATE sqlop.owners SET team =
+'platform'`. Nothing in the cluster changes, so no notification fires, and the
+next sweep carries it out:
+
+```
+13:21:13 reconciled (startup)
+13:21:16 reconciled (sweep)
+```
+
+```
+$ kubectl -n axiom-sqlop get configmaps -L team
+NAME               DATA   AGE   TEAM
+kube-root-ca.crt   1      8s    platform
+op-a               1      7s    platform
+```
+
+Every ConfigMap in the namespace follows the table, including the one
+Kubernetes creates itself.
+
 ## Running it
 
 ```sh
