@@ -47,6 +47,10 @@ pipes="$(mktemp -d)"
 mkfifo "$pipes/in" "$pipes/out"
 listener=""
 trap '[[ -n "$listener" ]] && kill "$listener" 2>/dev/null; rm -rf "$pipes"' EXIT
+# Bash skips the EXIT trap when a signal it does not handle kills it; turning
+# INT and TERM into an exit runs the cleanup above.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 # LC_ALL=C: psql translates its "Asynchronous notification" banner, and under
 # another locale the loop would never recognise one and fall back to the sweep.
 LC_ALL=C psql -X -At ${notify_db:+-d "$notify_db"} <"$pipes/in" >"$pipes/out" 2>&1 &
