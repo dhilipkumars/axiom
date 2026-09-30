@@ -1,6 +1,15 @@
--- Start a pgbench Job for each run of lab.runs that has none yet.
+-- Start the next queued run: the oldest run of lab.runs that has no Job yet,
+-- and only when no other run is unfinished. Runs therefore go one at a time,
+-- each with the node to itself, in the order they were queued.
 --
 --   psql -v namespace=regression-lab -f launch.sql
+--
+-- Run it once per run, or let psql's \watch be the scheduler: it starts the
+-- next run as soon as the one before finishes, and does nothing otherwise.
+--
+--   psql -v namespace=regression-lab
+--   => \i launch.sql
+--   => \watch 10
 --
 -- Each Job connects to its cluster's read-write Service, <cluster>-rw, as the
 -- `app` user, with the password CloudNativePG put in the <cluster>-app Secret.
@@ -14,14 +23,13 @@
 -- takes resource use from. On failure the message is the tail of the
 -- container's output instead (FallbackToLogsOnError).
 --
--- Runs on one cluster do not overlap: pgbench -i rebuilds its tables, which
--- would pull them out from under a run in progress. A run whose cluster
--- already has an unfinished Job is left for the next launch.
+-- One at a time also keeps runs on the same cluster apart, which matters:
+-- pgbench -i rebuilds its tables, and would pull them out from under a run
+-- in progress.
 \set ON_ERROR_STOP on
 
 INSERT INTO lab.jobs (namespace, name, raw)
-SELECT DISTINCT ON (r.cluster)
-  :'namespace', 'bench-' || r.run, jsonb_build_object(
+SELECT :'namespace', 'bench-' || r.run, jsonb_build_object(
   'apiVersion', 'batch/v1',
   'kind', 'Job',
   'metadata', jsonb_build_object('labels', jsonb_build_object(
@@ -72,6 +80,7 @@ WHERE NOT EXISTS (
   AND NOT EXISTS (
         SELECT 1 FROM lab.jobs j
          WHERE j.namespace = :'namespace'
-           AND j.labels->>'axiom-lab/cluster' = r.cluster
+           AND j.labels ? 'axiom-lab/run'
            AND coalesce((j.status->>'succeeded')::int, 0) + coalesce((j.status->>'failed')::int, 0) = 0)
-ORDER BY r.cluster, r.run;
+ORDER BY r.queued_at, r.run
+LIMIT 1;

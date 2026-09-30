@@ -2,8 +2,8 @@
 # Regression-lab E2E (#104, #107): examples/regression-lab run as shipped
 # against a kind cluster with CloudNativePG and metrics-server. Three
 # CloudNativePG clusters, Postgres 16, 17 and 18, are created from SQL; a
-# pgbench Job runs against each; their resource use is sampled while the
-# benchmark runs; and results.sql joins the two.
+# pgbench Job runs against each, one at a time; their resource use is sampled
+# while the benchmark runs; and results.sql joins the two.
 #
 # Not in ALL_GATES: it installs two operators, pulls three Postgres images and
 # runs minutes of benchmarks. The example-tests workflow
@@ -70,29 +70,35 @@ log "regression-lab: pgbench against each, sampled while it runs"
 # reader would with \watch; a failed sample is retried by the next one.
 ( while :; do psql_file "$EX/regression-lab/sample.sql" -v namespace="$LAB_NS" >/dev/null 2>&1 || true; sleep 5; done ) &
 SAMPLER_PID=$!
-psql_file "$EX/regression-lab/launch.sql" -v namespace="$LAB_NS" >/dev/null
-jobs="$(kubectl_e2e -n "$LAB_NS" get jobs -o jsonpath='{.items[*].metadata.name}')"
-[[ "$(tr ' ' '\n' <<<"$jobs" | sort | paste -sd, -)" == "bench-missing-cluster,bench-pg16-8-clients,bench-pg17-8-clients,bench-pg18-8-clients" ]] \
-  || fail "launch.sql created jobs '$jobs'"
-psql_file "$EX/regression-lab/launch.sql" -v namespace="$LAB_NS" >/dev/null
-[[ "$(kubectl_e2e -n "$LAB_NS" get jobs --no-headers | wc -l | tr -d ' ')" == 4 ]] \
-  || fail "a second launch.sql started more Jobs"
-
 # results.sql's columns, as the reads below take them:
 #   1 run  2 cluster  3 server_version  4 cpu_limit  5 clients  6 state  7 tps
 #   8 latency_ms  9 pg_cpu_avg  10 tps_per_core  11 pg_cpu_peak
 #   12 pg_memory_peak  13 samples  14 pgbench_cpu_avg  15 error
 results() { psql_file "$EX/regression-lab/results.sql" -v namespace="$LAB_NS"; }
-state_of() { results | awk -F'|' -v r="$1" '$1 == r { print $6 }'; }
-# Wait for the real runs only: the run against a cluster that does not exist
-# waits for its Secret forever, which is what it is there to show.
-deadline=$((SECONDS + 480))
-for run in $RUNS; do
-  until [[ "$(state_of "$run")" =~ ^(done|failed)$ ]]; do
-    (( SECONDS < deadline )) || fail "the runs did not finish: $(results)"
-    sleep 5
-  done
+unfinished() {
+  kubectl_e2e -n "$LAB_NS" get jobs -o jsonpath='{range .items[*]}{.status.succeeded}{.status.failed}{"\n"}{end}' \
+    | grep -c '^$' || true
+}
+# Drive the queue as a reader would with \watch: launch.sql starts the next
+# run only when none is unfinished, so calling it on a loop runs them in turn.
+# At no point may two benchmarks run at once.
+deadline=$((SECONDS + 600))
+while :; do
+  psql_file "$EX/regression-lab/launch.sql" -v namespace="$LAB_NS" >/dev/null
+  running="$(unfinished)"
+  (( running <= 1 )) || fail "$running benchmark Jobs are unfinished at once; launch.sql must run them one at a time"
+  done_runs="$(results | awk -F'|' '$6 == "done" || $6 == "failed"' | wc -l | tr -d ' ')"
+  [[ "$done_runs" == 3 ]] && break
+  (( SECONDS < deadline )) || fail "the runs did not finish: $(results)"
+  sleep 5
 done
+jobs="$(kubectl_e2e -n "$LAB_NS" get jobs -o jsonpath='{.items[*].metadata.name}')"
+[[ "$(tr ' ' '\n' <<<"$jobs" | sort | paste -sd, -)" == "bench-pg16-8-clients,bench-pg17-8-clients,bench-pg18-8-clients" ]] \
+  || fail "launch.sql created jobs '$jobs'"
+# Every run has its Job, so launching again starts nothing.
+psql_file "$EX/regression-lab/launch.sql" -v namespace="$LAB_NS" >/dev/null
+[[ "$(kubectl_e2e -n "$LAB_NS" get jobs --no-headers | wc -l | tr -d ' ')" == 3 ]] \
+  || fail "a launch.sql after every run finished started another Job"
 # One more sample, so the last window of each run is in.
 sleep 20
 psql_file "$EX/regression-lab/sample.sql" -v namespace="$LAB_NS" >/dev/null 2>&1 || true
@@ -113,13 +119,10 @@ for run in $RUNS; do
   # from inside the benchmark's window. At least two samples from there.
   [[ "${samples:-0}" -ge 2 ]] || fail "$run has ${samples:-0} Postgres samples inside its benchmark window"
   # And that they are the right Pods: no cluster can use more CPU than its
-  # 500m limit, give or take the averaging window.
-  [[ "$(psql_axiom "SELECT '$peak'::numeric <= 0.5 * 1.25;")" == t ]] \
-    || fail "$run's Postgres peaked at $peak cores with a 500m limit: those samples are not its Pods"
+  # 2-CPU limit, give or take the averaging window.
+  [[ "$(psql_axiom "SELECT '$peak'::numeric <= 2 * 1.25;")" == t ]] \
+    || fail "$run's Postgres peaked at $peak cores with a 2-CPU limit: those samples are not its Pods"
 done
-IFS='|' read -r _ _ _ _ _ state _ _ _ _ _ _ _ _ error <<<"$(grep "^missing-cluster|" <<<"$got")"
-[[ "$state" == waiting ]] && grep -q "pg-missing-app" <<<"$error" \
-  || fail "the run against a missing cluster is '$state' with '$error', want waiting on its Secret"
-echo "three majors benchmarked with in-window Postgres CPU; the missing cluster's run waits on its Secret"
+echo "three majors benchmarked one at a time, each with in-window Postgres CPU"
 
 log "LAB E2E PASSED"

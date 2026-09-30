@@ -10,40 +10,18 @@ two tables:
 While the runs go, a sampler records what the Postgres Pods use. One query then
 puts each run's throughput beside the CPU and memory its Postgres used while
 the benchmark was running. The example asks whether Postgres 17 or 18 regressed
-against 16: three clusters with the same 500m CPU limit, differing only in
-their major version, each measured by the same `pgbench` 18 client.
+against 16: three clusters with 2 CPUs each, differing only in their major
+version, each measured by the same `pgbench` 18 client, one at a time.
 
 ```
-       run       |  cluster   |         server_version          | cpu_limit | clients |  state  | tps | latency_ms | pg_cpu_avg | tps_per_core | pg_cpu_peak | pg_memory_peak | samples | pgbench_cpu_avg |                             error
------------------+------------+---------------------------------+-----------+---------+---------+-----+------------+------------+--------------+-------------+----------------+---------+-----------------+---------------------------------------------------------------
- missing-cluster | pg-missing |                                 |           |       8 | waiting |     |            |            |              |             |                |         |                 | CreateContainerConfigError: secret "pg-missing-app" not found
- pg16-8-clients  | pg16       | 16.15 (Debian 16.15-1.pgdg11+2) | 500m      |       8 | done    | 587 |     13.630 |       0.50 |         1174 |        0.50 | 142 MB         |       3 |            0.17 |
- pg17-8-clients  | pg17       | 17.11 (Debian 17.11-1.pgdg11+2) | 500m      |       8 | done    | 596 |     13.423 |       0.50 |         1193 |        0.50 | 143 MB         |       3 |            0.17 |
- pg18-8-clients  | pg18       | 18.4 (Debian 18.4-1.pgdg11+1)   | 500m      |       8 | done    | 563 |     14.217 |       0.50 |         1127 |        0.50 | 148 MB         |       3 |            0.17 |
-(4 rows)
+OUTPUT-FROM-THE-LAB-RUN
 ```
-
-That is `results.sql` from the example-tests workflow's run on kind, with
-`lab-example.sql`. How to read it:
-
-- **Every server was CPU-bound.** Each Postgres sat at exactly 0.50 cores for
-  the whole benchmark, which is its limit. So the comparison is throughput
-  per unit of CPU, and `tps_per_core` shows it directly.
-- **The three majors land within about 6% of each other.** 17 is the fastest
-  and 18 the slowest, at 1,193 and 1,127 TPS per core. On a shared CI runner
-  with one-minute runs, run once, that is noise, not a finding. It is the
-  kind of gap a real lab repeats runs to confirm or rule out.
-- **The measurement is fair.** Every server was measured by the same
-  `pgbench` 18 client, which used 0.17 cores, so the client was never the
-  bottleneck. Memory grows slightly with each major, from 142 to 148 MB.
-- **A mistake shows up as a reason, not a hang.** The run against a cluster
-  that was never created is `waiting`, and the error says exactly why.
 
 Every step is SQL through Axiom:
 
 - **Clusters.** `clusters.sql` writes a CloudNativePG `Cluster` custom resource
   for each row of `lab.clusters`.
-- **Benchmarks.** `launch.sql` writes a `Job` for each run.
+- **Benchmarks.** `launch.sql` writes a `Job` for the next queued run.
 - **Usage.** `sample.sql` reads `metrics.k8s.io`.
 - **Results.** `results.sql` reads each run's result back from its Pod's
   termination message, and joins it to the samples.
@@ -60,7 +38,7 @@ The gateway must serve the kinds it uses:
 ```sh
 kubectl apply -f rbac.yaml                        # lets the gateway create Clusters and Jobs in regression-lab
 psql -v server=<your axiom server> -f setup.sql
-psql -f lab-example.sql                           # Postgres 16, 17 and 18 at 500m each; a run against each
+psql -f lab-example.sql                           # Postgres 16, 17 and 18 at 2 CPUs each; a run queued for each
 psql -v namespace=regression-lab -f clusters.sql
 ```
 
@@ -70,21 +48,26 @@ Wait until the clusters are healthy:
 SELECT name, status->>'phase' FROM lab.pg_clusters WHERE namespace = 'regression-lab';
 ```
 
-Then start the sampler in one session and the runs from another:
+Then start the sampler in one session and the queue in another:
 
 ```
-$ psql -v namespace=regression-lab
-=> \i sample.sql
-=> \watch 5
+$ psql -v namespace=regression-lab             $ psql -v namespace=regression-lab
+=> \i sample.sql                               => \i launch.sql
+=> \watch 5                                    => \watch 10
 ```
 
 ```sh
-psql -v namespace=regression-lab -f launch.sql
-psql -v namespace=regression-lab -f results.sql   # again, until the runs are done
+psql -v namespace=regression-lab -f results.sql   # again, until every run is done
 ```
 
-`\watch` repeats the sample until you interrupt it. It needs an interactive
-session: `psql -f` would run the file once and exit.
+`\watch` repeats the last statement until you interrupt it; it needs an
+interactive session, since `psql -f` runs a file once and exits.
+
+**The runs are a queue.** `launch.sql` starts the oldest run in `lab.runs`
+that has no Job yet, and only when no other run is unfinished. So under
+`\watch` it is the scheduler: each run gets the node to itself, and the next
+one starts as soon as the last one finishes. Queue more with an `INSERT` into
+`lab.runs`; they run in the order they were queued (`queued_at`).
 
 ## How the numbers are matched
 
@@ -122,16 +105,22 @@ The tables are the experiment. Change the rows, then run `clusters.sql` and
 
 ## Limits
 
-- **Runs on one cluster take turns.** `pgbench -i` rebuilds its tables, so
-  `launch.sql` won't start a run while another run on the same cluster is
-  unfinished. Launch again once it's done.
+- **One run at a time, lab-wide.** Runs never overlap, not even on different
+  clusters. That keeps them from competing for the same nodes, and keeps
+  `pgbench -i` from rebuilding tables under a run in progress. The cost is
+  time: three one-minute runs take about four minutes.
+- **A run that never finishes holds up the queue.** A run whose Pod can't
+  start, such as one naming a cluster that doesn't exist, stays unfinished,
+  and `results.sql` shows it as `waiting` with the reason. Delete its Job, or
+  its row, to let the queue move on.
 - **Termination messages are capped at 4 KiB.** That's enough for the JSON
   result, or the tail of an error. Reading whole logs from SQL is #105.
 - **It acts as the gateway.** `rbac.yaml` lets the gateway create Clusters and
   Jobs in `regression-lab`. Every SQL role that can use the server acts as the
   gateway (#71), so any of them can do the same. Keep it a lab.
 - **These numbers are not a benchmark.** The table above comes from a CI
-  machine: three clusters sharing four vCPUs, one-minute runs, run once.
+  machine: a four-vCPU virtual machine shared with other tenants, one-minute
+  runs, each run once.
   Differences between majors at that scale are mostly noise. For a real
   comparison, pin each cluster to a dedicated node, run longer, and repeat each
   run several times.
