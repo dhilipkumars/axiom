@@ -24,6 +24,9 @@ the components natively you also need the Go and Rust toolchains.
 - Docker Desktop or Docker Engine with Compose v2 (`docker compose version`)
 - `bash`, `git`, `make`
 - For every gate but Phase 0: [`kind`](https://kind.sigs.k8s.io) and `kubectl`
+- `helm` is optional. The examples gate installs a chart with it when it is
+  on your `PATH`, and otherwise runs a pinned `alpine/helm` image on kind's
+  network (`E2E_HELM_IMAGE`)
 
 ### Full developer setup
 

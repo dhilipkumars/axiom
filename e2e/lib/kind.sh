@@ -128,7 +128,10 @@ kind_gateway_endpoint() {
 kind_load_gateway_image() {
   local source="${1:-$E2E_GATEWAY_LOCAL_IMAGE}" image="${2:-$E2E_GATEWAY_DEPLOY_IMAGE}"
   local node="${E2E_KIND_CLUSTER}-control-plane"
-  local stamp="/etc/axiom-loaded-image-id"
+  # One stamp per image: a second image loaded through here (the examples
+  # gate side-loads Postgres) must not overwrite the gateway's and force every
+  # later gate to reload it.
+  local stamp="/etc/axiom-loaded-image-id-${image//[^A-Za-z0-9]/_}"
   docker image inspect "$source" >/dev/null 2>&1 \
     || fail "image $source is not built; run 'docker compose -f $E2E_COMPOSE_FILE build gateway' first"
 
@@ -178,6 +181,45 @@ kind_load_gateway_image() {
   elif (( created_ref )); then
     docker image rm "$image" >/dev/null 2>&1 || true
   fi
+}
+
+# kind_cnpg: install the CloudNativePG operator and wait until it can take a
+# Cluster. Server-side, because its CRDs are larger than the annotation
+# client-side apply keeps.
+E2E_CNPG_VERSION="${E2E_CNPG_VERSION:-1.30.1}"
+kind_cnpg() {
+  if kubectl_e2e -n cnpg-system get deployment cnpg-controller-manager >/dev/null 2>&1; then
+    log "CloudNativePG is already installed"
+  else
+    log "installing CloudNativePG $E2E_CNPG_VERSION"
+    kubectl_e2e apply --server-side -f \
+      "https://github.com/cloudnative-pg/cloudnative-pg/releases/download/v${E2E_CNPG_VERSION}/cnpg-${E2E_CNPG_VERSION}.yaml" >/dev/null \
+      || fail "apply CloudNativePG"
+  fi
+  kubectl_e2e -n cnpg-system rollout status deployment/cnpg-controller-manager --timeout=240s >/dev/null \
+    || fail "the CloudNativePG operator did not become ready"
+  kubectl_e2e wait --for=condition=Established crd/clusters.postgresql.cnpg.io --timeout=60s >/dev/null \
+    || fail "the CloudNativePG Cluster CRD was not established"
+}
+
+# helm_e2e ARGS...: helm against the kind cluster. Uses helm from PATH when
+# there is one, otherwise a pinned helm image on kind's Docker network, so the
+# suite needs no helm install. Chart paths are given relative to the
+# repository root, which is mounted at the same place either way.
+E2E_HELM_IMAGE="${E2E_HELM_IMAGE:-alpine/helm:3.22.0}"
+helm_e2e() {
+  if command -v helm >/dev/null 2>&1; then
+    (cd "$E2E_ROOT" && helm --kubeconfig "$E2E_ADMIN_KUBECONFIG" "$@")
+    return
+  fi
+  # The container reaches the API server by the node's name on kind's
+  # network, not through the host port the admin kubeconfig points at.
+  kind get kubeconfig --internal --name "$E2E_KIND_CLUSTER" > "$E2E_KUBE_DIR/admin-internal" \
+    || fail "kind get kubeconfig --internal"
+  docker run --rm --network kind \
+    -v "$E2E_KUBE_DIR/admin-internal:/kubeconfig:ro" -e KUBECONFIG=/kubeconfig \
+    -v "$E2E_ROOT:/repo:ro" -w /repo \
+    "$E2E_HELM_IMAGE" "$@"
 }
 
 # kind_gateway_tls_secret: publish the compose-generated CA and server cert as a
@@ -435,6 +477,13 @@ kind_start_gateway() {
 # sample. Waiting on `kubectl top` returning a row is the only check that
 # means what a caller needs it to mean.
 kind_metrics_server() {
+  # Already serving, for instance because an earlier gate installed it on this
+  # cluster: re-applying the manifest would drop the patch below and roll the
+  # Deployment again, a wait of minutes for nothing.
+  if kubectl_e2e top pods -n kube-system --no-headers 2>/dev/null | grep -q .; then
+    log "metrics-server is already serving samples"
+    return 0
+  fi
   log "installing metrics-server"
   kubectl_e2e apply -f "https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml" >/dev/null \
     || fail "apply metrics-server"

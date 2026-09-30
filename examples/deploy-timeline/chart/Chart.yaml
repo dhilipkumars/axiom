@@ -1,0 +1,6 @@
+apiVersion: v2
+name: timeline-demo
+description: A Deployment and a Service, for the deploy-timeline example.
+type: application
+version: 0.1.0
+appVersion: "1"
