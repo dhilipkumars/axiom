@@ -14,8 +14,30 @@ against 16: three clusters with the same 500m CPU limit, differing only in
 their major version, each measured by the same `pgbench` 18 client.
 
 ```
-OUTPUT-FROM-THE-LAB-RUN
+       run       |  cluster   |         server_version          | cpu_limit | clients |  state  | tps | latency_ms | pg_cpu_avg | tps_per_core | pg_cpu_peak | pg_memory_peak | samples | pgbench_cpu_avg |                             error
+-----------------+------------+---------------------------------+-----------+---------+---------+-----+------------+------------+--------------+-------------+----------------+---------+-----------------+---------------------------------------------------------------
+ missing-cluster | pg-missing |                                 |           |       8 | waiting |     |            |            |              |             |                |         |                 | CreateContainerConfigError: secret "pg-missing-app" not found
+ pg16-8-clients  | pg16       | 16.15 (Debian 16.15-1.pgdg11+2) | 500m      |       8 | done    | 587 |     13.630 |       0.50 |         1174 |        0.50 | 142 MB         |       3 |            0.17 |
+ pg17-8-clients  | pg17       | 17.11 (Debian 17.11-1.pgdg11+2) | 500m      |       8 | done    | 596 |     13.423 |       0.50 |         1193 |        0.50 | 143 MB         |       3 |            0.17 |
+ pg18-8-clients  | pg18       | 18.4 (Debian 18.4-1.pgdg11+1)   | 500m      |       8 | done    | 563 |     14.217 |       0.50 |         1127 |        0.50 | 148 MB         |       3 |            0.17 |
+(4 rows)
 ```
+
+That is `results.sql` from the example-tests workflow's run on kind, with
+`lab-example.sql`. How to read it:
+
+- **Every server was CPU-bound.** Each Postgres sat at exactly 0.50 cores for
+  the whole benchmark, which is its limit. So the comparison is throughput
+  per unit of CPU, and `tps_per_core` shows it directly.
+- **The three majors land within about 6% of each other.** 17 is the fastest
+  and 18 the slowest, at 1,193 and 1,127 TPS per core. On a shared CI runner
+  with one-minute runs, run once, that is noise, not a finding. It is the
+  kind of gap a real lab repeats runs to confirm or rule out.
+- **The measurement is fair.** Every server was measured by the same
+  `pgbench` 18 client, which used 0.17 cores, so the client was never the
+  bottleneck. Memory grows slightly with each major, from 142 to 148 MB.
+- **A mistake shows up as a reason, not a hang.** The run against a cluster
+  that was never created is `waiting`, and the error says exactly why.
 
 Every step is SQL through Axiom:
 
