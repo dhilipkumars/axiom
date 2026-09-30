@@ -14,8 +14,29 @@ against 16: three clusters with 2 CPUs each, differing only in their major
 version, each measured by the same `pgbench` 18 client, one at a time.
 
 ```
-OUTPUT-FROM-THE-LAB-RUN
+      run       | cluster |         server_version          | cpu_limit | clients | state | tps  | latency_ms | pg_cpu_avg | tps_per_core | pg_cpu_peak | pg_memory_peak | samples | pgbench_cpu_avg | error
+----------------+---------+---------------------------------+-----------+---------+-------+------+------------+------------+--------------+-------------+----------------+---------+-----------------+-------
+ pg16-8-clients | pg16    | 16.15 (Debian 16.15-1.pgdg11+2) | 2         |       8 | done  | 2178 |      3.673 |       1.93 |         1126 |        1.94 | 175 MB         |       3 |            0.75 |
+ pg17-8-clients | pg17    | 17.11 (Debian 17.11-1.pgdg11+2) | 2         |       8 | done  | 2199 |      3.637 |       1.93 |         1139 |        1.94 | 151 MB         |       3 |            0.74 |
+ pg18-8-clients | pg18    | 18.4 (Debian 18.4-1.pgdg11+1)   | 2         |       8 | done  | 2172 |      3.683 |       1.95 |         1116 |        1.96 | 158 MB         |       3 |            0.72 |
+(3 rows)
 ```
+
+That is `results.sql` from the example-tests workflow's run on kind, with
+`lab-example.sql`. How to read it:
+
+- **Every server was CPU-bound.** Each Postgres used 1.93 to 1.95 of its 2
+  CPUs for the whole benchmark. So the comparison is throughput per unit of
+  CPU, and `tps_per_core` shows it directly.
+- **The three majors are within about 1% of each other,** at 1,116 to 1,139
+  TPS per core. At this scale, with one-minute runs, each run once, that is
+  no difference at all: nothing here says any of them regressed.
+- **Running them one at a time is what made them comparable.** When the same
+  three runs shared the node, at 500m each, they spread by about 6%. Most of
+  that was the runs interfering with each other, not the versions.
+- **The measurement is fair.** Every server was measured by the same
+  `pgbench` 18 client. The client used about 0.75 cores, well short of what
+  the node had to spare, so it was never the bottleneck.
 
 Every step is SQL through Axiom:
 
