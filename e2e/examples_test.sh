@@ -56,6 +56,10 @@ op_log() { compose exec -T "$E2E_SVC_POSTGRES" cat /tmp/sql-operator.log 2>/dev/
 # operator_start SWEEP_SECONDS: run operator.sh detached in the Postgres
 # container.
 operator_start() {
+  # Drop the last run's log first: the detached shell truncates it only once
+  # it starts, and until then its "reconciled (startup)" would satisfy the
+  # wait below.
+  compose exec -T "$E2E_SVC_POSTGRES" rm -f /tmp/sql-operator.log || fail "clear the operator log"
   compose exec -d -e PGUSER="$E2E_PG_USER" -e PGDATABASE="$E2E_PG_DB" -e SWEEP_SECONDS="$1" \
     "$E2E_SVC_POSTGRES" bash -c \
     'echo $$ > /tmp/sql-operator.pid; exec bash /tmp/sql-operator/operator.sh > /tmp/sql-operator.log 2>&1' \
@@ -71,16 +75,23 @@ operator_start() {
 # children, whereas a psql signalled alongside it could outlive it, be adopted
 # by the postmaster (PID 1 here), and restart the server when it is reaped --
 # the next step then finds "the database system is not yet accepting
-# connections".
+# connections". Fails if it is still running after 30s, rather than leave it
+# sweeping alongside the next one: a SIGKILL would orphan its psql children,
+# which is the restart above.
 operator_stop() {
   compose exec -T "$E2E_SVC_POSTGRES" bash -c '
     [[ -f /tmp/sql-operator.pid ]] || exit 0
     pid="$(cat /tmp/sql-operator.pid)"
     kill -TERM "$pid" 2>/dev/null
-    for _ in $(seq 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
-    rm -f /tmp/sql-operator.pid' >/dev/null 2>&1 || true
+    for _ in $(seq 150); do
+      kill -0 "$pid" 2>/dev/null || { rm -f /tmp/sql-operator.pid; exit 0; }
+      sleep 0.2
+    done
+    exit 1' >/dev/null 2>&1
 }
-e2e_on_teardown operator_stop
+# At teardown the stack may already be gone; nothing is left to stop then.
+operator_stop_quietly() { operator_stop || true; }
+e2e_on_teardown operator_stop_quietly
 # logged PATTERN WHAT: wait for the operator to log PATTERN. The label can
 # reach the cluster a moment before the reconcile that wrote it returns and
 # logs, so this waits rather than reading the log once.
@@ -122,7 +133,7 @@ log "sql-operator: a label removed by hand comes back"
 kubectl_e2e -n "$OP_NS" label configmap op-a team- >/dev/null
 label_is op-a payments 20 "drift repair"
 op_log
-operator_stop
+operator_stop || fail "the operator did not stop within 30s: $(op_log)"
 
 log "sql-operator: a change to the owners table reaches the cluster on the next sweep"
 # Nothing in the cluster changes here, so no notification can fire: only the
@@ -132,7 +143,7 @@ psql_axiom "UPDATE sqlop.owners SET team = 'platform' WHERE namespace = '$OP_NS'
 label_is op-a platform 20 "sweep path"
 logged "reconciled (sweep)" "the relabel did not come from a sweep"
 op_log
-operator_stop
+operator_stop || fail "the operator did not stop within 30s: $(op_log)"
 kubectl_e2e -n "$OP_NS" get configmaps -L team
 echo "notified, drift-repaired and swept: $(op_log | grep -c reconciled) reconciles in the last run"
 
