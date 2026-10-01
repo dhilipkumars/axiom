@@ -1149,9 +1149,11 @@ type ColumnSchema struct {
 	// the extension quotes it anyway when generating DDL (docs/RULES.md §3).
 	Name    string  `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	SqlType SqlType `protobuf:"varint,2,opt,name=sql_type,json=sqlType,proto3,enum=axiom.v1.SqlType" json:"sql_type,omitempty"`
-	// Human-readable origin of the column, e.g. "metadata.name" or "spec".
-	// Diagnostics only: the extension's projection rule, not this string,
-	// decides how the column is read.
+	// Origin of the column, e.g. "metadata.name" or "spec". For a column the
+	// extension maps to a top-level field, it is that field's exact name, e.g.
+	// "stringData": IMPORT FOREIGN SCHEMA records it as the column's `field`
+	// option, which an INSERT needs to write the field under its real spelling
+	// (#97). For any other column it is diagnostics only.
 	Source        string `protobuf:"bytes,3,opt,name=source,proto3" json:"source,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

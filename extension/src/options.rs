@@ -22,6 +22,9 @@ pub enum Catalog {
     Table,
     /// `CREATE USER MAPPING ... OPTIONS`.
     UserMapping,
+    /// A foreign table column's `OPTIONS`, in `CREATE FOREIGN TABLE` or
+    /// `ALTER FOREIGN TABLE ... ALTER COLUMN`.
+    Column,
 }
 
 /// Validated `CREATE SERVER` options.
@@ -42,6 +45,13 @@ pub struct TableOptions {
     pub cache_mode: CacheMode,
     /// Whether INSERT/UPDATE/DELETE are offered on this table.
     pub writable: bool,
+}
+
+/// Validated column options.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ColumnOptions {
+    /// `field`: the exact top-level field the column reads and writes.
+    pub field: Option<String>,
 }
 
 /// Why an option list was rejected. Every variant names the offending option
@@ -68,6 +78,8 @@ pub enum OptionsError {
     Bool(&'static str, String),
     /// `writable 'true'` was given for a kind the extension keeps read-only.
     ForcedWritable(String),
+    /// `field` is empty.
+    EmptyField,
 }
 
 impl fmt::Display for OptionsError {
@@ -105,6 +117,7 @@ impl fmt::Display for OptionsError {
                 "option \"writable\" cannot be true for {r}: the extension keeps this kind \
                  read-only because SQL UPDATE has no sane meaning for it"
             ),
+            Self::EmptyField => write!(f, "option \"field\" must name a field"),
         }
     }
 }
@@ -213,6 +226,22 @@ pub const TABLE_OPTION_DOCS: &[OptionDoc] = &[
     },
 ];
 
+/// A foreign table column's `OPTIONS` — which field it maps to.
+///
+/// A column with no `field` maps to the top-level field whose name normalises
+/// to the column name, which is how a hand-written table names a CRD field.
+/// That cannot be inverted: an INSERT has no object to find the spelling in,
+/// so `string_data` would be written as `string_data` rather than
+/// `stringData`, and the API server would drop it. `IMPORT FOREIGN SCHEMA`
+/// sets `field` on every column whose field is spelled differently.
+pub const COLUMN_OPTION_DOCS: &[OptionDoc] = &[OptionDoc {
+    name: "field",
+    required: false,
+    default: Some("the top-level field whose name normalises to the column name"),
+    summary: "exact name of the top-level field the column reads and writes, e.g. \
+              stringData; only for columns that map to a top-level field",
+}];
+
 const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The options accepted for `catalog`. Wrapper and user mapping accept none:
@@ -222,6 +251,7 @@ fn option_docs(catalog: Catalog) -> &'static [OptionDoc] {
     match catalog {
         Catalog::Server => SERVER_OPTION_DOCS,
         Catalog::Table => TABLE_OPTION_DOCS,
+        Catalog::Column => COLUMN_OPTION_DOCS,
         Catalog::Wrapper | Catalog::UserMapping => &[],
     }
 }
@@ -352,6 +382,19 @@ impl TableOptions {
     }
 }
 
+impl ColumnOptions {
+    /// Parses a column's options.
+    pub fn parse(opts: &[(String, String)]) -> Result<Self, OptionsError> {
+        check_names(Catalog::Column, opts)?;
+        let field = match get(opts, "field") {
+            None => None,
+            Some("") => return Err(OptionsError::EmptyField),
+            Some(v) => Some(v.to_owned()),
+        };
+        Ok(Self { field })
+    }
+}
+
 /// Validates an option list for `catalog` the way `CREATE ...` DDL needs:
 /// names must be known and unique, and values must parse. Wrapper and user
 /// mapping accept no options in Phase 1 (user mappings arrive in Phase 7).
@@ -359,6 +402,7 @@ pub fn validate(catalog: Catalog, opts: &[(String, String)]) -> Result<(), Optio
     match catalog {
         Catalog::Server => ServerOptions::parse(opts).map(|_| ()),
         Catalog::Table => TableOptions::parse(opts).map(|_| ()),
+        Catalog::Column => ColumnOptions::parse(opts).map(|_| ()),
         Catalog::Wrapper | Catalog::UserMapping => check_names(catalog, opts),
     }
 }
@@ -624,6 +668,7 @@ mod tests {
         for (catalog, docs) in [
             (Catalog::Server, SERVER_OPTION_DOCS),
             (Catalog::Table, TABLE_OPTION_DOCS),
+            (Catalog::Column, COLUMN_OPTION_DOCS),
         ] {
             for doc in docs {
                 assert!(
@@ -640,5 +685,27 @@ mod tests {
                 "{catalog:?} accepted an undocumented option"
             );
         }
+    }
+
+    #[test]
+    fn column_options_name_the_field() {
+        assert_eq!(ColumnOptions::parse(&o(&[])), Ok(ColumnOptions::default()));
+        assert_eq!(
+            ColumnOptions::parse(&o(&[("field", "stringData")])),
+            Ok(ColumnOptions {
+                field: Some("stringData".into())
+            })
+        );
+        assert_eq!(
+            ColumnOptions::parse(&o(&[("field", "")])),
+            Err(OptionsError::EmptyField)
+        );
+        assert_eq!(
+            validate(Catalog::Column, &o(&[("feild", "stringData")])),
+            Err(OptionsError::Unknown {
+                catalog: Catalog::Column,
+                name: "feild".into()
+            })
+        );
     }
 }

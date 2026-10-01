@@ -68,6 +68,7 @@ func parseFDWOptions(path string) ([]fdwCatalog, error) {
 	titles := map[string]string{
 		"SERVER_OPTION_DOCS": "CREATE SERVER",
 		"TABLE_OPTION_DOCS":  "CREATE FOREIGN TABLE",
+		"COLUMN_OPTION_DOCS": "CREATE FOREIGN TABLE (column ... OPTIONS)",
 		"IMPORT_OPTION_DOCS": "IMPORT FOREIGN SCHEMA",
 	}
 
@@ -85,7 +86,11 @@ func parseFDWOptions(path string) ([]fdwCatalog, error) {
 			return nil, fmt.Errorf("%s: option table %q has no SQL statement mapped in docsgen; "+
 				"add it to the titles map", path, name)
 		}
+		// rustfmt closes a one-entry table on the entry's own line, `}];`.
 		end := strings.Index(src[loc[1]:], "\n];")
+		if one := strings.Index(src[loc[1]:], "\n}];"); one >= 0 && (end < 0 || one < end) {
+			end = one + len("\n}")
+		}
 		if end < 0 {
 			return nil, fmt.Errorf("%s: option table %s is not terminated by `];`", path, name)
 		}

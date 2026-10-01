@@ -207,6 +207,21 @@ got="$(kubectl_e2e -n "$NS" get configmap from-raw -o jsonpath='{.kind}|{.data.k
 echo "refused, and from-raw is untouched: $got"
 kubectl_e2e -n "$NS" delete configmap from-raw from-template --ignore-not-found >/dev/null
 
+log "#97: an imported camelCase column inserts under its field's real name"
+# Without the column's field option the INSERT sent binary_data, and the API
+# server dropped it: the ConfigMap was created with no binaryData and no error.
+psql_axiom "DROP SCHEMA IF EXISTS imported CASCADE; CREATE SCHEMA imported;
+            IMPORT FOREIGN SCHEMA k8s LIMIT TO (core_configmaps) FROM SERVER kind INTO imported;"
+psql_axiom "INSERT INTO imported.core_configmaps (namespace, name, binary_data)
+            VALUES ('$NS', 'camel', '{\"k\":\"dg==\"}');"
+got="$(kubectl_e2e -n "$NS" get configmap camel -o jsonpath='{.binaryData.k}')"
+[[ "$got" == "dg==" ]] || fail "#97: binaryData.k is '$got' in the cluster, want 'dg=='"
+got="$(psql_axiom "SELECT binary_data->>'k' FROM imported.core_configmaps WHERE namespace = '$NS' AND name = 'camel';")"
+[[ "$got" == "dg==" ]] || fail "#97: binary_data reads back '$got', want 'dg=='"
+kubectl_e2e -n "$NS" delete configmap camel --ignore-not-found >/dev/null
+psql_axiom "DROP SCHEMA imported CASCADE;"
+echo "binary_data reached the cluster as binaryData, and reads back"
+
 log "a cluster-scoped kind drops a namespace that raw claims, on INSERT and UPDATE"
 # The gateway refuses a body whose metadata.namespace differs from the
 # request's, and a cluster-scoped request has none. A raw copied from a

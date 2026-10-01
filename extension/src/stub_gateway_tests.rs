@@ -1188,6 +1188,108 @@ fn import_declares_the_typed_columns_it_asked_for() {
     tx.rollback().expect("rollback");
 }
 
+/// #97: an INSERT with no `raw` writes a camelCase field under its real
+/// name, which IMPORT records as the column's `field` option. Before, it went
+/// out as `binary_data` and the API server dropped it without an error.
+#[test]
+fn an_imported_camel_case_column_inserts_under_its_field_name() {
+    let stub = start_stub();
+    let mut pg = pg_client();
+    let ca = stub.ca_path.display();
+    let port = stub.addr.port();
+    let mut tx = pg.transaction().expect("begin");
+    tx.batch_execute(&format!(
+        "CREATE SERVER imp FOREIGN DATA WRAPPER axiom_fdw \
+           OPTIONS (endpoint 'https://localhost:{port}', ca_cert '{ca}', rpc_timeout_secs '5');
+         CREATE SCHEMA k8s;
+         IMPORT FOREIGN SCHEMA k8s LIMIT TO (core_configmaps) FROM SERVER imp INTO k8s;"
+    ))
+    .expect("import");
+
+    let options: Vec<(String, Vec<String>)> = tx
+        .query(
+            "SELECT a.attname::text, a.attfdwoptions
+               FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+               JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname = 'k8s' AND c.relname = 'core_configmaps'
+                AND a.attfdwoptions IS NOT NULL
+              ORDER BY a.attnum",
+            &[],
+        )
+        .expect("column options")
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
+    assert_eq!(
+        options,
+        [(
+            "binary_data".to_owned(),
+            vec!["field=binaryData".to_owned()]
+        )],
+        "only the column spelled differently from its field takes the option"
+    );
+
+    tx.execute(
+        "INSERT INTO k8s.core_configmaps (name, namespace, binary_data) \
+         VALUES ('bin', 'shop', '{\"k\": \"dg==\"}')",
+        &[],
+    )
+    .expect("insert");
+    let obj = stub.cluster.configmaps.lock().expect("lock")[&("shop".to_owned(), "bin".to_owned())]
+        .clone();
+    assert_eq!(obj["binaryData"], json!({"k": "dg=="}), "{obj}");
+    assert!(obj.get("binary_data").is_none(), "{obj}");
+    let read: String = tx
+        .query_one(
+            "SELECT binary_data::text FROM k8s.core_configmaps \
+             WHERE namespace = 'shop' AND name = 'bin'",
+            &[],
+        )
+        .expect("read back")
+        .get(0);
+    assert_eq!(read, r#"{"k": "dg=="}"#);
+
+    let err = tx
+        .batch_execute(
+            "ALTER FOREIGN TABLE k8s.core_configmaps \
+             ALTER COLUMN data OPTIONS (ADD feild 'data')",
+        )
+        .expect_err("a misspelt column option");
+    assert!(
+        message(&err).contains("invalid option \"feild\""),
+        "{}",
+        message(&err)
+    );
+    tx.rollback().expect("rollback");
+}
+
+/// A `field` option on a column that is not a top-level field would be
+/// ignored, so a scan refuses it rather than quietly reading something else.
+#[test]
+fn a_field_option_on_a_promoted_column_is_refused() {
+    let stub = start_stub();
+    let mut pg = pg_client();
+    let ca = stub.ca_path.display();
+    let port = stub.addr.port();
+    let mut tx = pg.transaction().expect("begin");
+    tx.batch_execute(&format!(
+        "CREATE SERVER fo FOREIGN DATA WRAPPER axiom_fdw \
+           OPTIONS (endpoint 'https://localhost:{port}', ca_cert '{ca}', rpc_timeout_secs '5');
+         CREATE FOREIGN TABLE p (name text, phase text OPTIONS (field 'phase')) \
+           SERVER fo OPTIONS (resource 'pods');"
+    ))
+    .expect("setup");
+    let err = tx
+        .query("SELECT phase FROM p", &[])
+        .expect_err("phase reads status.phase, not a top-level field");
+    assert!(
+        message(&err).contains("column \"phase\" cannot take option \"field\""),
+        "{}",
+        message(&err)
+    );
+    tx.rollback().expect("rollback");
+}
+
 #[test]
 fn import_foreign_schema_filters_and_options() {
     let stub = start_stub();

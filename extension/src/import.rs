@@ -17,6 +17,8 @@
 use std::fmt::Write as _;
 
 use crate::cache::CacheMode;
+use crate::resource::Resource;
+use crate::schema::{self, Projection};
 
 /// A column as the gateway described it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +28,9 @@ pub struct ImportColumn {
     /// SQL type name, already narrowed to one this extension converts:
     /// `text`, `jsonb`, `bigint`, `boolean` or `timestamptz`.
     pub sql_type: &'static str,
+    /// Where the gateway read it from: for a top-level field, the field's
+    /// exact name, which the column cannot be mapped back to by name alone.
+    pub source: String,
 }
 
 /// One kind as the gateway described it, reduced to what DDL generation needs.
@@ -358,6 +363,22 @@ pub fn unmatched_table_list(
     out
 }
 
+/// The `field` option a column needs: the exact name of the top-level field
+/// it maps to, when that is spelled differently from the column.
+///
+/// Without it a column finds its field by normalised name, which works for a
+/// read but not for an INSERT, which has no object to find the spelling in
+/// (#97). Only a column the extension maps to a top-level field takes the
+/// option, and only a `source` that normalises to the column name is trusted
+/// as that field's name, so a gateway describing a column some other way
+/// leaves today's behaviour in place rather than misdirecting writes.
+fn field_option<'a>(resource: Option<&Resource>, c: &'a ImportColumn) -> Option<&'a str> {
+    let top_level =
+        resource.is_some_and(|r| schema::column(r, &c.name).projection == Projection::TopLevel);
+    (top_level && c.source != c.name && schema::normalize_field_name(&c.source) == c.name)
+        .then_some(c.source.as_str())
+}
+
 /// Generates the `CREATE FOREIGN TABLE` statement for one kind.
 ///
 /// Returns the statement, plus the names of any columns that were dropped
@@ -392,6 +413,14 @@ pub fn create_table_sql(
         return Err(SkipReason::BadIdentity("group", kind.group.clone()));
     }
 
+    let resource = Resource::new(
+        &kind.group,
+        &kind.version,
+        &kind.kind,
+        &kind.plural,
+        kind.namespaced,
+    )
+    .ok();
     let mut dropped = Vec::new();
     let mut cols = Vec::new();
     for c in &kind.columns {
@@ -399,14 +428,21 @@ pub fn create_table_sql(
             dropped.push(c.name.clone());
             continue;
         }
-        if cols.iter().any(|(n, _): &(String, &str)| *n == c.name) {
+        if cols
+            .iter()
+            .any(|(n, _, _): &(String, &str, _)| *n == c.name)
+        {
             // The gateway drops colliding columns already; a duplicate here
             // would be a second definition of the same attribute, which
             // Postgres rejects with a far less clear message.
             dropped.push(c.name.clone());
             continue;
         }
-        cols.push((c.name.clone(), c.sql_type));
+        cols.push((
+            c.name.clone(),
+            c.sql_type,
+            field_option(resource.as_ref(), c),
+        ));
     }
     if cols.is_empty() {
         return Err(SkipReason::NoColumns);
@@ -420,11 +456,15 @@ pub fn create_table_sql(
         quote_ident(table)
     )
     .expect("writing to a String cannot fail");
-    for (i, (name, ty)) in cols.iter().enumerate() {
+    for (i, (name, ty, field)) in cols.iter().enumerate() {
         if i > 0 {
             sql.push_str(", ");
         }
         write!(sql, "{} {ty}", quote_ident(name)).expect("writing to a String cannot fail");
+        if let Some(f) = field {
+            write!(sql, " OPTIONS (field {})", quote_literal(f))
+                .expect("writing to a String cannot fail");
+        }
     }
     write!(sql, ") SERVER {} OPTIONS (", quote_ident(server))
         .expect("writing to a String cannot fail");
@@ -499,18 +539,22 @@ mod tests {
                 ImportColumn {
                     name: "name".into(),
                     sql_type: "text",
+                    source: String::new(),
                 },
                 ImportColumn {
                     name: "namespace".into(),
                     sql_type: "text",
+                    source: String::new(),
                 },
                 ImportColumn {
                     name: "spec".into(),
                     sql_type: "jsonb",
+                    source: String::new(),
                 },
                 ImportColumn {
                     name: "raw".into(),
                     sql_type: "jsonb",
+                    source: String::new(),
                 },
             ],
         }
@@ -534,6 +578,54 @@ mod tests {
              SERVER \"prod\" OPTIONS (resource 'widgets', group 'example.com', \
              version 'v1', kind 'Widget')"
         );
+    }
+
+    #[test]
+    fn a_field_spelled_differently_from_its_column_is_named_in_an_option() {
+        let mut secret = widget();
+        secret.group = String::new();
+        secret.kind = "Secret".into();
+        secret.plural = "secrets".into();
+        for (name, source) in [
+            ("string_data", "stringData"),
+            ("data", "data"),
+            // Meta and raw columns are not top-level fields, whatever the
+            // gateway says they came from.
+            ("api_version", "apiVersion"),
+            ("creation_timestamp", "metadata.creationTimestamp"),
+            // A source that does not normalise to the column is not a field
+            // name, so it is not trusted as one.
+            ("immutable", "spec.immutable"),
+        ] {
+            secret.columns.push(ImportColumn {
+                name: name.into(),
+                sql_type: "jsonb",
+                source: source.into(),
+            });
+        }
+        let (sql, _) =
+            create_table_sql(&secret, "secrets", "prod", "k8s", &ImportOptions::default())
+                .expect("valid");
+        assert!(
+            sql.contains("\"string_data\" jsonb OPTIONS (field 'stringData')"),
+            "{sql}"
+        );
+        assert_eq!(sql.matches("OPTIONS (field").count(), 1, "{sql}");
+    }
+
+    #[test]
+    fn a_field_name_is_quoted_as_a_literal() {
+        let mut k = widget();
+        let c = ImportColumn {
+            name: "it_s".into(),
+            sql_type: "jsonb",
+            source: "it's".into(),
+        };
+        assert_eq!(schema::normalize_field_name(&c.source), c.name);
+        k.columns.push(c);
+        let (sql, _) = create_table_sql(&k, "widgets", "prod", "k8s", &ImportOptions::default())
+            .expect("valid");
+        assert!(sql.contains("OPTIONS (field 'it''s')"), "{sql}");
     }
 
     #[test]
@@ -645,6 +737,7 @@ mod tests {
             ImportColumn {
                 name: "Bad Name\"".into(),
                 sql_type: "jsonb",
+                source: String::new(),
             },
         );
         let (sql, dropped) =
@@ -664,6 +757,7 @@ mod tests {
         k.columns.push(ImportColumn {
             name: "spec".into(),
             sql_type: "jsonb",
+            source: String::new(),
         });
         let (sql, dropped) =
             create_table_sql(&k, "widgets", "prod", "k8s", &ImportOptions::default())
@@ -678,6 +772,7 @@ mod tests {
         k.columns = vec![ImportColumn {
             name: "Bad".into(),
             sql_type: "jsonb",
+            source: String::new(),
         }];
         assert_eq!(
             create_table_sql(&k, "widgets", "prod", "k8s", &ImportOptions::default()),

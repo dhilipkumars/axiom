@@ -160,7 +160,13 @@ SELECT name, raw->'spec'->'containers'->0->>'image' FROM k8s.core_pods
 
 **Field names are normalised.** A `camelCase` Kubernetes field becomes
 `snake_case`, so `nodeName` is `node_name`. Two fields that normalise to the
-same name produce no column at all rather than an arbitrary winner.
+same name produce no column at all rather than an arbitrary winner. The
+column's `field` option records the real spelling, `string_data jsonb OPTIONS
+(field 'stringData')`, so an INSERT writes `stringData`. A table imported
+before 0.2.0 has no such option and writes `string_data`, which the API server
+drops without an error: import it again, or add the option by hand with
+`ALTER FOREIGN TABLE k8s.core_secrets ALTER COLUMN string_data OPTIONS (ADD
+field 'stringData')`.
 
 **`api_version`, `kind` and `metadata` are on every kind**, which is what makes
 a query spanning kinds possible:
