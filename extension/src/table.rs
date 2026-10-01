@@ -32,6 +32,9 @@ pub struct ResolvedColumn {
     pub projection: Projection,
     /// Whether SQL may write it.
     pub writable: bool,
+    /// The exact top-level field a [`Projection::TopLevel`] column maps to,
+    /// from its `field` option. `None` finds the field by normalised name.
+    pub field: Option<String>,
 }
 
 /// The resolved shape of one foreign table.
@@ -83,6 +86,7 @@ impl TableSchema {
                 sql_type,
                 projection: c.projection,
                 writable: c.writable,
+                field: None,
             }));
         }
         Ok(Self {
@@ -104,6 +108,25 @@ impl TableSchema {
             .map(|n| n.map(|n| (n, Some(schema::column(&resource, n).accepts[0]))))
             .collect();
         Self::resolve(resource, writable, &declared).expect("the preferred type is accepted")
+    }
+
+    /// Maps the column at attribute index `index` to the exact top-level field
+    /// `field`, as its `field` option says.
+    ///
+    /// # Errors
+    /// [`FieldOptionError`] when the column does not map to a top-level field,
+    /// so the option would be silently ignored.
+    pub fn set_field(&mut self, index: usize, field: String) -> Result<(), FieldOptionError> {
+        let Some(Some(c)) = self.columns.get_mut(index) else {
+            return Ok(());
+        };
+        if c.projection != Projection::TopLevel {
+            return Err(FieldOptionError {
+                column: c.name.clone(),
+            });
+        }
+        c.field = Some(field);
+        Ok(())
     }
 
     /// The resolved column with this name, if the table declares it.
@@ -198,9 +221,11 @@ fn project(raw: &serde_json::Value, column: &ResolvedColumn) -> Option<Cell> {
             }
         }
         Projection::Raw => Some(Cell::Json(raw.clone())),
-        Projection::TopLevel => {
-            schema::top_level_field(raw, &column.name).and_then(|v| convert(v, column.sql_type))
+        Projection::TopLevel => match &column.field {
+            Some(f) => raw.get(f.as_str()),
+            None => schema::top_level_field(raw, &column.name),
         }
+        .and_then(|v| convert(v, column.sql_type)),
     }
 }
 
@@ -260,6 +285,26 @@ impl fmt::Display for ColumnTypeError {
 }
 
 impl std::error::Error for ColumnTypeError {}
+
+/// A `field` option on a column that does not map to a top-level field, such
+/// as `name` or a promoted column like a Pod's `phase`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldOptionError {
+    /// The column.
+    pub column: String,
+}
+
+impl fmt::Display for FieldOptionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "column {:?} cannot take option \"field\": it does not map to a top-level field",
+            self.column
+        )
+    }
+}
+
+impl std::error::Error for FieldOptionError {}
 
 /// One decoded object, values aligned with [`TableSchema::columns`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -595,7 +640,10 @@ fn apply_column(
     match col.projection {
         Projection::Json { pointer, .. } => set_at_pointer(body, pointer, value),
         Projection::TopLevel => {
-            let key = schema::top_level_key(Some(body), &col.name);
+            let key = match &col.field {
+                Some(f) => f.clone(),
+                None => schema::top_level_key(Some(body), &col.name),
+            };
             match value {
                 Some(v) => body[key] = v.clone(),
                 None => {
@@ -1132,6 +1180,116 @@ mod tests {
         assert_eq!(
             row.cell(&s, "string_data"),
             Some(&Cell::Json(json!({"k":"v"})))
+        );
+    }
+
+    /// A Secret table as `IMPORT FOREIGN SCHEMA` now declares it: `string_data`
+    /// carries `OPTIONS (field 'stringData')`.
+    fn secrets_with_field() -> TableSchema {
+        let r = Resource::new("", "v1", "Secret", "secrets", true).expect("valid");
+        let mut s = TableSchema::preferred(
+            r,
+            true,
+            &[Some("name"), Some("namespace"), Some("string_data")],
+        );
+        s.set_field(2, "stringData".into())
+            .expect("top-level column");
+        s
+    }
+
+    #[test]
+    fn insert_writes_a_column_to_the_field_its_option_names() {
+        // #97: with no `raw` there is no object to find the spelling in, so
+        // only the option can say the field is `stringData`.
+        let s = secrets_with_field();
+        let new = new_row(
+            &s,
+            &[
+                ("name", t("s")),
+                ("namespace", t("shop")),
+                ("string_data", j(json!({"k":"v"}))),
+            ],
+        );
+        let w = insert_body(&s, &new).expect("valid");
+        assert_eq!(w.body["stringData"], json!({"k":"v"}));
+        assert!(w.body.get("string_data").is_none(), "{}", w.body);
+    }
+
+    #[test]
+    fn update_adds_a_missing_field_under_the_name_its_option_gives() {
+        // The old object has no stringData, so it cannot supply the spelling.
+        let r = Resource::new("", "v1", "Secret", "secrets", true).expect("valid");
+        let mut s = TableSchema::preferred(
+            r,
+            true,
+            &[
+                Some("name"),
+                Some("namespace"),
+                Some("string_data"),
+                Some("raw"),
+            ],
+        );
+        s.set_field(2, "stringData".into())
+            .expect("top-level column");
+        let old = json!({
+            "apiVersion": "v1", "kind": "Secret",
+            "metadata": {"name":"s","namespace":"shop","resourceVersion":"7"}
+        });
+        let new = new_row(
+            &s,
+            &[
+                ("name", t("s")),
+                ("namespace", t("shop")),
+                ("string_data", j(json!({"k":"v"}))),
+                ("raw", j(old.clone())),
+            ],
+        );
+        let w = update_body(&s, &old, &new).expect("valid");
+        assert_eq!(w.body["stringData"], json!({"k":"v"}));
+        assert!(w.body.get("string_data").is_none(), "{}", w.body);
+    }
+
+    #[test]
+    fn insert_without_the_option_keeps_the_column_name() {
+        // A hand-written table with no option behaves as it always has.
+        let r = Resource::new("", "v1", "Secret", "secrets", true).expect("valid");
+        let s = TableSchema::preferred(
+            r,
+            true,
+            &[Some("name"), Some("namespace"), Some("string_data")],
+        );
+        let new = new_row(
+            &s,
+            &[
+                ("name", t("s")),
+                ("namespace", t("shop")),
+                ("string_data", j(json!({"k":"v"}))),
+            ],
+        );
+        let w = insert_body(&s, &new).expect("valid");
+        assert_eq!(w.body["string_data"], json!({"k":"v"}));
+    }
+
+    #[test]
+    fn a_column_with_a_field_option_reads_that_field_exactly() {
+        let s = secrets_with_field();
+        // `string_data` would also normalise to the column; the option picks.
+        let obj = json!({"metadata":{"name":"s"},"stringData":{"k":"v"},"string_data":{"x":"y"}});
+        let row = s.row_from_value(&obj).expect("valid");
+        assert_eq!(
+            row.cell(&s, "string_data"),
+            Some(&Cell::Json(json!({"k":"v"})))
+        );
+    }
+
+    #[test]
+    fn a_field_option_is_refused_on_a_column_that_is_not_a_top_level_field() {
+        let mut s = secrets_with_field();
+        assert_eq!(
+            s.set_field(0, "metadata".into()),
+            Err(FieldOptionError {
+                column: "name".into()
+            })
         );
     }
 

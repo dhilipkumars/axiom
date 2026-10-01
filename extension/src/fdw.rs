@@ -44,7 +44,7 @@ use pgrx::{pg_sys, JsonB, PgList, PgMemoryContexts};
 use crate::cache::{decide_tier, CacheMode, Tier, CACHE_FULL_REASON};
 use crate::client::{self, ClientError, ErrorClass};
 use crate::import::{self, ImportColumn, ImportKind, ImportOptions};
-use crate::options::{self, Catalog, OptionsError, ServerOptions, TableOptions};
+use crate::options::{self, Catalog, ColumnOptions, OptionsError, ServerOptions, TableOptions};
 use crate::quals::{Filter, Qual};
 use crate::resource::Resource;
 use crate::schema::SqlType;
@@ -83,7 +83,7 @@ fn axiom_fdw_handler() -> PgBox<pg_sys::FdwRoutine> {
 }
 
 /// Validates `OPTIONS (...)` on `CREATE/ALTER FOREIGN DATA WRAPPER | SERVER |
-/// FOREIGN TABLE | USER MAPPING`. Raises an FDW SQLSTATE error naming the
+/// FOREIGN TABLE | USER MAPPING`, and on a foreign table's columns. Raises an FDW SQLSTATE error naming the
 /// offending option; accepts silently otherwise.
 #[pg_extern]
 fn axiom_fdw_validator(options: Vec<Option<String>>, catalog: Option<pg_sys::Oid>) {
@@ -92,7 +92,9 @@ fn axiom_fdw_validator(options: Vec<Option<String>>, catalog: Option<pg_sys::Oid
         Some(pg_sys::ForeignServerRelationId) => Catalog::Server,
         Some(pg_sys::ForeignTableRelationId) => Catalog::Table,
         Some(pg_sys::UserMappingRelationId) => Catalog::UserMapping,
-        // Postgres only calls validators for the four catalogs above.
+        // A foreign table column's OPTIONS.
+        Some(pg_sys::AttributeRelationId) => Catalog::Column,
+        // Postgres only calls validators for the five catalogs above.
         _ => return,
     };
     let mut pairs = Vec::with_capacity(options.len());
@@ -137,7 +139,8 @@ fn options_sqlstate(e: &OptionsError) -> PgSqlErrorCode {
         | OptionsError::CacheMode(_)
         | OptionsError::Identity(_)
         | OptionsError::Bool(..)
-        | OptionsError::ForcedWritable(_) => PgSqlErrorCode::ERRCODE_FDW_INVALID_ATTRIBUTE_VALUE,
+        | OptionsError::ForcedWritable(_)
+        | OptionsError::EmptyField => PgSqlErrorCode::ERRCODE_FDW_INVALID_ATTRIBUTE_VALUE,
     }
 }
 
@@ -662,14 +665,16 @@ fn sql_type_of(oid: pg_sys::Oid) -> Option<SqlType> {
 /// that reads NULL if the object has no such field, which is what lets a
 /// hand-written table target a CRD. The declared type decides how values are
 /// converted, and must be one the column accepts, so a column declared with
-/// the wrong type fails at scan rather than reading NULL on every row.
+/// the wrong type fails at scan rather than reading NULL on every row. A
+/// column's `field` option names the top-level field it maps to exactly.
 unsafe fn resolve_schema(
-    tupdesc: pg_sys::TupleDesc,
+    rel: pg_sys::Relation,
     resource: &Resource,
     writable: bool,
 ) -> TableSchema {
-    // SAFETY: tupdesc is a live TupleDesc supplied by the executor.
+    // SAFETY: rel is a live, open Relation supplied by the executor.
     unsafe {
+        let tupdesc = (*rel).rd_att;
         let natts = usize::try_from((*tupdesc).natts).unwrap_or(0);
         let mut names: Vec<Option<(String, Option<SqlType>)>> = Vec::with_capacity(natts);
         for i in 0..natts {
@@ -689,13 +694,36 @@ unsafe fn resolve_schema(
             .iter()
             .map(|n| n.as_ref().map(|(name, t)| (name.as_str(), *t)))
             .collect();
-        match TableSchema::resolve(*resource, writable, &borrowed) {
+        let mut schema = match TableSchema::resolve(*resource, writable, &borrowed) {
             Ok(schema) => schema,
             Err(e) => raise(
                 PgSqlErrorCode::ERRCODE_FDW_INVALID_DATA_TYPE,
                 format!("{e} for {resource}"),
             ),
+        };
+        for (i, n) in names.iter().enumerate() {
+            if n.is_none() {
+                continue;
+            }
+            let Ok(attnum) = i16::try_from(i + 1) else {
+                break;
+            };
+            let opts = options_from_list(pg_sys::GetForeignColumnOptions((*rel).rd_id, attnum));
+            // The validator has already checked these, at CREATE or ALTER.
+            let field = match ColumnOptions::parse(&opts) {
+                Ok(o) => o.field,
+                Err(e) => raise(options_sqlstate(&e), format!("foreign table column: {e}")),
+            };
+            if let Some(field) = field {
+                if let Err(e) = schema.set_field(i, field) {
+                    raise(
+                        PgSqlErrorCode::ERRCODE_FDW_INVALID_OPTION_NAME,
+                        format!("{e} for {resource}"),
+                    );
+                }
+            }
         }
+        schema
     }
 }
 
@@ -819,7 +847,7 @@ unsafe extern "C-unwind" fn begin_foreign_scan(node: *mut pg_sys::ForeignScanSta
             rel_oid,
         );
         let config = scan_config(rel_oid);
-        let schema = resolve_schema((*rel).rd_att, &config.resource, config.writable);
+        let schema = resolve_schema(rel, &config.resource, config.writable);
         let state = ScanState {
             config,
             filter: Filter::from_quals(&quals),
@@ -1134,7 +1162,7 @@ unsafe extern "C-unwind" fn begin_foreign_modify(
                 WriteError::ReadOnly(config.resource.to_string()).to_string(),
             );
         }
-        let schema = resolve_schema((*rel).rd_att, &config.resource, config.writable);
+        let schema = resolve_schema(rel, &config.resource, config.writable);
         let mut junk_raw_attno: i16 = 0;
         let op = (*mtstate).operation;
         if op == pg_sys::CmdType::CMD_UPDATE || op == pg_sys::CmdType::CMD_DELETE {
@@ -1388,6 +1416,7 @@ fn import_kind_from_wire(k: &crate::proto::v1::KindSchema) -> Option<ImportKind>
             Some(ImportColumn {
                 name: c.name.clone(),
                 sql_type,
+                source: c.source.clone(),
             })
         })
         .collect();

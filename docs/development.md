@@ -540,7 +540,11 @@ promotes, such as `ownerReferences` and `finalizers`. All three are read-only.
 
 The last row is what makes CRDs work without a per-kind mapping: a column named
 `spec` reads `spec`, and a `camelCase` field is reached by its `snake_case`
-column name (`string_data` reads `stringData`). A column naming a field the
+column name (`string_data` reads `stringData`). Normalisation cannot be
+inverted, so an INSERT, with no object to find the spelling in, needs the
+column's `field` option to write `stringData`; `IMPORT FOREIGN SCHEMA` sets it
+from the gateway's `source` for every column spelled differently from its
+field, and a column with the option reads that field exactly. A column naming a field the
 kind does not have reads NULL rather than being rejected, since a CRD's fields
 are not knowable without discovery and a scan deliberately never discovers.
 Column *types* are still checked strictly, so a mistyped column fails loudly.

@@ -30,6 +30,14 @@ These are every option the validator accepts. An option not listed for a stateme
 | `writable` | no | `false for built-in read-only kinds, true otherwise` | whether INSERT, UPDATE and DELETE are offered; cannot be turned on for kinds the extension keeps read-only, such as Pods |
 | `cache_mode` | no | `on_demand` | on_demand serves every scan by RPC; watch serves scans from the watch-driven cache and starts a subscription for the kind |
 
+## `CREATE FOREIGN TABLE (column ... OPTIONS)`
+
+A foreign table column's `OPTIONS` — which field it maps to.
+
+| Option | Required | Default | Meaning |
+|---|---|---|---|
+| `field` | no | `the top-level field whose name normalises to the column name` | exact name of the top-level field the column reads and writes, e.g. stringData; only for columns that map to a top-level field |
+
 ## `IMPORT FOREIGN SCHEMA`
 
 `IMPORT FOREIGN SCHEMA ... OPTIONS` — how a whole schema is generated.

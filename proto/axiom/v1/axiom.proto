@@ -336,9 +336,11 @@ message ColumnSchema {
   // the extension quotes it anyway when generating DDL (docs/RULES.md §3).
   string name = 1;
   SqlType sql_type = 2;
-  // Human-readable origin of the column, e.g. "metadata.name" or "spec".
-  // Diagnostics only: the extension's projection rule, not this string,
-  // decides how the column is read.
+  // Origin of the column, e.g. "metadata.name" or "spec". For a column the
+  // extension maps to a top-level field, it is that field's exact name, e.g.
+  // "stringData": IMPORT FOREIGN SCHEMA records it as the column's `field`
+  // option, which an INSERT needs to write the field under its real spelling
+  // (#97). For any other column it is diagnostics only.
   string source = 3;
 }
 

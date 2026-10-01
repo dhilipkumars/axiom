@@ -174,7 +174,7 @@ ColumnSchema is one column of a kind's foreign table.
 |---|---|---|
 | `name` | `string` | SQL column name. Always a lowercase identifier that needs no quoting; the extension quotes it anyway when generating DDL (docs/RULES.md §3). |
 | `sql_type` | `SqlType` | — |
-| `source` | `string` | Human-readable origin of the column, e.g. "metadata.name" or "spec". Diagnostics only: the extension's projection rule, not this string, decides how the column is read. |
+| `source` | `string` | Origin of the column, e.g. "metadata.name" or "spec". For a column the extension maps to a top-level field, it is that field's exact name, e.g. "stringData": IMPORT FOREIGN SCHEMA records it as the column's `field` option, which an INSERT needs to write the field under its real spelling (#97). For any other column it is diagnostics only. |
 
 ### CreateRequest
 
