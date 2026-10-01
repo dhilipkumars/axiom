@@ -388,7 +388,8 @@ impl ColumnOptions {
         check_names(Catalog::Column, opts)?;
         let field = match get(opts, "field") {
             None => None,
-            Some("") => return Err(OptionsError::EmptyField),
+            // Not trimmed otherwise: the value is a field's exact name.
+            Some(v) if v.trim().is_empty() => return Err(OptionsError::EmptyField),
             Some(v) => Some(v.to_owned()),
         };
         Ok(Self { field })
@@ -696,10 +697,12 @@ mod tests {
                 field: Some("stringData".into())
             })
         );
-        assert_eq!(
-            ColumnOptions::parse(&o(&[("field", "")])),
-            Err(OptionsError::EmptyField)
-        );
+        for blank in ["", "   "] {
+            assert_eq!(
+                ColumnOptions::parse(&o(&[("field", blank)])),
+                Err(OptionsError::EmptyField)
+            );
+        }
         assert_eq!(
             validate(Catalog::Column, &o(&[("feild", "stringData")])),
             Err(OptionsError::Unknown {

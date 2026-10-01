@@ -1216,6 +1216,40 @@ mod tests {
     }
 
     #[test]
+    fn update_adds_a_missing_field_under_the_name_its_option_gives() {
+        // The old object has no stringData, so it cannot supply the spelling.
+        let r = Resource::new("", "v1", "Secret", "secrets", true).expect("valid");
+        let mut s = TableSchema::preferred(
+            r,
+            true,
+            &[
+                Some("name"),
+                Some("namespace"),
+                Some("string_data"),
+                Some("raw"),
+            ],
+        );
+        s.set_field(2, "stringData".into())
+            .expect("top-level column");
+        let old = json!({
+            "apiVersion": "v1", "kind": "Secret",
+            "metadata": {"name":"s","namespace":"shop","resourceVersion":"7"}
+        });
+        let new = new_row(
+            &s,
+            &[
+                ("name", t("s")),
+                ("namespace", t("shop")),
+                ("string_data", j(json!({"k":"v"}))),
+                ("raw", j(old.clone())),
+            ],
+        );
+        let w = update_body(&s, &old, &new).expect("valid");
+        assert_eq!(w.body["stringData"], json!({"k":"v"}));
+        assert!(w.body.get("string_data").is_none(), "{}", w.body);
+    }
+
+    #[test]
     fn insert_without_the_option_keeps_the_column_name() {
         // A hand-written table with no option behaves as it always has.
         let r = Resource::new("", "v1", "Secret", "secrets", true).expect("valid");
