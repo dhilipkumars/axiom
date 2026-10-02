@@ -55,7 +55,8 @@ want to see.
 
 The review produces a list; a write turns it into an action.
 [Find it and fix it in one statement](index.md#find-it-and-fix-it-in-one-statement)
-annotates every Deployment that uses under a fifth of the memory it requests.
+annotates each Deployment in a namespace that uses under a fifth of the memory
+it requests.
 
 ## Requirements
 

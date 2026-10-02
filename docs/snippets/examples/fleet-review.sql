@@ -16,22 +16,26 @@ owner AS (
     FROM k8s.apps_replicasets r),
 warn AS (
   SELECT e.namespace, e.involved_object->>'name' AS pod,
-         count(*) AS warnings, max(e.reason) AS why
+         sum(coalesce(e.count, 1)) AS warnings,
+         max(coalesce(e.last_timestamp, e.event_time, e.creation_timestamp)) AS at,
+         (array_agg(e.reason ORDER BY coalesce(e.last_timestamp, e.event_time,
+                                               e.creation_timestamp) DESC))[1] AS why
     FROM k8s.core_events e
    WHERE e.type = 'Warning' AND e.involved_object->>'kind' = 'Pod'
    GROUP BY 1, 2)
-SELECT coalesce(o.workload, s.pod) AS workload,
+SELECT s.namespace,
+       coalesce(o.workload, s.pod) AS workload,
        count(*) AS pods,
-       round(sum(u.mem_used) / 1024 / 1024) AS mem_used_mib,
-       round(sum(s.mem_req) / 1024 / 1024) AS mem_requested_mib,
+       round(sum(u.mem_used) / 1024 / 1024, 1) AS mem_used_mib,
+       round(sum(s.mem_req) / 1024 / 1024, 1) AS mem_requested_mib,
        CASE WHEN sum(s.mem_req) > 0
             THEN round(100 * sum(u.mem_used) / sum(s.mem_req)) END AS pct_of_request,
        bool_or(s.no_limits) AS unbounded,
        coalesce(sum(w.warnings), 0) AS warnings,
-       max(w.why) AS latest_warning
+       (array_agg(w.why ORDER BY w.at DESC NULLS LAST))[1] AS latest_warning
   FROM spec s
   LEFT JOIN usage u ON u.namespace = s.namespace AND u.pod = s.pod
   LEFT JOIN owner o ON o.namespace = s.namespace AND o.rs = s.rs
   LEFT JOIN warn  w ON w.namespace = s.namespace AND w.pod = s.pod
- GROUP BY coalesce(o.workload, s.pod)
+ GROUP BY s.namespace, coalesce(o.workload, s.pod)
  ORDER BY mem_used_mib DESC NULLS LAST;

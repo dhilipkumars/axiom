@@ -21,4 +21,5 @@ UPDATE k8s.apps_deployments d
                      || jsonb_build_object('axiom/memory-used-pct', r.pct::text)
   FROM ratio r
  WHERE d.namespace = r.namespace AND d.name = r.deployment AND r.pct < 20
+   AND d.namespace = 'shop'  -- one namespace at a time: this writes to the cluster
 RETURNING d.namespace, d.name, r.pct;

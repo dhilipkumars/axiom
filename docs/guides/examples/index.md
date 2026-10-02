@@ -48,7 +48,7 @@ ReplicaSet to the pod that will not start, and the event that says why.
 
 ## Find it and fix it in one statement
 
-A query can also write. This annotates every Deployment using under a fifth of
+A query can also write. This annotates each Deployment in `shop` using under a fifth of
 the memory it requests, so the finding sits on the object where `kubectl
 describe` will show it. Each row is a real Kubernetes update.
 

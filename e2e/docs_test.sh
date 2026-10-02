@@ -30,6 +30,9 @@ stack_up
 kind_deploy_gateway "pods,configmaps,events,events.events.k8s.io,pods.metrics.k8s.io,deployments.apps,replicasets.apps"
 
 log "applying the shop the examples look at"
+# A shop left by an earlier run on a kept cluster is still terminating, and
+# applying into a terminating namespace fails.
+kubectl_e2e delete -f "$here/fixtures/shop.yaml" --ignore-not-found --wait=true >/dev/null 2>&1 || true
 kind_apply "$here/fixtures/shop.yaml"
 shop_down() {
   kubectl_e2e delete -f "$here/fixtures/shop.yaml" --ignore-not-found --wait=false >/dev/null 2>&1 || true
@@ -46,8 +49,6 @@ psql_axiom "CREATE SERVER prod FOREIGN DATA WRAPPER axiom_fdw OPTIONS (endpoint 
 psql_axiom "DROP SCHEMA IF EXISTS k8s CASCADE; CREATE SCHEMA k8s;"
 psql_axiom "IMPORT FOREIGN SCHEMA k8s FROM SERVER prod INTO k8s;"
 psql_axiom "DROP TABLE IF EXISTS tenants;"
-docs_tables_down() { psql_axiom "DROP TABLE IF EXISTS tenants;" >/dev/null 2>&1 || true; }
-e2e_on_teardown docs_tables_down
 
 # until_shows FILE PATTERN WHAT: rerun a query until its output matches. The
 # problems take a little while to become visible: a crash loop needs a couple
@@ -73,8 +74,11 @@ log "waiting for each problem to become visible"
 until_shows crash-looping.sql '^shop\|checkout-worker\|' "the crash-looping pod"
 until_shows not-running.sql '^shop\|report\|' "the warning on the pod whose image does not exist"
 until_shows not-running.sql '^shop\|checkout-' "the warning on the pod that cannot be scheduled"
+# The pods the usage examples read, by name: a count could be met by pods the
+# examples do not depend on, and find-and-fix needs catalog's sample.
 deadline=$((SECONDS + 240))
-until [[ "$(psql_axiom "SELECT count(*) FROM k8s.metrics_k8s_io_pods WHERE namespace = 'shop';")" -ge 3 ]]; do
+until [[ "$(psql_axiom "SELECT count(DISTINCT split_part(name, '-', 1)) FROM k8s.metrics_k8s_io_pods
+                         WHERE namespace = 'shop' AND split_part(name, '-', 1) IN ('web', 'catalog');")" == 2 ]]; do
   (( SECONDS < deadline )) || fail "metrics-server reported no usage for the shop pods within 240s"
   sleep 5
 done
@@ -96,7 +100,7 @@ psql_file "$Q/filter-raw.sql" | grep -q '^shop|catalog|' && fail "catalog sets a
 log "capacity and risk review"
 show quantities.sql
 show fleet-review.sql
-psql_file "$Q/fleet-review.sql" | grep -q '^catalog|' || fail "the fleet review has no row for catalog"
+psql_file "$Q/fleet-review.sql" | grep -q '^shop|catalog|1|' || fail "the fleet review has no row for catalog"
 
 log "changing the cluster"
 show write-configmap.sql

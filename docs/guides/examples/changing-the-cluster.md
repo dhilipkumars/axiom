@@ -56,7 +56,9 @@ kubectl patch clusterrole axiom-gateway --type=json -p='[{"op":"add","path":"/ru
   {"apiGroups":["apps"],"resources":["deployments"],"verbs":["get","list","watch","update"]}}]'
 ```
 
-Then annotate every Deployment using under a fifth of the memory it requests.
+Then annotate each Deployment in `shop` using under a fifth of the memory it
+requests. It is scoped to one namespace on purpose: drop that line and it
+annotates `kube-system` too.
 It reads live usage and live spec, walks pod → ReplicaSet → Deployment, and
 writes the answer back:
 
