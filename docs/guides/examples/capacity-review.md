@@ -28,7 +28,10 @@ exactly:
 ```
 
 ```
-<!-- output:quantities -->
+ 100m  |   128Mi   | 1M = 1Mi 
+-------+-----------+----------
+ 0.100 | 134217728 | f
+(1 row)
 ```
 
 `M` is a thousand thousand and `Mi` is 1024 × 1024, so they are not equal. It
@@ -42,10 +45,34 @@ odd field cannot fail a query that spans a cluster.
 ```
 
 ```
-<!-- output:fleet-review -->
+     namespace      |                    workload                     | pods | mem_used_mib | mem_requested_mib | pct_of_request | unbounded | warnings |  latest_warning  
+--------------------+-------------------------------------------------+------+--------------+-------------------+----------------+-----------+----------+------------------
+ kube-system        | kube-apiserver-axiom-e2e-control-plane          |    1 |        356.4 |                   |                | t         |        1 | NodeNotReady
+ kube-system        | etcd-axiom-e2e-control-plane                    |    1 |         77.6 |             100.0 |             78 | t         |        1 | NodeNotReady
+ kube-system        | kube-controller-manager-axiom-e2e-control-plane |    1 |         74.4 |                   |                | t         |        0 | 
+ kube-system        | coredns                                         |    2 |         30.0 |             140.0 |             21 | f         |        2 | FailedScheduling
+ kube-system        | kube-scheduler-axiom-e2e-control-plane          |    1 |         23.4 |                   |                | t         |        3 | NodeNotReady
+ kube-system        | metrics-server                                  |    1 |         21.9 |             200.0 |             11 | t         |        0 | 
+ axiom-system       | axiom-gateway                                   |    1 |         17.1 |              64.0 |             27 | f         |        0 | 
+ kube-system        | kube-proxy-cdpt6                                |    1 |         16.0 |                   |                | t         |        0 | 
+ kube-system        | kindnet-fm56z                                   |    1 |         13.4 |              50.0 |             27 | f         |        0 | 
+ local-path-storage | local-path-provisioner                          |    1 |          8.8 |                   |                | t         |        1 | FailedScheduling
+ shop               | web                                             |    2 |          0.4 |              32.0 |              1 | t         |        0 | 
+ axiom-e2e          | web-0                                           |    1 |          0.2 |                   |                | t         |        0 | 
+ shop               | catalog                                         |    1 |          0.2 |             256.0 |              0 | f         |        0 | 
+ axiom-e2e          | db-0                                            |    1 |          0.2 |                   |                | t         |        0 | 
+ axiom-e2e          | web-1                                           |    1 |          0.2 |                   |                | t         |        0 | 
+ shop               | checkout                                        |    1 |              |                   |                | t         |        1 | FailedScheduling
+ shop               | checkout-worker                                 |    1 |              |                   |                | t         |        7 | BackOff
+ shop               | report                                          |    1 |              |                   |                | t         |        8 | Failed
+(18 rows)
 ```
 
-<!-- reading:fleet-review -->
+In `shop`, `catalog` reserves 256 MiB and uses 0.2, which the scheduler
+cannot know. `checkout`, `checkout-worker` and `report` use nothing because
+they never started, and why is on the same row. The largest consumer is the
+API server, at 356 MiB with no limit set; on a cluster of your own, the top
+rows are your workloads.
 
 **Keep `usage` on a `LEFT JOIN`.** An inner join drops exactly the workloads
 that have no metrics because they never started, which are the ones you most

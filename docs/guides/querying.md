@@ -190,7 +190,10 @@ the one the [Examples](examples/index.md) use.
 ```
 
 ```
-<!-- output:aggregate -->
+ namespace |  phase  | count 
+-----------+---------+-------
+ shop      | Pending |     2
+(1 row)
 ```
 
 **Filter on a promoted column.** Deployments that never finished rolling out.
@@ -202,7 +205,10 @@ missing field is `NULL` rather than `0`:
 ```
 
 ```
-<!-- output:filter-rollouts -->
+ namespace |   name   | replicas | ready_replicas 
+-----------+----------+----------+----------------
+ shop      | checkout |        1 |               
+(1 row)
 ```
 
 **Filter on anything, through `raw`.** `kubectl` offers label selectors and a
@@ -214,7 +220,13 @@ every container that sets no memory limit:
 ```
 
 ```
-<!-- output:filter-raw -->
+     namespace      |       deployment       |       container        
+--------------------+------------------------+------------------------
+ kube-system        | metrics-server         | metrics-server
+ local-path-storage | local-path-provisioner | local-path-provisioner
+ shop               | checkout               | checkout
+ shop               | web                    | web
+(4 rows)
 ```
 
 **Ask several clusters at once.** Each cluster is its own server and its own

@@ -20,7 +20,10 @@ each container, a nested field `kubectl` cannot filter on.
 ```
 
 ```
-<!-- output:crash-looping -->
+ namespace |       pod       |  phase  | container | restarts |        why        
+-----------+-----------------+---------+-----------+----------+-------------------
+ shop      | checkout-worker | Running | worker    |        3 | RunContainerError
+(1 row)
 ```
 
 ## Why is that pod not running?
@@ -33,7 +36,11 @@ The pod's state and the latest warning that explains it, on one row.
 ```
 
 ```
-<!-- output:not-running -->
+ namespace |            pod            |  phase  |      reason      |                                                                                                                                                                      message                                                                                                                                                                      
+-----------+---------------------------+---------+------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ shop      | checkout-6b889d49cf-jt7bz | Pending | FailedScheduling | 0/1 nodes are available: 1 Insufficient cpu. no new claims to deallocate, preemption: 0/1 nodes are available: 1 Preemption is not helpful for scheduling.
+ shop      | report                    | Pending | Failed           | Failed to pull image "registry.invalid/shop/report:1.4": failed to pull and unpack image "registry.invalid/shop/report:1.4": failed to resolve reference "registry.invalid/shop/report:1.4": failed to do request: Head "https://registry.invalid/v2/shop/report/manifests/1.4": dial tcp: lookup registry.invalid on 172.18.0.1:53: no such host
+(2 rows)
 ```
 
 ## Which rollouts are stuck, and why?
@@ -46,7 +53,10 @@ ReplicaSet to the pod that will not start, and the event that says why.
 ```
 
 ```
-<!-- output:stuck-rollouts -->
+ namespace | deployment | ready |            pod            |                                                                            why                                                                             
+-----------+------------+-------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------
+ shop      | checkout   | 0/1   | checkout-6b889d49cf-jt7bz | 0/1 nodes are available: 1 Insufficient cpu. no new claims to deallocate, preemption: 0/1 nodes are available: 1 Preemption is not helpful for scheduling.
+(1 row)
 ```
 
 ## Find it and fix it in one statement
@@ -60,7 +70,11 @@ describe` will show it. Each row is a real Kubernetes update.
 ```
 
 ```
-<!-- output:find-and-fix -->
+ namespace |  name   | pct 
+-----------+---------+-----
+ shop      | catalog |   0
+ shop      | web     |   1
+(2 rows)
 ```
 
 [Changing the cluster](changing-the-cluster.md) covers the grant this needs,
@@ -82,7 +96,12 @@ Which customers are affected by a failing pod right now, and why:
 ```
 
 ```
-<!-- output:tenants-failing -->
+ customer  |    plan    |            pod            |      reason      
+-----------+------------+---------------------------+------------------
+ Acme Corp | enterprise | checkout-6b889d49cf-jt7bz | FailedScheduling
+ Acme Corp | enterprise | checkout-worker           | BackOff
+ Acme Corp | enterprise | report                    | Failed
+(3 rows)
 ```
 
 ## Bigger examples

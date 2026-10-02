@@ -13,7 +13,10 @@ against the `shop` namespace the [Examples](index.md) use.
 ```
 
 ```
-<!-- output:write-configmap -->
+      name       |                   data                    
+-----------------+-------------------------------------------
+ checkout-config | {"CURRENCY": "EUR", "LOG_LEVEL": "debug"}
+(1 row)
 ```
 
 `kubectl` sees the change at once, because it is in the cluster, not in
@@ -34,7 +37,7 @@ by `WHERE` clause is too easy to do by accident and too hard to undo:
 ```
 
 ```
-<!-- output:pods-read-only -->
+psql:<stdin>:1: ERROR:  foreign table "core_pods" does not allow deletes
 ```
 
 **A conflicting write does not silently win.** An `UPDATE` carries the
@@ -67,12 +70,16 @@ writes the answer back:
 ```
 
 ```
-<!-- output:find-and-fix -->
+ namespace |  name   | pct 
+-----------+---------+-----
+ shop      | catalog |   0
+ shop      | web     |   1
+(2 rows)
 ```
 
 ```sh
 $ kubectl -n shop get deploy catalog -o jsonpath='{.metadata.annotations.axiom/memory-used-pct}'
-<!-- output:find-and-fix-kubectl -->
+0
 ```
 
 Annotating changes no pod template, so nothing rolls. Rewriting
