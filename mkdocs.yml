@@ -22,8 +22,11 @@ docs_dir: docs
 # Agent role definitions live under docs/ for proximity to the rules they
 # reference, but they are tooling configuration, not documentation, and have no
 # reader on the site.
+# snippets/ holds the query files the examples pages include; on their own
+# they are not pages.
 exclude_docs: |
   agents/
+  snippets/
 
 theme:
   name: material
@@ -32,6 +35,7 @@ theme:
   custom_dir: docs-overrides
   features:
     - navigation.sections
+    - navigation.indexes
     - navigation.top
     - content.code.copy
     - content.action.edit
@@ -56,6 +60,12 @@ markdown_extensions:
       permalink: true
   - pymdownx.highlight
   - pymdownx.superfences
+  # Pages include the files CI runs rather than copies of them: the examples
+  # pages' queries (docs/snippets/) and the programs' READMEs (examples/).
+  # check_paths turns a moved file into a failed build, not a blank block.
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
 
 nav:
   - Home: index.md
@@ -64,7 +74,14 @@ nav:
       - Setting up (for coding agents): guides/for-agents.md
       - Deploying the gateway: guides/deploying.md
       - Querying: guides/querying.md
-      - Examples: guides/examples.md
+      - Examples:
+          - guides/examples/index.md
+          - Capacity and risk review: guides/examples/capacity-review.md
+          - Changing the cluster: guides/examples/changing-the-cluster.md
+          - Manage Postgres with Postgres: guides/examples/manage-postgres.md
+          - A silly Kubernetes operator in SQL: guides/examples/sql-operator.md
+          - Your deployment, in chronological order: guides/examples/deploy-timeline.md
+          - "Did your patch regress? pgbench across Postgres 16, 17 and 18": guides/examples/regression-lab.md
       - Giving an AI agent access: guides/agent-access.md
   - Reference:
       - gRPC API: generated/api.md

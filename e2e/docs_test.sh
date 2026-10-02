@@ -86,6 +86,13 @@ show stuck-rollouts.sql
 psql_file "$Q/stuck-rollouts.sql" | grep -q '^shop|checkout|0/1|checkout-.*Insufficient cpu' \
   || fail "the stuck rollout does not say it is short of CPU"
 
+log "query patterns, in the Querying guide"
+show aggregate.sql
+show filter-rollouts.sql
+show filter-raw.sql
+psql_file "$Q/filter-raw.sql" | grep -q '^shop|web|web$' || fail "web sets no memory limit, and was not found"
+psql_file "$Q/filter-raw.sql" | grep -q '^shop|catalog|' && fail "catalog sets a memory limit, and was listed"
+
 log "capacity and risk review"
 show quantities.sql
 show fleet-review.sql
@@ -102,6 +109,10 @@ echo "$out"
 grep -q "read-only" <<<"$out" || fail "deleting a pod was not refused: $out"
 kubectl_e2e -n shop get pod checkout-worker >/dev/null || fail "the refused DELETE removed the pod anyway"
 show find-and-fix.sql
+echo
+echo "=== kubectl -n shop get deploy catalog -o jsonpath='{.metadata.annotations.axiom/memory-used-pct}'"
+kubectl_e2e -n shop get deploy catalog -o jsonpath='{.metadata.annotations.axiom/memory-used-pct}'
+echo
 [[ -n "$(kubectl_e2e -n shop get deploy catalog -o jsonpath='{.metadata.annotations.axiom/memory-used-pct}')" ]] \
   || fail "find-and-fix did not annotate catalog, which uses a fraction of its 256Mi"
 

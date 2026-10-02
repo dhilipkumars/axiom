@@ -1,4 +1,4 @@
-# A deploy, on one timeline
+# Your deployment, in chronological order
 
 `helm install` returns quickly; what happens next is spread across a
 Deployment, a ReplicaSet, one or more Pods, a Service and dozens of events,

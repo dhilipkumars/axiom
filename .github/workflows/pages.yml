@@ -12,6 +12,8 @@ on:
     branches: [main]
     paths:
       - docs/**
+      # The examples pages include these.
+      - examples/*/README.md
       - docs-overrides/**
       - mkdocs.yml
       - .github/workflows/pages.yml

@@ -1,4 +1,4 @@
-# An operator in SQL
+# A silly Kubernetes operator in SQL
 
 A Kubernetes operator watches for objects that drift from a desired state and
 writes them back. With Axiom the reconcile step is one statement:

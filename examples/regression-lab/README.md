@@ -1,4 +1,4 @@
-# A Postgres regression lab
+# Did your patch regress? pgbench across Postgres 16, 17 and 18
 
 Benchmark Postgres on Kubernetes, and see what it cost, from SQL. The lab is
 two tables:
