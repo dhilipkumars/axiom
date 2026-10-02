@@ -178,6 +178,68 @@ SELECT kind, name, namespace FROM k8s.core_configmaps
 ORDER BY kind, name;
 ```
 
+## Query patterns
+
+The output under each query is from a run against a small `shop` namespace,
+the one the [Examples](examples/index.md) use.
+
+**Aggregate.** Where pods are failing, and how:
+
+```sql
+--8<-- "docs/snippets/examples/aggregate.sql"
+```
+
+```
+ namespace |  phase  | count 
+-----------+---------+-------
+ shop      | Pending |     2
+(1 row)
+```
+
+**Filter on a promoted column.** Deployments that never finished rolling out.
+The replica counts are `bigint`, so they compare as numbers with no cast, and a
+missing field is `NULL` rather than `0`:
+
+```sql
+--8<-- "docs/snippets/examples/filter-rollouts.sql"
+```
+
+```
+ namespace |   name   | replicas | ready_replicas 
+-----------+----------+----------+----------------
+ shop      | checkout |        1 |               
+(1 row)
+```
+
+**Filter on anything, through `raw`.** `kubectl` offers label selectors and a
+few field selectors. Anything no column promotes is still in `raw`, such as
+every container that sets no memory limit:
+
+```sql
+--8<-- "docs/snippets/examples/filter-raw.sql"
+```
+
+```
+     namespace      |       deployment       |       container        
+--------------------+------------------------+------------------------
+ kube-system        | metrics-server         | metrics-server
+ local-path-storage | local-path-provisioner | local-path-provisioner
+ shop               | checkout               | checkout
+ shop               | web                    | web
+(4 rows)
+```
+
+**Ask several clusters at once.** Each cluster is its own server and its own
+schema, so one question across them is a `UNION ALL`. This needs a second
+cluster and gateway, so it is the shape rather than something to paste:
+
+```sql
+-- after CREATE SERVER stage ... and IMPORT FOREIGN SCHEMA k8s FROM SERVER stage INTO stage
+SELECT 'prod' AS cluster, namespace, name, phase FROM k8s.core_pods   WHERE phase <> 'Running'
+UNION ALL
+SELECT 'stage',           namespace, name, phase FROM stage.core_pods WHERE phase <> 'Running';
+```
+
 ## Writing
 
 `INSERT`, `UPDATE` and `DELETE` map to the API server's create, update and

@@ -10,7 +10,7 @@ COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 
 .PHONY: all proto proto-check gateway-build gateway-test gateway-lint gateway-vuln \
         ext-build ext-test ext-lint ext-fmt ext-audit unit lint docs-generate docs-check \
-        version changelog release-check release-notes up down local-dev-up local-dev-down local-dev-psql e2e-preload package e2e-tarball e2e-package e2e-install e2e-ping e2e-phase0 e2e-pods e2e-phase1 e2e-configmaps e2e-phase2 e2e-watch e2e-phase3 e2e-crd e2e-phase4 e2e-cluster e2e-phase5 e2e-metrics e2e-agent e2e-examples e2e-lab e2e
+        version changelog release-check release-notes up down local-dev-up local-dev-down local-dev-psql e2e-preload package e2e-tarball e2e-package e2e-install e2e-ping e2e-phase0 e2e-pods e2e-phase1 e2e-configmaps e2e-phase2 e2e-watch e2e-phase3 e2e-crd e2e-phase4 e2e-cluster e2e-phase5 e2e-metrics e2e-docs e2e-agent e2e-examples e2e-lab e2e
 
 all: lint unit
 
@@ -243,6 +243,10 @@ e2e-phase5: e2e-cluster
 # metrics-server, so it is slower than the others and runs last.
 e2e-metrics:
 	./e2e/metrics_test.sh
+
+# Every query on the examples pages, against a shop with something to find.
+e2e-docs:
+	./e2e/docs_test.sh
 
 e2e-agent:
 	./e2e/agent_test.sh
