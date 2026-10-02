@@ -7,10 +7,13 @@ wrong in it, and the output under each is from that run. They assume you have
 finished [Getting started](../getting-started.md), so server `prod` exists and
 its kinds are imported into schema `k8s`.
 
-## Which pods are crash-looping?
+## Which pods keep restarting?
 
-`CrashLoopBackOff` is not a pod phase. A crash-looping pod is `Running`; the
-reason lives on each container, a nested field `kubectl` cannot filter on.
+`CrashLoopBackOff` is not a pod phase: a crash-looping pod is `Running`. It is
+not even a steady state of the container, which alternates between
+`CrashLoopBackOff` and the error from its last attempt, so filtering on it
+misses the pod half the time. The restart count only grows, and it lives on
+each container, a nested field `kubectl` cannot filter on.
 
 ```sql
 --8<-- "docs/snippets/examples/crash-looping.sql"

@@ -71,7 +71,7 @@ show() {
 }
 
 log "waiting for each problem to become visible"
-until_shows crash-looping.sql '^shop\|checkout-worker\|' "the crash-looping pod"
+until_shows crash-looping.sql '^shop\|checkout-worker\|Running\|worker\|([3-9]|[1-9][0-9]+)\|' "the crash-looping pod, three restarts in"
 until_shows not-running.sql '^shop\|report\|' "the warning on the pod whose image does not exist"
 until_shows not-running.sql '^shop\|checkout-' "the warning on the pod that cannot be scheduled"
 # The pods the usage examples read, by name: a count could be met by pods the
@@ -110,7 +110,7 @@ echo
 echo "=== docs/snippets/examples/pods-read-only.sql"
 out="$(psql_table "$Q/pods-read-only.sql" 2>&1 || true)"
 echo "$out"
-grep -q "read-only" <<<"$out" || fail "deleting a pod was not refused: $out"
+grep -q "does not allow deletes" <<<"$out" || fail "deleting a pod was not refused: $out"
 kubectl_e2e -n shop get pod checkout-worker >/dev/null || fail "the refused DELETE removed the pod anyway"
 show find-and-fix.sql
 echo
