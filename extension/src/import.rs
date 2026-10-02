@@ -570,7 +570,7 @@ mod tests {
             &ImportOptions::default(),
         )
         .expect("valid");
-        assert!(dropped.is_empty());
+        assert_eq!(dropped, Vec::<String>::new());
         assert_eq!(
             sql,
             "CREATE FOREIGN TABLE \"k8s\".\"widgets\" \

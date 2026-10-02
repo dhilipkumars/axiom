@@ -408,7 +408,7 @@ mod tests {
                 .map(|c| c.name)
                 .collect();
         assert_eq!(names, ["data"]);
-        assert!(promoted_columns(&widgets()).is_empty());
+        assert_eq!(promoted_columns(&widgets()), &[] as &[Column]);
         // Mirrors the apps/v1 Deployment entry in the gateway's `promoted` map.
         let names: Vec<&str> = promoted_columns(&deployments())
             .iter()
@@ -451,14 +451,15 @@ mod tests {
         // A Deployment in some other group is not the apps/v1 Deployment.
         let impostor =
             Resource::new("example.com", "v1", "Deployment", "deployments", true).expect("valid");
-        assert!(promoted_columns(&impostor).is_empty());
+        assert_eq!(promoted_columns(&impostor), &[] as &[Column]);
     }
 
     #[test]
     fn promoted_columns_are_keyed_on_identity_not_kind_name() {
         let impostor = Resource::new("example.com", "v1", "Pod", "pods", true).expect("valid");
-        assert!(
-            promoted_columns(&impostor).is_empty(),
+        assert_eq!(
+            promoted_columns(&impostor),
+            &[] as &[Column],
             "a CRD that calls itself Pod must not inherit the core Pod mapping"
         );
     }
