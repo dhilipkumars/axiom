@@ -457,8 +457,9 @@ mod tests {
     #[test]
     fn promoted_columns_are_keyed_on_identity_not_kind_name() {
         let impostor = Resource::new("example.com", "v1", "Pod", "pods", true).expect("valid");
-        assert!(
-            promoted_columns(&impostor).is_empty(),
+        assert_eq!(
+            promoted_columns(&impostor),
+            &[] as &[Column],
             "a CRD that calls itself Pod must not inherit the core Pod mapping"
         );
     }
