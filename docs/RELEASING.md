@@ -147,13 +147,17 @@ also refuses any tag containing a hyphen, so a forgotten checkbox cannot move
 the floating tags on its own — but tick it anyway, because that belt only
 catches tags spelled as prereleases.
 
-**Treat any database you install an rc into as throwaway.** Axiom ships no
-extension upgrade scripts (#65), so an instance where you ran
-`CREATE EXTENSION` against `0.1.2-rc.1` has no path to `0.1.2`:
-`ALTER EXTENSION axiom UPDATE` fails, and the only way forward is
-`DROP EXTENSION axiom CASCADE`, which takes every foreign table, server and
-user mapping with it. The package upgrade itself works fine — it is the
-extension inside the database that is stranded.
+**Moving off an rc means re-running setup.** Axiom ships no extension upgrade
+scripts yet (#65), so `ALTER EXTENSION axiom UPDATE` from `0.1.2-rc.1` to
+`0.1.2` fails. The way forward is `DROP EXTENSION axiom CASCADE`, then
+`CREATE EXTENSION`, `CREATE SERVER` and `IMPORT FOREIGN SCHEMA` again. Axiom
+keeps no data of its own, so nothing is lost but definitions, though `CASCADE`
+also drops views built on its tables. The package upgrade itself works fine.
+
+Say that in the rc's release body, in those terms. The rc notes for 0.2.0
+first called such a database "throwaway", which is accurate about the extension
+and wrong about everything a reader cares about, and reads as a reason not to
+try the rc at all.
 
 **Do not run `make release-notes` for an rc.** The changesets belong to the
 release the rc is rehearsing; consuming them would leave the real release with
@@ -183,6 +187,11 @@ So the tarball is `axiom-0.1.2-rc.1-…`, the package is
 `postgresql-17-axiom_0.1.2~rc.1-1_amd64.deb`, and `axiom_version()` reports
 `0.1.2-rc.1`, since that comes from `CARGO_PKG_VERSION`. The two spellings are
 deliberate and the gates assert them separately.
+
+GitHub then renames the `~` to `.` when the package is attached to a release,
+so the download is `postgresql-17-axiom_0.1.2.rc.1-1_amd64.deb`. Only the file
+name changes: the version inside the package is still `0.1.2~rc.1`, which is
+what dpkg and rpm compare, so the ordering above holds.
 
 ## Writing the notes
 
@@ -242,6 +251,6 @@ v0.1.0 predates the tarballs and has only images.
 cut from that release's published tarballs after the fact and uploaded by hand,
 so the bytes match — the library inside each package is byte-identical to the
 one in the tarball — but re-running v0.1.1's workflow would not reproduce them.
-From v0.1.2 the workflow produces all three formats itself. Do not repeat the
+From v0.2.0 the workflow produces all three formats itself. Do not repeat the
 manual step; if a release is missing artifacts, fix the workflow and cut
 another patch.
