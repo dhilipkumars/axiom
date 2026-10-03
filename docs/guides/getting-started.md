@@ -118,7 +118,7 @@ releases. To pin a version instead:
 
 ```sh
 kubectl -n axiom-system set image deploy/axiom-gateway \
-  gateway=ghcr.io/dhilipkumars/axiom-gateway:v0.1.1
+  gateway=ghcr.io/dhilipkumars/axiom-gateway:v0.2.0
 ```
 
 [Releasing](../RELEASING.md) explains what each tag means.
@@ -203,7 +203,7 @@ convenience: Axiom registers `PGC_POSTMASTER` GUCs, so without preloading
 
 `axiom-postgres` is published per major — `latest-pg16`, `latest-pg17`,
 `latest-pg18` — each following the newest release for that major. Swap the tag
-to match the Postgres you want, or pin a version like `0.1.1-pg17` if you would
+to match the Postgres you want, or pin a version like `0.2.0-pg17` if you would
 rather choose when to move.
 
 ## 5. Install and connect
@@ -315,7 +315,7 @@ the library**, instead of letting you discover it when Postgres will not
 restart.
 
 ```sh
-V=0.1.1; PG=17
+V=0.2.0; PG=17
 BASE=https://github.com/dhilipkumars/axiom/releases/download/v$V
 
 # Debian, Ubuntu
@@ -345,7 +345,7 @@ onward — **v0.1.0 predates them and has none**. Take `V` from the
 copying the version below.
 
 ```sh
-V=0.1.1; PG=17; ARCH=$(uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/)
+V=0.2.0; PG=17; ARCH=$(uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/)
 BASE=https://github.com/dhilipkumars/axiom/releases/download/v$V
 curl -fsSLO "$BASE/axiom-$V-pg$PG-linux-$ARCH.tar.gz"
 curl -fsSLO "$BASE/axiom-$V-pg$PG-linux-$ARCH.tar.gz.sha256"
