@@ -30,7 +30,8 @@ are the former. [docs/RELEASING.md](docs/RELEASING.md) has the full rule.
   well as `text` and `jsonb`, and compares and sorts as that type. A value of
   another type reads as `NULL`; writes produce JSON of the column's type.
 - **`.deb` and `.rpm` packages** for each Postgres major and architecture,
-  beside the tarballs. They declare their glibc floor, so a distro that is too
+  beside the tarballs. The `.rpm` is for PGDG's Postgres (`axiom_<major>`, in
+  `/usr/pgsql-<major>`), so enable PGDG's repository first. They declare their glibc floor, so a distro that is too
   old is refused at install time rather than at Postgres startup. The floor is
   **glibc 2.34**: Debian 12+, Ubuntu 22.04+, RHEL 9+.
 - **Broader read RBAC** in `deploy/k8s/gateway-rbac.yaml`: Kubernetes' `view`
@@ -55,7 +56,7 @@ are the former. [docs/RELEASING.md](docs/RELEASING.md) has the full rule.
   `security_invoker`.
 - **Imported columns take the types the kind's schema declares.** Events'
   `count` is `bigint`, `creation_timestamp` is `timestamptz`, and replica
-  counts are numbers. Objects, arrays and quantities stay `jsonb`. A query
+  counts are `bigint`. Objects, arrays and quantities stay `jsonb`. A query
   written for the old types fails loudly: `type->>0` on a `text` column is
   `operator does not exist`; write `type = 'Warning'`. Typed imports need both
   the gateway and the extension at 0.2.0; either alone imports `text` and
@@ -65,9 +66,10 @@ are the former. [docs/RELEASING.md](docs/RELEASING.md) has the full rule.
 
 - **An INSERT writes a camelCase field under its real name.** `string_data`
   was sent as `string_data`, and the API server dropped it silently. Import
-  now records the spelling as a column option, `OPTIONS (field 'stringData')`,
-  and column options are validated. Tables imported with a 0.2.0 release
-  candidate need importing again.
+  now records the spelling as a column option, and column options are
+  validated. A re-import sets it; for a table written by hand, or imported
+  with a 0.2.0 release candidate, add it yourself:
+  `ALTER FOREIGN TABLE k8s.core_secrets ALTER COLUMN string_data OPTIONS (ADD field 'stringData');`
 - **`INSERT` keeps `raw`.** A whole manifest given as `raw` was created empty.
   A typed column now overrides the same field in `raw`, server-assigned
   metadata is dropped, and a `raw` for a different kind is refused rather than
@@ -75,8 +77,6 @@ are the former. [docs/RELEASING.md](docs/RELEASING.md) has the full rule.
 - **Large listings no longer fail** with `ResourceExhausted ... cannot be split
   further` when a later page is bigger than the first, for built-in kinds and
   CRDs, in watch mode too.
-- **`axiom-gateway:latest` moves only after the release installs**, together
-  with the Postgres images' floating tags.
 - **The guides no longer force `--platform linux/amd64`.** Every image has been
   multi-architecture since v0.1.1.
 
@@ -94,9 +94,11 @@ Axiom keeps no data of its own, so upgrading is re-running setup:
    A 0.2.0 gateway serves a 0.1.x extension, so this can go first.
 2. Install the 0.2.0 packages, then `DROP EXTENSION axiom CASCADE` and run
    `CREATE EXTENSION`, `CREATE SERVER` and `IMPORT FOREIGN SCHEMA` again.
+3. Run `SELECT * FROM axiom_create_short_names('k8s');` so the old table
+   names exist again, as views.
 
-`CASCADE` also drops views built on Axiom's tables, so recreate those from
-your scripts. `ALTER EXTENSION axiom UPDATE` is planned for a coming release
+`CASCADE` also drops views built on Axiom's tables; after step 3, recreate
+them from your scripts unchanged. `ALTER EXTENSION axiom UPDATE` is planned for a coming release
 (#65).
 
 ## 0.1.1
