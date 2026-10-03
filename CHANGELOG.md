@@ -95,8 +95,8 @@ numeric, and `creation_timestamp` can be `timestamptz`, so
 A value that is not of the declared type reads as NULL. Writes produce JSON of
 the same type: `SET count = 5` writes the number `5`, not the string `"5"`.
 
-Existing tables are unaffected: every column keeps its current type and reads
-as it did.
+A table you write by hand keeps the types you declare: a column declared
+`text` reads as it always did.
 
 ### Changed
 
@@ -153,8 +153,8 @@ SELECT namespace, name, reason, count FROM k8s.core_events
 `bigint`, so `ORDER BY replicas DESC` puts 10 above 9. Objects, arrays and
 fields that may hold more than one type, such as quantities, stay `jsonb`.
 
-**Re-importing changes column types.** Tables imported before this keep their
-types and keep working. After a re-import, a query written for the old types
+**Re-importing changes column types**, and upgrading from 0.1.x re-imports
+(see *Upgrading* below). A query written for the old types
 fails with an error rather than answering differently: `type->>0` on what is
 now a `text` column is `operator does not exist`; write `type = 'Warning'`.
 Casts such as `replicas::int` still work.
@@ -195,8 +195,9 @@ spells in `camelCase`, including `stringData`, `binaryData` and a CRD's own.
 as `string_data jsonb OPTIONS (field 'stringData')`. A column's `OPTIONS` are
 now validated too, so a misspelt option is an error rather than ignored.
 
-**Tables imported before this still write the old name.** Import them again,
-or add the option to the columns you write:
+Upgrading from 0.1.x re-imports every table, which sets the option. Tables you
+imported with a 0.2.0 release candidate still write the old name: import them
+again, or add the option to the columns you write:
 
 ```sql
 ALTER FOREIGN TABLE k8s.core_secrets
@@ -270,11 +271,17 @@ test runs its recipe against a real cluster.
 ### Upgrading from 0.1.x
 
 Axiom keeps no data of its own, so upgrading is re-running setup:
-`DROP EXTENSION axiom CASCADE`, install 0.2.0, then `CREATE EXTENSION`,
-`CREATE SERVER` and `IMPORT FOREIGN SCHEMA` again, which also picks up the new
-table names and column types. `CASCADE` takes views built on Axiom's tables
-with it, so recreate those from your scripts. `ALTER EXTENSION axiom UPDATE`
-is planned for a coming release (#65).
+
+1. Move the gateway to `v0.2.0` and re-apply `deploy/k8s/gateway-rbac.yaml`,
+   which grants the new kinds. A 0.2.0 gateway serves a 0.1.x extension, so
+   this can go first.
+2. Install the 0.2.0 packages, then `DROP EXTENSION axiom CASCADE` and run
+   `CREATE EXTENSION`, `CREATE SERVER` and `IMPORT FOREIGN SCHEMA` again. That
+   picks up the new table names and column types.
+
+`CASCADE` takes views built on Axiom's tables with it, so recreate those from
+your scripts. `ALTER EXTENSION axiom UPDATE` is planned for a coming release
+(#65).
 
 ## 0.1.1
 

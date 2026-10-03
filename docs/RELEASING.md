@@ -251,6 +251,6 @@ v0.1.0 predates the tarballs and has only images.
 cut from that release's published tarballs after the fact and uploaded by hand,
 so the bytes match — the library inside each package is byte-identical to the
 one in the tarball — but re-running v0.1.1's workflow would not reproduce them.
-From v0.1.2 the workflow produces all three formats itself. Do not repeat the
+From v0.2.0 the workflow produces all three formats itself. Do not repeat the
 manual step; if a release is missing artifacts, fix the workflow and cut
 another patch.
