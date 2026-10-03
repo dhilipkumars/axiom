@@ -21,265 +21,81 @@ are the former. [docs/RELEASING.md](docs/RELEASING.md) has the full rule.
 
 ### Added
 
-**Usage and events are queryable, and their numbers behave like numbers.**
-`metrics.k8s.io` reaches SQL as `metrics_k8s_io_pods` and
-`metrics_k8s_io_nodes` alongside the events tables, so consumption, live spec
-and failure reasons can be joined in one statement — a capacity and risk
-review of a whole fleet as a single query.
-
-Kubernetes reports measurements as strings with unit suffixes, which Postgres
-cannot compare or sum: `WHERE cpu > '1'` is a string comparison that answers
-wrongly without erroring. The new `axiom_quantity()` converts them exactly —
-`100m` is `0.1`, `128Mi` is `134217728`, and `1M` is not `1Mi` — returning
-`NULL` for anything malformed so one odd field cannot fail a cluster-wide
-query.
-
-The shipped gateway RBAC now reads broadly: everything in Kubernetes' `view`
-role (workloads, ConfigMaps, Services, NetworkPolicies, Ingresses, Events),
-plus nodes, storage, CRDs, RBAC objects, `events.k8s.io` and the resource,
-custom and external metrics APIs. **Secrets are excluded, and cannot be
-reached through it.** Custom resources are included when their operator ships
-an `aggregate-to-view` role, or when you label a read-only ClusterRole with
-`axiom.dhilipkumars.github.io/aggregate-to-gateway: "true"`. Mutating verbs
-stay enumerated per resource.
-
-A new RBAC grant, such as a labelled ClusterRole for a CRD, now appears on the
-next import without restarting the gateway. Revoking a grant still needs a
-restart.
-
-Releases now publish **`.deb` and `.rpm` packages** beside the tarballs, one
-per Postgres major and architecture. Installing into a Postgres you already
-run is a package manager command rather than a `cp`:
-
-```sh
-# Debian / Ubuntu
-sudo apt install ./postgresql-17-axiom_<version>-1_amd64.deb
-
-# RHEL / Rocky / Alma 9, with PGDG's repo enabled
-sudo dnf install ./axiom_17-<version>-1.el9.x86_64.rpm
-```
-
-Each follows its own convention, so the package looks native on either side:
-Debian's `postgresql-<major>-axiom` installing under
-`/usr/lib/postgresql/<major>`, and PGDG's `axiom_<major>` under
-`/usr/pgsql-<major>`. They own the three extension files and not the
-directories, so neither conflicts with the Postgres server package. `apt
-remove` and `dnf remove` take Axiom away again, which a tarball never offered.
-
-**The reason to prefer a package is what happens when you are on the wrong
-distro.** Both declare the glibc floor the binary actually has, so the package
-manager refuses up front and installs nothing:
-
-    nothing provides libc.so.6(GLIBC_2.29)(64bit) needed by axiom_17
-
-Previously that machine accepted every file, and you found out after editing
-`shared_preload_libraries` and restarting -- at which point Postgres would not
-start and the cause looked like Axiom rather than like a download for the wrong
-system.
-
-**The supported floor is glibc 2.34**, which is Debian 12+, Ubuntu 22.04+ and
-RHEL 9+. Earlier notes derived this from the build image's glibc and said 2.36,
-which wrongly excluded Ubuntu 22.04 and RHEL 9 -- both run Axiom. Debian
-bullseye and RHEL 8 are genuinely too old. The floor is now read from the
-binary at package time rather than written down, so it cannot drift again.
-
-Tarballs are unchanged and remain the option where no package manager applies.
-
-**Columns read as the type you declare them.** A foreign table column can now
-be `bigint`, `boolean` or `timestamptz` as well as `text` and `jsonb`, and then
-compares and sorts as that type, with no cast. `ALTER FOREIGN TABLE
-k8s.core_events ALTER COLUMN count TYPE bigint` makes `ORDER BY count DESC`
-numeric, and `creation_timestamp` can be `timestamptz`, so
-`WHERE creation_timestamp < now() - interval '7 days'` works as written.
-
-A value that is not of the declared type reads as NULL. Writes produce JSON of
-the same type: `SET count = 5` writes the number `5`, not the string `"5"`.
-
-A table you write by hand keeps the types you declare: a column declared
-`text` reads as it always did.
+- **Usage and events in SQL.** `metrics.k8s.io` arrives as
+  `metrics_k8s_io_pods` and `metrics_k8s_io_nodes` beside the events tables, so
+  usage, live spec and failure reasons join in one query.
+- **`axiom_quantity()`** turns Kubernetes quantities into numbers: `100m` is
+  `0.1`, `128Mi` is `134217728`, and anything malformed is `NULL`.
+- **Typed columns.** A column can be `bigint`, `boolean` or `timestamptz` as
+  well as `text` and `jsonb`, and compares and sorts as that type. A value of
+  another type reads as `NULL`; writes produce JSON of the column's type.
+- **`.deb` and `.rpm` packages** for each Postgres major and architecture,
+  beside the tarballs. They declare their glibc floor, so a distro that is too
+  old is refused at install time rather than at Postgres startup. The floor is
+  **glibc 2.34**: Debian 12+, Ubuntu 22.04+, RHEL 9+.
+- **Broader read RBAC** in `deploy/k8s/gateway-rbac.yaml`: Kubernetes' `view`
+  role plus nodes, storage, CRDs, RBAC objects, `events.k8s.io` and the metrics
+  APIs. **Never Secrets.** A CRD is included when its operator ships an
+  `aggregate-to-view` role, or when you label a read-only ClusterRole
+  `axiom.dhilipkumars.github.io/aggregate-to-gateway: "true"`.
+- **New RBAC grants appear on the next import**, with no gateway restart.
+  Revoking one still needs a restart.
+- **New guide: Giving an AI agent access**, a tested recipe for redacted,
+  tenant-scoped access with no shell and no Kubernetes credential.
 
 ### Changed
 
-**Breaking: imported tables are named for their API group.**
-`IMPORT FOREIGN SCHEMA` now names every table `<group>_<plural>`, with the core
-group spelled `core`: `k8s.pods` is now `k8s.core_pods`, `k8s.deployments` is
-`k8s.apps_deployments`, and a CloudNativePG cluster table is
-`k8s.postgresql_cnpg_io_clusters`.
-
-Previously a name depended on what else the cluster served. Installing
-metrics-server, which also serves `pods` and `nodes`, renamed `k8s.pods` to
-`k8s.pods_core` on the next import and broke every query and view that used
-it. Two CRDs sharing a plural renamed each other the same way. A name now
-depends only on its own group and resource.
-
-**`LIMIT TO` and `EXCEPT` take the new table names**: `LIMIT TO (core_pods)`.
-The old spelling imports nothing and raises a `WARNING` naming the table you
-probably meant.
-
-**To keep existing queries working**, rebuild the schema and ask for short
-names. Axiom has no extension upgrade scripts yet (#65), so a new version is a
-fresh `CREATE EXTENSION` anyway. The old tables have to go first: a re-import
-beside them would leave the old `k8s.pods` table in the way of the new
-`k8s.pods` view.
-
-```sql
-DROP EXTENSION axiom CASCADE;   -- also drops servers, mappings, foreign tables
-CREATE EXTENSION axiom;
--- recreate the server and user mapping as before, then:
-CREATE SCHEMA IF NOT EXISTS k8s;
-IMPORT FOREIGN SCHEMA k8s FROM SERVER prod INTO k8s;
-SELECT * FROM axiom_create_short_names('k8s');
-```
-
-This creates views such as `k8s.pods` over the new tables. The core group gets
-the bare plural. A plural shared by two other groups is reported rather than
-guessed, and you can pick one with `axiom_create_short_name`. An existing
-object is never replaced. Any views of your own that the `CASCADE` dropped can
-be recreated verbatim, since `k8s.pods` exists again. Grant `SELECT` on the
-short name *and* on the table behind it: the views are `security_invoker`, so
-they check the querying role's privileges on both.
-
-**`IMPORT FOREIGN SCHEMA` gives columns the type the kind's schema declares.**
-A field Kubernetes declares as a string, integer, boolean or timestamp is now
-imported as `text`, `bigint`, `boolean` or `timestamptz`, so the query you
-would naturally write works:
-
-```sql
-SELECT namespace, name, reason, count FROM k8s.core_events
- WHERE type = 'Warning' ORDER BY count DESC;
-```
-
-`creation_timestamp` is `timestamptz` and a Deployment's replica counts are
-`bigint`, so `ORDER BY replicas DESC` puts 10 above 9. Objects, arrays and
-fields that may hold more than one type, such as quantities, stay `jsonb`.
-
-**Re-importing changes column types**, and upgrading from 0.1.x re-imports
-(see *Upgrading* below). A query written for the old types
-fails with an error rather than answering differently: `type->>0` on what is
-now a `text` column is `operator does not exist`; write `type = 'Warning'`.
-Casts such as `replicas::int` still work.
-
-The gateway and extension must both be this version or later for typed
-imports; either one alone keeps importing `text` and `jsonb` as before.
+- **Breaking: tables are named for their API group.** `k8s.pods` is now
+  `k8s.core_pods` and `k8s.deployments` is `k8s.apps_deployments`. A name no
+  longer changes when another API, such as metrics-server, serves the same
+  plural. `LIMIT TO` and `EXCEPT` take the new names.
+- **Short names keep old queries working.** After importing,
+  `SELECT * FROM axiom_create_short_names('k8s');` creates views such as
+  `k8s.pods`. Grant `SELECT` on the view *and* its table: the views are
+  `security_invoker`.
+- **Imported columns take the types the kind's schema declares.** Events'
+  `count` is `bigint`, `creation_timestamp` is `timestamptz`, and replica
+  counts are numbers. Objects, arrays and quantities stay `jsonb`. A query
+  written for the old types fails loudly: `type->>0` on a `text` column is
+  `operator does not exist`; write `type = 'Warning'`. Typed imports need both
+  the gateway and the extension at 0.2.0; either alone imports `text` and
+  `jsonb` as before.
 
 ### Fixed
 
-**The guides no longer tell you to force `--platform linux/amd64`.** The
-published images have been multi-architecture since v0.1.1 — every Postgres
-image per major, the gateway, and the floating `latest` and `latest-pgNN` tags
-— but that went unannounced, and the guides still carried a flag written when
-the images were amd64-only.
-
-On arm64 that flag was not merely unnecessary. It pinned you to the amd64
-slice, so Docker emulated a machine you were already running natively.
-
-If you copied an earlier version of the commands, drop it:
-
-```sh
-docker run -d --name axiom-postgres \
-  --network kind -e POSTGRES_PASSWORD=axiom \
-  -p 55432:5432 ghcr.io/dhilipkumars/axiom-postgres:latest-pg17
-```
-
-`no matching manifest for linux/arm64/v8` now means one of two things: you
-pinned a version before `0.1.1`, which really is amd64-only, or the tag you
-asked for was published wrongly. It is no longer a reason to add a flag.
-
-**An INSERT writes a `camelCase` field under its real name.** Setting a column
-such as `string_data` on an imported table wrote `string_data` into the new
-object instead of `stringData`, and the API server dropped it without an error:
-the Secret was created empty. It affected every top-level field Kubernetes
-spells in `camelCase`, including `stringData`, `binaryData` and a CRD's own.
-
-`IMPORT FOREIGN SCHEMA` now records each such field's spelling on its column,
-as `string_data jsonb OPTIONS (field 'stringData')`. A column's `OPTIONS` are
-now validated too, so a misspelt option is an error rather than ignored.
-
-Upgrading from 0.1.x re-imports every table, which sets the option. Tables you
-imported with a 0.2.0 release candidate still write the old name: import them
-again, or add the option to the columns you write:
-
-```sql
-ALTER FOREIGN TABLE k8s.core_secrets
-  ALTER COLUMN string_data OPTIONS (ADD field 'stringData');
-```
-
-Hand-written tables without the option behave as before. Any gateway version
-works: it already sent each field's spelling.
-
-**`axiom-gateway:latest` now moves only after the release has been proven to
-install**, in the same step as the Postgres images' `latest` and `latest-pgNN`.
-
-Previously it moved as soon as both architectures were built, while the
-Postgres tags waited for the install check. A release that failed that check
-therefore left the Postgres floating tags correctly untouched and the gateway's
-already advanced — so pulling both without pinning gave a new gateway against
-the *previous* Postgres release, a pairing no release describes and nothing
-tested.
-
-This only ever affected unpinned pulls of a release that failed its own check.
-If you pin versions, nothing changes.
-
-**`INSERT` no longer discards `raw`.** Inserting a whole manifest as `raw`
-created an empty object and reported success. Postgres fills every column an
-`INSERT` does not mention with NULL, and each NULL cleared the matching field,
-so `data`, `labels` and `annotations` from `raw` were wiped. A NULL column now
-leaves `raw` alone.
-
-When both are given, a typed column overrides the same field in `raw`, as it
-already does on `UPDATE`. That makes `raw` read from one object usable as a
-template for another: server-assigned metadata such as `uid` and
-`creationTimestamp` is dropped rather than sent. A `raw` whose `apiVersion` or
-`kind` names a different kind from the table is now refused. Before, it was
-silently relabelled, on `INSERT` and on an `UPDATE` that replaces `raw`.
-
-**Listing no longer fails when a later page is larger than the first.** On a
-cluster whose objects vary widely in size -- CustomResourceDefinitions that
-embed large schemas beside small ones, or ConfigMaps of very different sizes
--- a query could fail with `ResourceExhausted: ... cannot be split further`
-even though every object fit. Only the first page of a listing could be made
-smaller to fit a response; a later one was stuck with the first page's size.
-
-A later page is now fetched again at a smaller size when it is too large, for
-kinds served by Kubernetes itself (built-in kinds and CRDs), and every object
-still arrives exactly once. This applies to watch-mode tables as well.
-Aggregated APIs such as metrics-server keep the previous behaviour. A single
-object too large for one response is still reported as before.
-
-The gateway decides "served by Kubernetes itself" from the `apiservices`
-object for the group, which the shipped RBAC can read. A deployment whose
-RBAC cannot read it keeps the previous behaviour.
+- **An INSERT writes a camelCase field under its real name.** `string_data`
+  was sent as `string_data`, and the API server dropped it silently. Import
+  now records the spelling as a column option, `OPTIONS (field 'stringData')`,
+  and column options are validated. Tables imported with a 0.2.0 release
+  candidate need importing again.
+- **`INSERT` keeps `raw`.** A whole manifest given as `raw` was created empty.
+  A typed column now overrides the same field in `raw`, server-assigned
+  metadata is dropped, and a `raw` for a different kind is refused rather than
+  relabelled.
+- **Large listings no longer fail** with `ResourceExhausted ... cannot be split
+  further` when a later page is bigger than the first, for built-in kinds and
+  CRDs, in watch mode too.
+- **`axiom-gateway:latest` moves only after the release installs**, together
+  with the Postgres images' floating tags.
+- **The guides no longer force `--platform linux/amd64`.** Every image has been
+  multi-architecture since v0.1.1.
 
 ### Security
 
-**`axiom_watch_status()` is no longer callable by every role.** It lists every
-watched server, resource and namespace, with object counts and resource
-versions, whatever the caller's table grants. So a role granted only a narrow
-view could learn what the cluster is being watched for. Only superusers can
-call it now. Grant it to the roles that monitor Axiom:
-
-```sql
-GRANT EXECUTE ON FUNCTION axiom_watch_status() TO monitoring;
-```
-
-A new guide, **Giving an AI agent access**, sets out a role that gives an
-agent redacted, tenant-scoped access to the cluster. The agent gets no shell
-and no Kubernetes credential. The guide also covers the grants never to give
-an agent and the settings that look like controls but are not. An end-to-end
-test runs its recipe against a real cluster.
+- **`axiom_watch_status()` is superuser-only.** It revealed every watched
+  resource and namespace to any role. Grant it to the roles that monitor Axiom:
+  `GRANT EXECUTE ON FUNCTION axiom_watch_status() TO monitoring;`
 
 ### Upgrading from 0.1.x
 
 Axiom keeps no data of its own, so upgrading is re-running setup:
 
-1. Move the gateway to `v0.2.0` and re-apply `deploy/k8s/gateway-rbac.yaml`,
-   which grants the new kinds. A 0.2.0 gateway serves a 0.1.x extension, so
-   this can go first.
+1. Move the gateway to `v0.2.0` and re-apply `deploy/k8s/gateway-rbac.yaml`.
+   A 0.2.0 gateway serves a 0.1.x extension, so this can go first.
 2. Install the 0.2.0 packages, then `DROP EXTENSION axiom CASCADE` and run
-   `CREATE EXTENSION`, `CREATE SERVER` and `IMPORT FOREIGN SCHEMA` again. That
-   picks up the new table names and column types.
+   `CREATE EXTENSION`, `CREATE SERVER` and `IMPORT FOREIGN SCHEMA` again.
 
-`CASCADE` takes views built on Axiom's tables with it, so recreate those from
+`CASCADE` also drops views built on Axiom's tables, so recreate those from
 your scripts. `ALTER EXTENSION axiom UPDATE` is planned for a coming release
 (#65).
 
