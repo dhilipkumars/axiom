@@ -270,10 +270,29 @@ jobs:
           pattern: artifacts-*
           merge-multiple: true
           path: dist
+      # The quick start ships with the release it installs (#115): its copy has
+      # this version filled in, so it pulls these images and these manifests
+      # and never whatever is on main. Only the script is needed from the tree.
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/quickstart.sh
+          sparse-checkout-cone-mode: false
+          path: src
+      - env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          sed "s/@AXIOM_VERSION@/${version}/" src/scripts/quickstart.sh > dist/quickstart.sh
+          # A copy without its version refuses to run, which would be a broken
+          # one-liner on the release page rather than an error here.
+          ! grep -q '@AXIOM_VERSION@' dist/quickstart.sh
+          grep -q "AXIOM_VERSION:-${version}}" dist/quickstart.sh
+          ( cd dist && sha256sum quickstart.sh > quickstart.sh.sha256 )
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # gh finds the repository from git remotes, and this job has no
-          # checkout -- nothing here needs the source, only the artifacts.
+          # gh finds the repository from git remotes; the checkout above is
+          # sparse and in a subdirectory, so name it.
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
@@ -290,6 +309,7 @@ jobs:
             count="$(find dist -name "$glob" | wc -l)"
             [[ "$count" -eq 6 ]] || { echo "expected 6 $label, found $count" >&2; exit 1; }
           done
+          [[ -f dist/quickstart.sh ]] || { echo "quickstart.sh was not rendered" >&2; exit 1; }
           # Verified, not just counted. A checksum that does not match what is
           # uploaded beside it is worse than none, because it is the thing
           # people use to decide the download is intact.
