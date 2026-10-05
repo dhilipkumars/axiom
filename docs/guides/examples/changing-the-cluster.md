@@ -37,7 +37,15 @@ field, so `raw` read from one object is a template for another:
 ```
 
 ```
-<!-- output:insert-raw -->
+ name  |        labels        |          data           
+-------+----------------------+-------------------------
+ flags | {"team": "payments"} | {"NEW_CHECKOUT": "off"}
+(1 row)
+
+     name     |        labels        |          data          
+--------------+----------------------+------------------------
+ flags-canary | {"team": "payments"} | {"NEW_CHECKOUT": "on"}
+(1 row)
 ```
 
 A column the INSERT leaves NULL takes its value from `raw`. Metadata the API

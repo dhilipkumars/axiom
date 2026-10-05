@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# render-quickstart VERSION: print scripts/quickstart.sh with VERSION filled
+# in, which is the copy a release attaches. The release workflow and the
+# install gate both call this, so the gate runs exactly what is published.
+set -euo pipefail
+version="${1:?usage: render-quickstart VERSION}"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+out="$(sed "s/@AXIOM_VERSION@/${version}/" "$here/quickstart.sh")"
+# A copy without its version refuses to run: a broken one-liner on the
+# release page rather than an error here.
+if grep -q '@AXIOM_VERSION@' <<<"$out"; then
+  echo "render-quickstart: placeholder left in the output" >&2; exit 1
+fi
+grep -q "AXIOM_VERSION:-${version}}" <<<"$out" \
+  || { echo "render-quickstart: version ${version} not filled in" >&2; exit 1; }
+printf '%s\n' "$out"

@@ -275,19 +275,17 @@ jobs:
       # and never whatever is on main. Only the script is needed from the tree.
       - uses: actions/checkout@v4
         with:
-          sparse-checkout: scripts/quickstart.sh
+          sparse-checkout: |
+            scripts/quickstart.sh
+            scripts/render-quickstart
           sparse-checkout-cone-mode: false
           path: src
       - env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          version="${RELEASE_TAG#v}"
-          sed "s/@AXIOM_VERSION@/${version}/" src/scripts/quickstart.sh > dist/quickstart.sh
-          # A copy without its version refuses to run, which would be a broken
-          # one-liner on the release page rather than an error here.
-          ! grep -q '@AXIOM_VERSION@' dist/quickstart.sh
-          grep -q "AXIOM_VERSION:-${version}}" dist/quickstart.sh
+          # The same rendering the install gate ran before this was published.
+          src/scripts/render-quickstart "${RELEASE_TAG#v}" > dist/quickstart.sh
           ( cd dist && sha256sum quickstart.sh > quickstart.sh.sha256 )
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

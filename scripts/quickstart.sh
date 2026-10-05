@@ -32,9 +32,12 @@ MANIFESTS="${AXIOM_MANIFESTS:-https://raw.githubusercontent.com/dhilipkumars/axi
 CONTAINER="${CLUSTER}-pg"
 NODE="${CLUSTER}-control-plane"
 CTX="kind-${CLUSTER}"
-# The cluster this script created, so `down` and a re-run never touch one it
-# did not.
-MARKER="$STATE/created-cluster"
+# What this script made, so `down` and a re-run never touch anything it did
+# not: the state directory carries SENTINEL, the cluster is recorded in
+# MARKER_NAME, and the container carries LABEL.
+SENTINEL=.axiom-quickstart
+MARKER_NAME=created-cluster
+LABEL=io.github.dhilipkumars.axiom.quickstart
 
 # $STATE as a person would write it, ~ for the home directory.
 shown() { printf '%s' "${STATE/#$HOME/~}"; }
@@ -60,11 +63,41 @@ preflight() {
 }
 
 cluster_exists() { kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; }
-we_created_it()  { [[ -f "$MARKER" && "$(cat "$MARKER")" == "$CLUSTER" ]]; }
+we_created_it()  { [[ -f "$STATE/$MARKER_NAME" && "$(cat "$STATE/$MARKER_NAME")" == "$CLUSTER" ]]; }
+# Whether a container of that name exists, and whether it is ours.
+container_exists() { docker inspect "$CONTAINER" >/dev/null 2>&1; }
+container_ours() {
+  [[ "$(docker inspect -f "{{ index .Config.Labels \"$LABEL\" }}" "$CONTAINER" 2>/dev/null)" == "$CLUSTER" ]]
+}
+
+# Take the state directory: absolute, because Docker refuses relative mount
+# paths, and only if it is empty or already this script's.
+claim_state() {
+  mkdir -p "$STATE"
+  STATE="$(cd "$STATE" && pwd)"
+  if [[ ! -f "$STATE/$SENTINEL" ]]; then
+    [[ -z "$(ls -A "$STATE")" ]] || die "$STATE is not empty and was not made by this script.
+       Set AXIOM_STATE_DIR to an empty or new directory."
+    : > "$STATE/$SENTINEL"
+  fi
+}
+
+# The gateway manifest, pinned to this release's image before it is applied,
+# so the cluster never starts the floating :latest even for a moment.
+gateway_manifest() {
+  local src
+  case "$MANIFESTS" in
+    http*) src="$(curl -fsSL "$MANIFESTS/gateway-deployment.yaml")" || die "could not fetch $MANIFESTS/gateway-deployment.yaml" ;;
+    *)     src="$(cat "$MANIFESTS/gateway-deployment.yaml")" ;;
+  esac
+  src="$(printf '%s\n' "$src" | sed "s|image: ghcr.io/dhilipkumars/axiom-gateway:.*|image: $GW_IMAGE|")"
+  printf '%s\n' "$src" | grep -q "image: $GW_IMAGE\$" || die "could not pin the gateway image in the manifest"
+  printf '%s\n' "$src"
+}
 
 up() {
   preflight
-  mkdir -p "$STATE"
+  claim_state
   echo "Axiom $VERSION, Postgres $PG, kind cluster '$CLUSTER'"
 
   say "kind cluster"
@@ -74,16 +107,19 @@ up() {
        Use another name (AXIOM_CLUSTER=...), or delete that cluster yourself."
     echo "reusing $CLUSTER, created by an earlier run"
   else
+    # Recorded before creating, so an interrupted create is still ours to
+    # clean up rather than a cluster no later run will touch.
+    echo "$CLUSTER" > "$STATE/$MARKER_NAME"
     kind create cluster --quiet --name "$CLUSTER" || die "kind could not create the cluster"
     echo "created $CLUSTER"
-    echo "$CLUSTER" > "$MARKER"
   fi
   k wait --for=condition=Ready node --all --timeout=180s >/dev/null
 
   say "TLS keypair for the gateway"
   # The certificate must name the node Postgres dials, so it is made for this
   # cluster; one from a run with another cluster name is replaced.
-  if [[ -f "$STATE/certs/gateway.crt" && -f "$STATE/certs/cluster" \
+  if [[ -f "$STATE/certs/ca.crt" && -f "$STATE/certs/gateway.crt" \
+        && -f "$STATE/certs/gateway.key" && -f "$STATE/certs/cluster" \
         && "$(cat "$STATE/certs/cluster")" == "$CLUSTER" ]]; then
     echo "reusing $(shown)/certs"
   else
@@ -112,8 +148,7 @@ up() {
   k -n axiom-system create secret generic axiom-gateway-tls \
     --from-file=tls.crt="$STATE/certs/gateway.crt" \
     --from-file=tls.key="$STATE/certs/gateway.key" >/dev/null
-  k apply -f "$MANIFESTS/gateway-deployment.yaml" >/dev/null
-  k -n axiom-system set image deploy/axiom-gateway gateway="$GW_IMAGE" >/dev/null
+  gateway_manifest | k apply -f - >/dev/null
   # On a re-run nothing in the Deployment changed, so without a restart the
   # running pod would keep the certificate from the previous run.
   k -n axiom-system rollout restart deploy/axiom-gateway >/dev/null
@@ -123,7 +158,10 @@ up() {
 
   say "Postgres $PG with Axiom ($PG_IMAGE)"
   docker pull -q "$PG_IMAGE" >/dev/null || die "could not pull $PG_IMAGE"
-  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  if container_exists; then
+    container_ours || die "a container named $CONTAINER exists and was not made by this script"
+    docker rm -f "$CONTAINER" >/dev/null
+  fi
   local publish=""
   if [[ "$PORT" != "0" ]]; then
     if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
@@ -133,7 +171,7 @@ up() {
     publish="-p 127.0.0.1:$PORT:5432"
   fi
   # shellcheck disable=SC2086  # $publish is empty or two words, on purpose
-  docker run -d --name "$CONTAINER" --network kind \
+  docker run -d --name "$CONTAINER" --network kind --label "$LABEL=$CLUSTER" \
     -e POSTGRES_PASSWORD=axiom \
     -v "$STATE/certs:/certs:ro" $publish \
     "$PG_IMAGE" >/dev/null
@@ -183,14 +221,25 @@ EOF
 
 down() {
   say "removing the quick start"
-  docker rm -f "$CONTAINER" >/dev/null 2>&1 && echo "removed container $CONTAINER" || true
+  if container_exists; then
+    if container_ours; then
+      docker rm -f "$CONTAINER" >/dev/null && echo "removed container $CONTAINER"
+    else
+      echo "left container $CONTAINER alone: this script did not create it"
+    fi
+  fi
+  if [[ -d "$STATE" ]]; then STATE="$(cd "$STATE" && pwd)"; fi
   if we_created_it && cluster_exists; then
     kind delete cluster --name "$CLUSTER"
   elif cluster_exists; then
     echo "left kind cluster '$CLUSTER' alone: this script did not create it"
   fi
-  rm -rf "$STATE"
-  echo "removed $(shown)"
+  # Only what this script wrote, and only in a directory it marked as its own.
+  if [[ -f "$STATE/$SENTINEL" ]]; then
+    rm -rf "${STATE:?}/certs" "${STATE:?}/${MARKER_NAME:?}" "${STATE:?}/${SENTINEL:?}"
+    rmdir "$STATE" 2>/dev/null || true
+    echo "removed $(shown)"
+  fi
 }
 
 case "${1:-up}" in

@@ -44,7 +44,7 @@ jobs:
       # version is pinned to the one the pages workflow uses.
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: pip install mkdocs-material==9.5.49
+      - run: pip install mkdocs-material==9.5.49 mkdocs-redirects==1.2.2
       # --strict comes from mkdocs.yml, so a warning is a failure.
       - run: mkdocs build --site-dir /tmp/site
 

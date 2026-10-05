@@ -4,7 +4,9 @@ Once the gateway is running and Postgres has Axiom installed and preloaded,
 whichever way you [installed it](install/index.md), the steps are the same.
 Run them in `psql` as a superuser.
 
-The output on this page is from a CI run against a one-node kind cluster.
+The output on this page is from a CI run against a one-node kind cluster whose
+gateway was limited to seven kinds, so its counts are small. With the shipped
+RBAC the same import gives several dozen tables: 48 on a fresh kind cluster.
 
 ## 1. Create the extension
 
@@ -101,7 +103,10 @@ view over its table:
 ```
 
 ```
-<!-- output:short-names -->
+ status  | count 
+---------+-------
+ created |     5
+(1 row)
 ```
 
 - **The core group gets the bare plural.** `pods` is `core_pods` even with
@@ -123,7 +128,10 @@ view over its table:
 ```
 
 ```
-<!-- output:version -->
+ axiom_version 
+---------------
+ 0.2.0
+(1 row)
 ```
 
 **The background worker is running.** It keeps the stream to each gateway and
@@ -135,7 +143,10 @@ confirms the preload worked:
 ```
 
 ```
-<!-- output:worker -->
+ pid |     backend_type     |         backend_start         
+-----+----------------------+-------------------------------
+  68 | axiom gateway pinger | 2026-10-05 02:56:43.114936+00
+(1 row)
 ```
 
 **The gateway is reachable, and has done work.** `axiom_gateway_stats` raises
@@ -146,18 +157,25 @@ an error for a gateway it cannot reach, rather than returning zeros:
 ```
 
 ```
-<!-- output:gateway-stats -->
+    gateway_started     | list_calls | openapi_fetches | access_reviews 
+------------------------+------------+-----------------+----------------
+ 2026-10-05 02:56:50+00 |          0 |               4 |              7
+(1 row)
 ```
 
 **The import created tables, and no Secrets.** The count depends on the
-cluster and on what the gateway may read:
+cluster and on what the gateway may read; this run's gateway served seven
+kinds:
 
 ```sql
 --8<-- "docs/snippets/initialize/tables.sql"
 ```
 
 ```
-<!-- output:tables -->
+ tables | core | secrets 
+--------+------+---------
+      7 |    3 |       0
+(1 row)
 ```
 
 `\d k8s.core_pods` shows the columns discovery chose. Every table has the same
@@ -171,7 +189,18 @@ whole object.
 ```
 
 ```
-<!-- output:first-query -->
+                      name                       |  phase  |          node           |   creation_timestamp   
+-------------------------------------------------+---------+-------------------------+------------------------
+ coredns-7d764666f9-fdvfk                        | Running | axiom-e2e-control-plane | 2026-10-05 02:49:01+00
+ coredns-7d764666f9-mb5fn                        | Running | axiom-e2e-control-plane | 2026-10-05 02:49:01+00
+ etcd-axiom-e2e-control-plane                    | Running | axiom-e2e-control-plane | 2026-10-05 02:48:55+00
+ kindnet-cvs68                                   | Running | axiom-e2e-control-plane | 2026-10-05 02:49:01+00
+ kube-apiserver-axiom-e2e-control-plane          | Running | axiom-e2e-control-plane | 2026-10-05 02:48:55+00
+ kube-controller-manager-axiom-e2e-control-plane | Running | axiom-e2e-control-plane | 2026-10-05 02:48:55+00
+ kube-proxy-htwmm                                | Running | axiom-e2e-control-plane | 2026-10-05 02:49:01+00
+ kube-scheduler-axiom-e2e-control-plane          | Running | axiom-e2e-control-plane | 2026-10-05 02:48:55+00
+ metrics-server-6795649cdf-6hpnb                 | Running | axiom-e2e-control-plane | 2026-10-05 02:55:28+00
+(9 rows)
 ```
 
 `kubectl -n kube-system get pods` shows the same pods: the same data by a
