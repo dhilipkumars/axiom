@@ -34,7 +34,6 @@ theme:
   # verification tags.
   custom_dir: docs-overrides
   features:
-    - navigation.sections
     - navigation.indexes
     - navigation.top
     - content.code.copy
