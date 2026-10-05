@@ -54,11 +54,11 @@ that can hold more than one type, such as a quantity (`500m`) or a `maxSurge`
 (`25%` or `2`), stay `jsonb`; compare quantities with `axiom_quantity()`. The
 [column reference](../../generated/columns.md) has the exact rule.
 
-**The declared type decides how a column reads**, so one column can be
-changed in place:
+**The declared type decides how a column reads**, so a column can be changed
+in place, for example to read the replica count as text:
 
 ```sql
-ALTER FOREIGN TABLE k8s.core_events ALTER COLUMN count TYPE bigint;
+ALTER FOREIGN TABLE k8s.apps_deployments ALTER COLUMN replicas TYPE text;
 ```
 
 A query written for the old types fails loudly after a re-import rather than

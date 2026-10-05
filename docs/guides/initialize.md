@@ -76,7 +76,13 @@ define `clusters`. In a group, `.` becomes `_` and `-` becomes `__`. A name
 longer than Postgres's 63 bytes keeps its resource whole and shortens the
 group, with a digest between them.
 
-To import less, name the tables:
+To import one API group, name it in place of `k8s`. The core group is `core`:
+
+```sql
+IMPORT FOREIGN SCHEMA "apps" FROM SERVER prod INTO k8s;
+```
+
+Or name the tables:
 
 ```sql
 IMPORT FOREIGN SCHEMA k8s LIMIT TO (core_pods, apps_deployments) FROM SERVER prod INTO k8s;
@@ -116,6 +122,9 @@ view over its table:
   `SELECT axiom_create_short_name('k8s', 'clusters', 'postgresql_cnpg_io_clusters');`
 - **An existing object is never replaced**, and a short name never moves once
   created.
+- **Two servers in one schema** (through the `prefix` import option) share the
+  core plurals too. Pick the server whose tables get the short names:
+  `SELECT * FROM axiom_create_short_names('k8s', server_name => 'prod');`
 - **Grant both.** The views use `security_invoker`, so a role needs `SELECT` on
   the view and on its table: `GRANT SELECT ON k8s.pods, k8s.core_pods TO app;`.
 
