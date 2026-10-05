@@ -11,7 +11,7 @@
 # them is the most useful thing about this repository, but they are written for
 # contributors, not users, and the nav says so.
 site_name: Axiom
-site_description: Query and change Kubernetes with SQL, through a Postgres foreign data wrapper.
+site_description: Axiom, a Kubernetes foreign data wrapper for PostgreSQL. Query and change Kubernetes resources with SQL.
 site_url: https://dhilipkumars.github.io/axiom/
 repo_url: https://github.com/dhilipkumars/axiom
 repo_name: dhilipkumars/axiom
@@ -66,31 +66,55 @@ markdown_extensions:
   - pymdownx.snippets:
       base_path: ["."]
       check_paths: true
+  # Install routes side by side as tabs: deb | rpm | tarball.
+  - pymdownx.tabbed:
+      alternate_style: true
+
+# Pages that moved in the docs reorganization (#115). Old links, including the
+# README's and anything search engines indexed, forward to the new home.
+plugins:
+  - search
+  - redirects:
+      redirect_maps:
+        guides/getting-started.md: guides/quick-start.md
+        guides/deploying.md: guides/install/gateway.md
+        guides/querying.md: guides/examples/how-tables-work.md
 
 nav:
-  - Home: index.md
+  - Home:
+      - index.md
+      - Architecture: architecture.md
+      - Compatibility: compatibility.md
   - Guides:
-      - Getting started: guides/getting-started.md
-      - Setting up (for coding agents): guides/for-agents.md
-      - Deploying the gateway: guides/deploying.md
-      - Querying: guides/querying.md
+      - Prerequisites: guides/prerequisites.md
+      - Quick start: guides/quick-start.md
+      - Install:
+          - guides/install/index.md
+          - The gateway: guides/install/gateway.md
+          - Postgres image: guides/install/postgres-image.md
+          - Packages: guides/install/packages.md
+          - From source: guides/install/from-source.md
+          - Restricting access: guides/install/rbac.md
+      - Initialize: guides/initialize.md
       - Examples:
           - guides/examples/index.md
+          - How tables work: guides/examples/how-tables-work.md
           - Capacity and risk review: guides/examples/capacity-review.md
           - Changing the cluster: guides/examples/changing-the-cluster.md
           - Manage Postgres with Postgres: guides/examples/manage-postgres.md
           - A silly Kubernetes operator in SQL: guides/examples/sql-operator.md
           - Your deployment, in chronological order: guides/examples/deploy-timeline.md
           - "Did your patch regress? pgbench across Postgres 16, 17 and 18": guides/examples/regression-lab.md
+      - For AI agents: guides/for-agents.md
       - Giving an AI agent access: guides/agent-access.md
   - Reference:
       - gRPC API: generated/api.md
       - Gateway flags: generated/gateway-flags.md
       - FDW options: generated/fdw-options.md
       - Foreign table columns: generated/columns.md
-  - Design notes (for contributors):
+  - For contributors:
       - Developer guide: development.md
-      - Architecture: DESIGN.md
+      - Architecture notes: DESIGN.md
       - Auth design: AUTH.md
       - Engineering rules: RULES.md
       - Phase plan: PLAN.md

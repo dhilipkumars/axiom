@@ -1,8 +1,38 @@
 {#- Theme overrides for the docs site (theme.custom_dir in mkdocs.yml). -#}
 {% extends "base.html" %}
 
+{#- The home page's title is the full name of what Axiom is, for search; every
+    other page keeps the theme's "Page - Axiom". -#}
+{% block htmltitle %}
+  {% if page and page.file.src_uri == "index.md" and page.meta and page.meta.title %}
+    <title>{{ page.meta.title }}</title>
+  {% else %}
+    {{ super() }}
+  {% endif %}
+{% endblock %}
+
 {% block extrahead %}
   {#- Google Search Console ownership proof for dhilipkumars.github.io/axiom.
       Public by design; removing it un-verifies the property. -#}
   <meta name="google-site-verification" content="hK9HXln5ub6pqHhCkHl3f0b5r-wbxnYitdoetJbMC5U" />
+  {%- if page and page.file.src_uri == "index.md" %}
+  {#- Describes the project to search engines as software. Kept to facts that
+      do not go stale with a release: no version number here. -#}
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Axiom",
+    "description": "A Kubernetes foreign data wrapper for PostgreSQL: query and change Kubernetes resources with SQL.",
+    "applicationCategory": "DeveloperApplication",
+    "applicationSubCategory": "PostgreSQL extension",
+    "operatingSystem": "Linux",
+    "keywords": "Kubernetes, PostgreSQL, foreign data wrapper, kubernetes_fdw, FDW, SQL",
+    "license": "https://www.apache.org/licenses/LICENSE-2.0",
+    "url": "https://dhilipkumars.github.io/axiom/",
+    "sameAs": "https://github.com/dhilipkumars/axiom",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+  }
+  </script>
+  {%- endif %}
 {% endblock %}

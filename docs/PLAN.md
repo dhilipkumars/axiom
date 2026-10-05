@@ -298,7 +298,7 @@ Tasks:
   to `pods_core`, and CRDs sharing a plural renamed each other. Every name is
   now `<group>_<plural>` (`core_pods`, `apps_deployments`), a function of the
   kind alone; short names are opt-in views from `axiom_create_short_names`.
-  `docs/guides/querying.md` has the rule.
+  `docs/guides/initialize.md` has the rule.
 - [x] **`api_version`, `kind` and `metadata` as columns.** These are the only
   three fields guaranteed on every Kubernetes object — `spec` is present on 67%
   of built-in kinds and `status` on 47%, so neither is a safe basis for anything

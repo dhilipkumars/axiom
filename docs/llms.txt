@@ -29,13 +29,17 @@ Things worth knowing before answering questions about Axiom:
 
 ## Setting up a working environment
 
-- [Setting up Axiom (for coding agents)](https://dhilipkumars.github.io/axiom/guides/for-agents/): step-by-step procedure with a verification and expected output for each step, failure signatures, and teardown. Start here to bring up a working environment.
-- [Getting started](https://dhilipkumars.github.io/axiom/guides/getting-started/): the same path written for a person, with the reasoning behind each step.
+- [Setting up Axiom (for coding agents)](https://dhilipkumars.github.io/axiom/guides/for-agents/): what to ask the user first, then a step-by-step procedure with a verification and expected output for each step, failure signatures, and teardown. Start here to bring up a working environment.
+- [Quick start](https://dhilipkumars.github.io/axiom/guides/quick-start/): one script (`quickstart.sh`, attached to each release) that brings up kind, the gateway and Postgres with Axiom, and runs a first query.
+- [Install](https://dhilipkumars.github.io/axiom/guides/install/): the gateway, then Axiom into Postgres by image, `.deb`/`.rpm`/tarball, or source; and restricting the gateway's RBAC.
+- [Initialize](https://dhilipkumars.github.io/axiom/guides/initialize/): `CREATE EXTENSION`, the server, importing tables, short names, and checks that it works.
+- [Compatibility](https://dhilipkumars.github.io/axiom/compatibility/): Postgres versions, distributions and architectures, and which are tested.
 
 ## Using it
 
-- [Querying](https://dhilipkumars.github.io/axiom/guides/querying/): on-demand versus watch-cached tables, staleness, cache settings, `axiom_watch_status()`.
-- [Deploying the gateway](https://dhilipkumars.github.io/axiom/guides/deploying/): running the gateway in a cluster, exposure choices, RBAC, operational notes.
+- [Examples](https://dhilipkumars.github.io/axiom/guides/examples/): questions `kubectl` cannot answer in one command, each with real output.
+- [How tables work](https://dhilipkumars.github.io/axiom/guides/examples/how-tables-work/): what is pushed down, how columns are typed, on-demand versus watch-cached tables, staleness, `axiom_watch_status()`.
+- [Install the gateway](https://dhilipkumars.github.io/axiom/guides/install/gateway/): running the gateway in a cluster, exposure choices, operational notes.
 - [Giving an AI agent access](https://dhilipkumars.github.io/axiom/guides/agent-access/): a Postgres role recipe that gives an agent redacted, scoped cluster access with no shell and no Kubernetes credential; the grants to never give; controls that are not controls; what is not yet enforced.
 
 ## Reference, generated from the code
@@ -47,6 +51,6 @@ Things worth knowing before answering questions about Axiom:
 
 ## Optional
 
-- [Architecture](https://dhilipkumars.github.io/axiom/DESIGN/): why a gateway, consistency tiers, schema mapping, multi-cluster.
+- [Architecture](https://dhilipkumars.github.io/axiom/architecture/) and the [design notes](https://dhilipkumars.github.io/axiom/DESIGN/): why a gateway, consistency tiers, schema mapping, multi-cluster.
 - [Auth design](https://dhilipkumars.github.io/axiom/AUTH/): per-caller identity, the threat model, the recommended flow.
 - [Releasing](https://dhilipkumars.github.io/axiom/RELEASING/): what each image tag means and how a release is cut.

@@ -19,7 +19,7 @@ requests that change it.
 
 They assume a working Axiom setup: the extension installed, a gateway it can
 reach, and a server created with `CREATE SERVER`. The
-[getting-started guide](https://dhilipkumars.github.io/axiom/guides/getting-started/)
+[quick start](https://dhilipkumars.github.io/axiom/guides/quick-start/)
 sets that up on a kind cluster in about ten minutes. The operator and the lab
 take the server's name as a psql variable (`-v server=...`) and create their
 own schema, `sqlop` and `lab`. The timeline reads tables from an ordinary

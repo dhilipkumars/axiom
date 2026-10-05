@@ -70,6 +70,24 @@ show() {
   psql_table "$Q/$1" || fail "$1 failed"
 }
 
+log "initialize: the checks the Initialize page shows"
+I="$E2E_ROOT/docs/snippets/initialize"
+show_init() {
+  echo
+  echo "=== docs/snippets/initialize/$1"
+  psql_table "$I/$1" || fail "$1 failed"
+}
+show_init short-names.sql
+show_init version.sql
+show_init worker.sql
+[[ "$(psql_file "$I/worker.sql" | wc -l | tr -d ' ')" == 1 ]] \
+  || fail "the Initialize page's worker check did not find exactly one background worker"
+show_init gateway-stats.sql
+show_init tables.sql
+[[ "$(psql_file "$I/tables.sql" | cut -d'|' -f3)" == 0 ]] || fail "the import created a Secrets table"
+show_init first-query.sql
+psql_file "$I/first-query.sql" | grep -q '^kube-apiserver-' || fail "the first query, through the short name, did not list kube-system"
+
 log "waiting for each problem to become visible"
 until_shows crash-looping.sql '^shop\|checkout-worker\|Running\|worker\|([3-9]|[1-9][0-9]+)\|' "the crash-looping pod, three restarts in"
 until_shows not-running.sql '^shop\|report\|' "the warning on the pod whose image does not exist"
@@ -112,6 +130,9 @@ out="$(psql_table "$Q/pods-read-only.sql" 2>&1 || true)"
 echo "$out"
 grep -q "does not allow deletes" <<<"$out" || fail "deleting a pod was not refused: $out"
 kubectl_e2e -n shop get pod checkout-worker >/dev/null || fail "the refused DELETE removed the pod anyway"
+show insert-raw.sql
+[[ "$(kubectl_e2e -n shop get configmap flags-canary -o jsonpath='{.metadata.labels.team}|{.data.NEW_CHECKOUT}')" == "payments|on" ]] \
+  || fail "the copy made from raw did not keep the label and take the overridden data"
 show find-and-fix.sql
 echo
 echo "=== kubectl -n shop get deploy catalog -o jsonpath='{.metadata.annotations.axiom/memory-used-pct}'"

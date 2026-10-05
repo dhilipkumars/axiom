@@ -111,8 +111,8 @@ into the gateway's distroless image, which has no shell and no cloud CLI. This
 is not platform-specific; it fails the same way on macOS.
 
 To use Axiom against a real cluster, deploy the gateway *into* it rather than
-running one locally against it — see [Deploying the
-gateway](guides/deploying.md). Supporting remote clusters from `local-dev` is
+running one locally against it — see [Install the
+gateway](guides/install/gateway.md). Supporting remote clusters from `local-dev` is
 tracked in [#68](https://github.com/dhilipkumars/axiom/issues/68).
 
 **Re-running is how you pick up a newly granted kind.** The gateway reads its
@@ -123,6 +123,38 @@ yours depends on one it stops and tells you rather than dropping your work.
 Postgres tracks that dependency across schemas, so keeping the view elsewhere
 does not exempt it; import your own copy of the tables instead and build on
 that.
+
+### Running the gateway as a host process
+
+Rebuilding an image, loading it into a cluster and waiting for a rollout turns
+a two-second Go change into a minute. For working *on* the gateway, run it as a
+host process against your kubeconfig instead:
+
+```sh
+cd gateway
+go run ./cmd/gateway \
+  -kubeconfig ~/.kube/config \
+  -listen 127.0.0.1:8443 \
+  -tls-cert /tmp/certs/gateway.crt \
+  -tls-key  /tmp/certs/gateway.key
+```
+
+Then point Postgres at `https://localhost:8443`. The certificate the compose
+stack generates already carries `localhost` and `127.0.0.1` among its names, so
+the same material works for both.
+
+Two things to know about this mode:
+
+- It authenticates as **you**, not as the gateway's ServiceAccount. Your
+  kubeconfig almost certainly has more privilege than the ClusterRole, so a
+  kind that works here can still be denied in the cluster. Confirm anything
+  RBAC-shaped against a real deployment.
+- `rest.InClusterConfig()` never runs, so the credential path the deployed
+  gateway uses is not exercised. The end-to-end gates cover it; a host-process
+  session does not.
+
+Use it for iterating on gateway code. Use the Deployment for anything you
+intend to believe.
 
 ## 2. Get the code
 

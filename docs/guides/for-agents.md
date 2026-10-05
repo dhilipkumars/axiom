@@ -1,13 +1,38 @@
 # Setting up Axiom (for coding agents)
 
 A procedure for an autonomous agent to bring up a working Axiom environment and
-prove it works. Same result as [Getting started](getting-started.md), written
-for a reader that cannot ask a follow-up question.
+prove it works. Same result as the [quick start](quick-start.md), written step
+by step, with a check after each step, for a reader that cannot see the
+person's screen.
 
 Every command is non-interactive and safe to re-run. Each step states how to
 verify it before moving on. **Do not proceed past a failed verification** —
 [Failures](#failures) lists the ones with unhelpful messages and what they
 actually mean.
+
+## Ask before you act
+
+Settle these with the user first. Each changes what you do, and guessing any of
+them wrong costs more than the question:
+
+1. **A local demo, or a real installation?** This procedure builds a
+   throwaway local environment on kind. For a real cluster and an existing
+   Postgres, follow [Install](install/index.md) and [Initialize](initialize.md)
+   instead, and ask the questions below.
+2. **Which Kubernetes cluster?** The `kubectl` context, and whether you may
+   create a namespace, a Deployment and cluster-wide RBAC in it.
+3. **Which Postgres?** Its major version (16, 17 or 18), how it was installed,
+   and whether you may restart it: Axiom must be added to
+   `shared_preload_libraries`, which takes a restart.
+4. **How does Postgres reach the cluster?** The address of the gateway as seen
+   from the database host. Without one, nothing works; do not invent it.
+5. **Anything already there?** An existing kind cluster named `axiom`, or a
+   Postgres on port 5432 or 55432. Never delete or replace someone's
+   environment to make room.
+
+If the answer to 1 is "a local demo" and the user is happy to run a script,
+[`quickstart.sh`](quick-start.md) does everything below in one command. Use the
+steps here when you need to check each one, or cannot run that script.
 
 ## What you are building
 
@@ -283,7 +308,7 @@ point of the project.
 | `FATAL: cannot create PGC_POSTMASTER variables after startup` | Axiom loaded without `shared_preload_libraries` | use the published image, or preload it |
 | `CREATE EXTENSION` closes the connection | same as above | as above |
 | TLS handshake failure on the first `IMPORT` | certificate SAN does not cover `axiom-control-plane` | regenerate the keypair, step 2 |
-| `Cancelled: Timeout expired` on `IMPORT` | whole-cluster import exceeded `rpc_timeout_secs` | `ALTER SERVER prod OPTIONS (SET rpc_timeout_secs '120')` |
+| `Cancelled: Timeout expired` on `IMPORT` | whole-cluster import exceeded `rpc_timeout_secs` | `ALTER SERVER prod OPTIONS (ADD rpc_timeout_secs '120')`; `SET` only if it is already set |
 | `rollout status` times out | image pull or crash loop | `kubectl -n axiom-system logs deploy/axiom-gateway` |
 | `psql` exits 0 but nothing was created | missing `ON_ERROR_STOP=1` | re-run with it |
 

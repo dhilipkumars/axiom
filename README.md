@@ -1,18 +1,18 @@
 # Axiom
 
-**Query and control Kubernetes from plain SQL.**
+**A Kubernetes foreign data wrapper for PostgreSQL. Query and control Kubernetes from plain SQL.**
 
 [![CI](https://github.com/dhilipkumars/axiom/actions/workflows/ci.yml/badge.svg)](https://github.com/dhilipkumars/axiom/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/dhilipkumars/axiom?label=release)](https://github.com/dhilipkumars/axiom/releases/latest)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16%20%7C%2017%20%7C%2018-336791?logo=postgresql&logoColor=white)](https://dhilipkumars.github.io/axiom/guides/getting-started/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16%20%7C%2017%20%7C%2018-336791?logo=postgresql&logoColor=white)](https://dhilipkumars.github.io/axiom/compatibility/)
 [![Docs](https://img.shields.io/badge/docs-dhilipkumars.github.io%2Faxiom-blue)](https://dhilipkumars.github.io/axiom/)
 [![Security](https://img.shields.io/badge/scanned-govulncheck%20%C2%B7%20cargo--audit%20%C2%B7%20gitleaks-4c1)](https://github.com/dhilipkumars/axiom/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/dhilipkumars/axiom)](LICENSE)
 
 📖 **[Documentation](https://dhilipkumars.github.io/axiom/)** &nbsp;·&nbsp;
-[Getting started](https://dhilipkumars.github.io/axiom/guides/getting-started/) &nbsp;·&nbsp;
-[Querying](https://dhilipkumars.github.io/axiom/guides/querying/) &nbsp;·&nbsp;
-[Deploying](https://dhilipkumars.github.io/axiom/guides/deploying/) &nbsp;·&nbsp;
+[Quick start](https://dhilipkumars.github.io/axiom/guides/quick-start/) &nbsp;·&nbsp;
+[Install](https://dhilipkumars.github.io/axiom/guides/install/) &nbsp;·&nbsp;
+[Examples](https://dhilipkumars.github.io/axiom/guides/examples/) &nbsp;·&nbsp;
 [AI agent access](https://dhilipkumars.github.io/axiom/guides/agent-access/) &nbsp;·&nbsp;
 [Roadmap](ROADMAP.md)
 
@@ -52,7 +52,7 @@ reads Secrets; writes are granted per resource.*
 `postgresql_cnpg_io_clusters` — so a name never changes because something else
 was installed in the cluster. If you would rather type `pods`,
 `SELECT * FROM axiom_create_short_names('k8s')` creates short names as views.
-[Table names](https://dhilipkumars.github.io/axiom/guides/querying/#table-names)
+[Table names](https://dhilipkumars.github.io/axiom/guides/initialize/#3-import-the-clusters-tables)
 has the rules.*
 
 **Join across kinds.** Which pods are running on nodes under memory pressure?
@@ -184,15 +184,18 @@ SELECT 'stage',           namespace, name FROM stage.core_pods WHERE phase = 'Fa
 
 ## Getting started
 
-Nothing is built from source. The walkthrough brings up a kind cluster, a TLS
-keypair, the gateway, and a Postgres image with Axiom already in it, then
-queries real cluster state — about ten minutes.
+One script brings up a local kind cluster, the gateway, and Postgres with Axiom,
+then runs a first query. It needs Docker, `kind` and `kubectl`:
 
-**→ [Getting started](https://dhilipkumars.github.io/axiom/guides/getting-started/)**
+```sh
+curl -fsSL https://github.com/dhilipkumars/axiom/releases/latest/download/quickstart.sh | bash
+```
 
-Already run Postgres? The same guide's
-[package route](https://dhilipkumars.github.io/axiom/guides/getting-started/#installing-into-a-postgres-you-already-run)
-installs the extension into it with `apt` or `dnf` — a `.deb` and an `.rpm` per
+**→ [Quick start](https://dhilipkumars.github.io/axiom/guides/quick-start/)** has
+the download-and-read version, and how to clean up.
+
+Already run Postgres? [Install](https://dhilipkumars.github.io/axiom/guides/install/)
+the gateway in your cluster and the extension from a `.deb` or `.rpm` per
 Postgres major and architecture, no toolchain and no rebuild:
 
 ```sh
@@ -201,8 +204,8 @@ sudo dnf install ./axiom_17-<version>-1.el9.x86_64.rpm           # RHEL, Rocky, 
 ```
 
 Axiom must be loaded through `shared_preload_libraries`; a package cannot do
-that for you. Artifacts are on the
-[releases page](https://github.com/dhilipkumars/axiom/releases).
+that for you. [Compatibility](https://dhilipkumars.github.io/axiom/compatibility/)
+lists the tested versions, distributions and architectures.
 
 ## Design
 

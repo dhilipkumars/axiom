@@ -68,7 +68,15 @@ workdir="$(mktemp -d)"
 # would destroy a cluster someone else was using that happened to share the
 # name, which is a bad trade for saving one `kind create`.
 created_cluster=0
+# The quick start's copy, rendered as the release attaches it, and the
+# overrides it runs with: none on a release.
+QS="$workdir/quickstart.sh"
+qs_env=()
+qs_started=0
 cleanup() {
+  if [[ "$qs_started" == "1" ]]; then
+    env ${qs_env[@]+"${qs_env[@]}"} bash "$QS" down >/dev/null 2>&1 || true
+  fi
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
   if [[ "$created_cluster" == "1" && "${E2E_INSTALL_KEEP:-0}" != "1" ]]; then
     kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
@@ -301,5 +309,44 @@ $kubectl_pods"
   fi
   echo "  pg${pg}: $(wc -l <<<"$sql_pods" | tr -d ' ') pods, name/phase/node identical in SQL and kubectl"
 done
+
+docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+
+# The quick start, the way a reader runs it: rendered by the same helper the
+# release uses to make the attached copy. On a release every input exists --
+# the version's images, its gateway, and its manifests at the tag -- so that
+# copy runs with no variables at all: default cluster, port and state
+# directory. Before a release there is no such tag, so the development images
+# and this checkout's manifests stand in, and only those.
+#
+# Its own cluster, after this gate's is gone: two kind clusters at once is
+# more than a CI runner comfortably holds.
+log "quickstart.sh, as a reader runs it"
+if [[ "$created_cluster" == "1" && "${E2E_INSTALL_KEEP:-0}" != "1" ]]; then
+  kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
+  created_cluster=0
+fi
+"$ROOT/scripts/render-quickstart" "$TAG" > "$QS" || fail "could not render quickstart.sh for $TAG"
+if [[ -z "${E2E_INSTALL_VERSION:-}" ]]; then
+  qs_env=(AXIOM_GATEWAY_IMAGE="$GW_IMAGE" AXIOM_MANIFESTS="$ROOT/deploy/k8s")
+  echo "  unreleased build: development images and this checkout's manifests"
+else
+  echo "  release $TAG: the rendered copy, with no variables set"
+fi
+qs_started=1
+out="$(env ${qs_env[@]+"${qs_env[@]}"} bash "$QS" 2>&1)" \
+  || fail "quickstart.sh failed:
+$out"
+grep -q "axiom ${E2E_INSTALL_VERSION:-}" <<<"$out" || fail "quickstart.sh did not report the extension version:
+$out"
+grep -q "kube-apiserver-axiom-quickstart-control-plane *| Running" <<<"$out" \
+  || fail "quickstart.sh's first query did not list kube-system:
+$out"
+echo "$out" | tail -16
+env ${qs_env[@]+"${qs_env[@]}"} bash "$QS" down >/dev/null 2>&1 \
+  || fail "quickstart.sh down failed"
+qs_started=0
+kind get clusters 2>/dev/null | grep -qx axiom-quickstart && fail "quickstart.sh down left its cluster behind"
+echo "  up, first query, and down"
 
 log "INSTALL E2E PASSED"
