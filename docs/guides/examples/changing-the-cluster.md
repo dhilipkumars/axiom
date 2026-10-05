@@ -2,9 +2,8 @@
 
 `INSERT`, `UPDATE` and `DELETE` are real API calls: each row is one create,
 update or delete, sent as the gateway's identity and checked by the API server
-like any other client's. [Querying](../querying.md#writing) is the reference
-for how writes behave; this page shows them working, with output from a CI run
-against the `shop` namespace the [Examples](index.md) use.
+like any other client's. This page shows them working, with output from a CI run against the `shop`
+namespace the [Examples](index.md) use.
 
 ## Change a ConfigMap
 
@@ -26,6 +25,27 @@ Postgres:
 $ kubectl -n shop get configmap checkout-config -o jsonpath='{.data.LOG_LEVEL}'
 debug
 ```
+
+## Insert a whole manifest
+
+**`raw` is a whole object on INSERT too.** A complete manifest can be inserted
+as one `jsonb` value, and a typed column given beside it overrides the same
+field, so `raw` read from one object is a template for another:
+
+```sql
+--8<-- "docs/snippets/examples/insert-raw.sql"
+```
+
+```
+<!-- output:insert-raw -->
+```
+
+A column the INSERT leaves NULL takes its value from `raw`. Metadata the API
+server assigns (`uid`, `resourceVersion`, `creationTimestamp`, `managedFields`)
+is dropped from `raw` rather than sent, and a `raw` whose `apiVersion` or `kind`
+names another kind is refused rather than relabelled.
+
+Writes are never served from cache and never batched: each row is one call.
 
 ## What Axiom refuses
 

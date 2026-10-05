@@ -4,7 +4,7 @@ Questions `kubectl` cannot answer in one command, answered in one query.
 
 Every query here runs in CI against a small `shop` namespace with a few things
 wrong in it, and the output under each is from that run. They assume you have
-finished [Getting started](../getting-started.md), so server `prod` exists and
+finished [Initialize](../initialize.md), so server `prod` exists and
 its kinds are imported into schema `k8s`.
 
 ## Which pods keep restarting?
@@ -104,6 +104,65 @@ Which customers are affected by a failing pod right now, and why:
 (3 rows)
 ```
 
+## More patterns
+
+**Aggregate.** Where pods are failing, and how:
+
+```sql
+--8<-- "docs/snippets/examples/aggregate.sql"
+```
+
+```
+ namespace |  phase  | count 
+-----------+---------+-------
+ shop      | Pending |     2
+(1 row)
+```
+
+**Filter on a promoted column.** Deployments that never finished rolling out.
+The replica counts are `bigint`, so they compare as numbers with no cast, and a
+missing field is `NULL` rather than `0`:
+
+```sql
+--8<-- "docs/snippets/examples/filter-rollouts.sql"
+```
+
+```
+ namespace |   name   | replicas | ready_replicas 
+-----------+----------+----------+----------------
+ shop      | checkout |        1 |               
+(1 row)
+```
+
+**Filter on anything, through `raw`.** `kubectl` offers label selectors and a
+few field selectors. Anything no column promotes is still in `raw`, such as
+every container that sets no memory limit:
+
+```sql
+--8<-- "docs/snippets/examples/filter-raw.sql"
+```
+
+```
+     namespace      |       deployment       |       container        
+--------------------+------------------------+------------------------
+ kube-system        | metrics-server         | metrics-server
+ local-path-storage | local-path-provisioner | local-path-provisioner
+ shop               | checkout               | checkout
+ shop               | web                    | web
+(4 rows)
+```
+
+**Ask several clusters at once.** Each cluster is its own server and its own
+schema, so one question across them is a `UNION ALL`. This needs a second
+cluster and gateway, so it is the shape rather than something to paste:
+
+```sql
+-- after CREATE SERVER stage ... and IMPORT FOREIGN SCHEMA k8s FROM SERVER stage INTO stage
+SELECT 'prod' AS cluster, namespace, name, phase FROM k8s.core_pods   WHERE phase <> 'Running'
+UNION ALL
+SELECT 'stage',           namespace, name, phase FROM stage.core_pods WHERE phase <> 'Running';
+```
+
 ## Bigger examples
 
 - **[Capacity and risk review](capacity-review.md).** Per workload: what it
@@ -132,7 +191,7 @@ Which customers are affected by a failing pod right now, and why:
     A **custom resource** is readable if its operator ships an
     `aggregate-to-view` role. Otherwise, label a read-only ClusterRole for its
     API group `axiom.dhilipkumars.github.io/aggregate-to-gateway: "true"`
-    ([Getting started](../getting-started.md#what-the-gateway-can-see) shows
+    ([Restricting access](../install/rbac.md#adding-a-custom-resource) shows
     one). To make a kind **writable**, add its verbs to the `axiom-gateway`
     ClusterRole. Neither needs a gateway restart; only revoking a grant does.
     Either way, re-import:

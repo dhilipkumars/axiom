@@ -151,4 +151,4 @@ instructions:
   Kubernetes quantity such as `500m` or `128Mi` may be a string or a number, so
   it stays `jsonb`: use `axiom_quantity()` to compare it.
 - **Table names carry the API group.** It's `k8s.core_pods`, not `k8s.pods`,
-  unless someone created [short names](querying.md#short-names).
+  unless someone created [short names](initialize.md#4-short-names-optional).

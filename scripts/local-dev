@@ -77,7 +77,7 @@ $(kubectl config get-contexts -o name | sed 's/^/    /')"
     kind create cluster --name dev && make local-dev-up CONTEXT=kind-dev
 
   To point Axiom at this cluster for real, deploy the gateway into it rather
-  than running one locally against it: docs/guides/deploying.md. Supporting
+  than running one locally against it: docs/guides/install/gateway.md. Supporting
   remote clusters here is tracked in #68."
   fi
 
