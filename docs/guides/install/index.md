@@ -1,3 +1,7 @@
+---
+description: "Install Axiom, the Kubernetes foreign data wrapper for PostgreSQL: the gateway in your cluster, then the extension by Docker image, .deb, .rpm, tarball or source."
+---
+
 # Install
 
 Two things get installed: the **gateway** in your cluster, and the **extension**

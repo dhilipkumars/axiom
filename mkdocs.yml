@@ -11,7 +11,7 @@
 # them is the most useful thing about this repository, but they are written for
 # contributors, not users, and the nav says so.
 site_name: Axiom
-site_description: Query and change Kubernetes with SQL, through a Postgres foreign data wrapper.
+site_description: Axiom, a Kubernetes foreign data wrapper for PostgreSQL. Query and change Kubernetes resources with SQL.
 site_url: https://dhilipkumars.github.io/axiom/
 repo_url: https://github.com/dhilipkumars/axiom
 repo_name: dhilipkumars/axiom

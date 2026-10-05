@@ -1,3 +1,7 @@
+---
+description: "How Axiom, a Kubernetes foreign data wrapper for PostgreSQL, is built: an in-cluster gateway, a Rust extension, gRPC over TLS, and a watch-driven cache."
+---
+
 # Architecture
 
 Postgres never talks to the Kubernetes API server. A **gateway** runs inside

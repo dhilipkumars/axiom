@@ -1,3 +1,7 @@
+---
+description: "Supported PostgreSQL versions (16, 17, 18), Linux distributions and architectures for Axiom, the Kubernetes foreign data wrapper."
+---
+
 # Compatibility
 
 What each release supports, and what CI actually runs. "Expected to work"

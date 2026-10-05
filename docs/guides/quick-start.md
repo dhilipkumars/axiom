@@ -1,3 +1,7 @@
+---
+description: "Run Axiom, the Kubernetes foreign data wrapper for PostgreSQL, on a local kind cluster with one script, and query Kubernetes from SQL in minutes."
+---
+
 # Quick start
 
 One script brings up everything on your machine and runs a first query:

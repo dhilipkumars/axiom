@@ -1,11 +1,18 @@
-# Axiom
+---
+title: "Axiom: A Kubernetes Foreign Data Wrapper (kubernetes_fdw) for PostgreSQL"
+description: "Axiom is a Kubernetes foreign data wrapper for PostgreSQL. Query and change Kubernetes resources, built-in kinds and CRDs, directly from SQL."
+---
+
+# Axiom: a Kubernetes foreign data wrapper for PostgreSQL
 
 **Query and control Kubernetes from plain SQL.**
 
-Axiom is a Postgres extension that makes Kubernetes resources, built-in kinds
-and custom resources alike, look like tables. `SELECT` reads the live cluster.
-`INSERT`, `UPDATE` and `DELETE` are real Kubernetes writes, with conflicts
-surfaced as SQL errors. The Postgres doing the querying can live entirely
+Axiom is a Kubernetes foreign data wrapper for PostgreSQL: an extension that
+makes Kubernetes resources, built-in kinds and custom resources alike, look
+like tables. If you were looking for a `kubernetes_fdw`, this is it.
+
+`SELECT` reads the live cluster. `INSERT`, `UPDATE` and `DELETE` are real
+Kubernetes writes, with conflicts surfaced as SQL errors. The Postgres doing the querying can live entirely
 outside the cluster it queries.
 
 ```sql
@@ -28,7 +35,7 @@ With Axiom they are queries. A Pod is a row, a label selector is a `WHERE`
 clause, and joining what the cluster knows against what your own database
 knows is one statement, because the cluster's tables sit beside yours.
 
-## What it does
+## Query Kubernetes from PostgreSQL
 
 - **Read** any kind the gateway may list, custom resources included, with
   namespace and name filters pushed down to the API server.
@@ -42,7 +49,7 @@ knows is one statement, because the cluster's tables sit beside yours.
 - **Measure.** Usage from metrics-server and events are tables too, and
   `axiom_quantity()` turns `500m` and `128Mi` into numbers you can sum.
 
-## How
+## How the Kubernetes foreign data wrapper works
 
 A small **gateway** runs in the cluster and holds its credentials. The
 **extension** in Postgres talks only to the gateway, over gRPC and TLS, and
@@ -63,7 +70,7 @@ about the seam. A `SELECT` reflects cluster state within watch latency, and an
 `INSERT` is an assertion the cluster will reconcile, not a row committed with
 your transaction.
 
-## Where to start
+## Installation
 
 - **[Quick start](guides/quick-start.md)**: one script brings up a kind
   cluster, the gateway and Postgres with Axiom, and runs a first query.

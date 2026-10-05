@@ -1,6 +1,6 @@
 # Axiom
 
-**Query and control Kubernetes from plain SQL.**
+**A Kubernetes foreign data wrapper for PostgreSQL. Query and control Kubernetes from plain SQL.**
 
 [![CI](https://github.com/dhilipkumars/axiom/actions/workflows/ci.yml/badge.svg)](https://github.com/dhilipkumars/axiom/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/dhilipkumars/axiom?label=release)](https://github.com/dhilipkumars/axiom/releases/latest)

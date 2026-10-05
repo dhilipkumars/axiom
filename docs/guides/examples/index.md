@@ -1,3 +1,7 @@
+---
+description: "SQL examples for Kubernetes with Axiom: crash-looping pods, stuck rollouts, failing pods joined to your own data, and fixing them in one statement."
+---
+
 # Examples
 
 Questions `kubectl` cannot answer in one command, answered in one query.
