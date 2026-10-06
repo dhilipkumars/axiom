@@ -24,16 +24,24 @@ outside the cluster it is querying.
 
 ## Why "Axiom"
 
-Kubernetes objects are axioms: facts the cluster takes as given and works to
-make true. Postgres is the opposite discipline, a consistent snapshot and a
-commit that either happened or did not. Axiom bridges the two and is explicit
-about the seam: a `SELECT` reflects the cluster within watch latency, and an
-`INSERT` is an assertion the cluster will reconcile.
+Kubernetes is declarative. You do not instruct it to start a container; you
+assert that one should be running, and controllers reconcile reality toward
+that assertion. Its objects are axioms — facts the system takes as given and
+works to make true — and what you read back is eventually consistent,
+converging on what was asserted rather than reflecting it the instant you
+write it.
+
+Postgres is the opposite discipline: ACID, a consistent snapshot per
+transaction, a commit that either happened or did not.
+
+Axiom is the extension that bridges those two consistency models. It brings the
+declarative, eventually-consistent view into a relational one, and is explicit
+about where the seam falls: a `SELECT` reflects cluster state within watch
+latency, and an `INSERT` is an assertion the cluster will reconcile, not a row
+committed with your transaction. SQL over the cluster's own facts, without
+either system pretending to be the other.
 
 ## Questions that need a query language
-
-Each output below is from a CI run against a small `shop` namespace with a few
-things wrong in it.
 
 ### Which pods keep restarting?
 
