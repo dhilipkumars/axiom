@@ -77,7 +77,12 @@ SELECT * FROM lab.results;
 ```
 
 ```
-<!-- output:lab-results -->
+      run       | cluster |         server_version          | cpu_limit | clients | state | tps  | latency_ms | pg_cpu_avg | tps_per_core | pg_cpu_peak | pg_memory_peak | samples | pgbench_cpu_avg | error
+----------------+---------+---------------------------------+-----------+---------+-------+------+------------+------------+--------------+-------------+----------------+---------+-----------------+-------
+ pg16-8-clients | pg16    | 16.15 (Debian 16.15-1.pgdg11+2) | 2         |       8 | done  | 2292 |      3.491 |       1.96 |         1167 |        1.98 | 155 MB         |       5 |            0.75 |
+ pg17-8-clients | pg17    | 17.11 (Debian 17.11-1.pgdg11+2) | 2         |       8 | done  | 2300 |      3.478 |       1.96 |         1174 |        1.97 | 156 MB         |       5 |            0.77 |
+ pg18-8-clients | pg18    | 18.4 (Debian 18.4-1.pgdg11+1)   | 2         |       8 | done  | 2249 |      3.557 |       1.96 |         1145 |        1.97 | 196 MB         |       5 |            0.73 |
+(3 rows)
 ```
 
 **→ [The regression lab](https://dhilipkumars.github.io/axiom/guides/examples/regression-lab/)**
