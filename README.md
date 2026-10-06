@@ -24,163 +24,104 @@ outside the cluster it is querying.
 
 ## Why "Axiom"
 
-Kubernetes is declarative. You do not instruct it to start a container; you
-assert that one should be running, and controllers reconcile reality toward
-that assertion. Its objects are axioms — facts the system takes as given and
-works to make true — and what you read back is eventually consistent,
-converging on what was asserted rather than reflecting it the instant you
-write it.
-
-Postgres is the opposite discipline: ACID, a consistent snapshot per
-transaction, a commit that either happened or did not.
-
-Axiom is the extension that bridges those two consistency models. It brings the
-declarative, eventually-consistent view into a relational one, and is explicit
-about where the seam falls: a `SELECT` reflects cluster state within watch
-latency, and an `INSERT` is an assertion the cluster will reconcile, not a row
-committed with your transaction. SQL over the cluster's own facts, without
-either system pretending to be the other.
+Kubernetes objects are axioms: facts the cluster takes as given and works to
+make true. Postgres is the opposite discipline, a consistent snapshot and a
+commit that either happened or did not. Axiom bridges the two and is explicit
+about the seam: a `SELECT` reflects the cluster within watch latency, and an
+`INSERT` is an assertion the cluster will reconcile.
 
 ## Questions that need a query language
 
-*More, including creating and scaling a CloudNativePG cluster from SQL, in
-[Examples](https://dhilipkumars.github.io/axiom/guides/examples/). What you can
-query is bounded by the gateway's RBAC. The shipped role reads broadly and never
-reads Secrets; writes are granted per resource.*
+Each output below is from a CI run against a small `shop` namespace with a few
+things wrong in it.
 
-*Tables are named for their API group — `core_pods`, `apps_deployments`,
-`postgresql_cnpg_io_clusters` — so a name never changes because something else
-was installed in the cluster. If you would rather type `pods`,
-`SELECT * FROM axiom_create_short_names('k8s')` creates short names as views.
-[Table names](https://dhilipkumars.github.io/axiom/guides/initialize/#3-import-the-clusters-tables)
-has the rules.*
+### Which pods keep restarting?
 
-**Join across kinds.** Which pods are running on nodes under memory pressure?
+`CrashLoopBackOff` is not a pod phase, and the restart count lives on each
+container, a nested field `kubectl` cannot filter on.
 
 ```sql
-SELECT p.namespace, p.name, n.name AS node
-FROM k8s.core_pods p
-JOIN k8s.core_nodes n ON n.name = p.node
-WHERE n.status->'conditions' @> '[{"type":"MemoryPressure","status":"True"}]';
+SELECT namespace, name AS pod, phase, c->>'name' AS container,
+       (c->>'restartCount')::int AS restarts,
+       coalesce(c->'state'->'waiting'->>'reason',
+                c->'lastState'->'terminated'->>'reason') AS why
+  FROM k8s.core_pods,
+       jsonb_array_elements(status->'containerStatuses') c
+ WHERE (c->>'restartCount')::int > 0
+ ORDER BY restarts DESC;
 ```
 
-**Aggregate.** Which namespaces are running the most non-Running pods, and why?
-
-```sql
-SELECT namespace, phase, count(*)
-FROM k8s.core_pods
-WHERE phase <> 'Running'
-GROUP BY namespace, phase
-ORDER BY count(*) DESC;
+```
+ namespace |       pod       |  phase  | container | restarts |        why        
+-----------+-----------------+---------+-----------+----------+-------------------
+ shop      | checkout-worker | Running | worker    |        3 | RunContainerError
+(1 row)
 ```
 
-**Filter on anything, not just labels.** `kubectl` gives you label selectors and
-a handful of field selectors. SQL gives you the whole object:
+### Which rollouts are stuck, and why?
+
+Four kinds in one statement: Deployment, ReplicaSet, Pod, and the event that
+explains it.
 
 ```sql
--- deployments that never finished rolling out
-SELECT namespace, name, replicas, ready_replicas
-FROM k8s.apps_deployments
-WHERE coalesce(ready_replicas, 0) < replicas;
+SELECT DISTINCT ON (d.namespace, d.name, p.name)
+       d.namespace, d.name AS deployment,
+       coalesce(d.ready_replicas, 0) || '/' || d.replicas AS ready,
+       p.name AS pod, e.message AS why
+  FROM k8s.apps_deployments d
+  JOIN k8s.apps_replicasets r ON r.namespace = d.namespace
+                             AND r.metadata->'ownerReferences'->0->>'name' = d.name
+  JOIN k8s.core_pods p ON p.namespace = r.namespace
+                      AND p.metadata->'ownerReferences'->0->>'name' = r.name
+  LEFT JOIN k8s.core_events e ON e.namespace = p.namespace
+                             AND e.involved_object->>'kind' = 'Pod'
+                             AND e.involved_object->>'name' = p.name
+                             AND e.type = 'Warning'
+ WHERE coalesce(d.ready_replicas, 0) < d.replicas
+   AND p.phase <> 'Running'
+ ORDER BY d.namespace, d.name, p.name,
+          coalesce(e.last_timestamp, e.event_time, e.creation_timestamp) DESC NULLS LAST;
 ```
 
-Columns take the type the kind's schema gives them — `replicas` is a `bigint`,
-`creation_timestamp` a `timestamptz`, an event's `type` a `text` — so they
-compare and sort with no cast, and a missing field is `NULL` rather than `0`.
-Anything no column promotes is still reachable through `raw`, the whole object
-as `jsonb`:
-
-```sql
-SELECT namespace, name
-FROM k8s.apps_deployments
-WHERE raw->'spec'->'template'->'spec'->'containers' @> '[{"imagePullPolicy":"Always"}]';
+```
+ namespace | deployment | ready |            pod            |                                                                            why                                                                             
+-----------+------------+-------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------
+ shop      | checkout   | 0/1   | checkout-6b889d49cf-jt7bz | 0/1 nodes are available: 1 Insufficient cpu. no new claims to deallocate, preemption: 0/1 nodes are available: 1 Preemption is not helpful for scheduling.
+(1 row)
 ```
 
-**Write.** This is the part most SQL-over-Kubernetes tools do not have — these
-are real API calls, not a local cache being edited:
+### Which customers are affected right now?
+
+Axiom runs in your application's Postgres, so the cluster joins your own
+tables, with no export in between.
 
 ```sql
-UPDATE k8s.core_configmaps
-   SET data = data || '{"LOG_LEVEL":"debug"}'
- WHERE namespace = 'payments' AND name = 'api';
+CREATE TABLE tenants (namespace text PRIMARY KEY, customer text, plan text);
+INSERT INTO tenants VALUES ('shop', 'Acme Corp', 'enterprise');
 
-DELETE FROM k8s.core_configmaps WHERE namespace = 'staging' AND name = 'stale-flags';
-```
-
-Pods are deliberately read-only at the SQL layer, whatever RBAC allows — a
-`DELETE` with a `WHERE` clause is too easy to get wrong and too hard to undo.
-
-**Find it and fix it in one statement.** Which deployments use less than a
-fifth of the memory they reserve? This reads live usage from metrics-server,
-joins it to each pod's spec, follows ownership from pod to ReplicaSet to
-Deployment, and writes the answer back onto the Deployment as an annotation. A
-tool that can only read would stop at the list:
-
-```sql
-WITH used AS (
-  SELECT m.namespace, m.name AS pod, sum(axiom_quantity(c->'usage'->>'memory')) AS bytes
-    FROM k8s.metrics_k8s_io_pods m, jsonb_array_elements(m.containers) c
-   GROUP BY 1, 2),
-requested AS (
-  SELECT p.namespace, p.name AS pod,
-         r.metadata->'ownerReferences'->0->>'name' AS deployment,
-         sum(axiom_quantity(c->'resources'->'requests'->>'memory')) AS bytes
-    FROM k8s.core_pods p
-    JOIN k8s.apps_replicasets r
-      ON r.namespace = p.namespace AND r.name = p.metadata->'ownerReferences'->0->>'name',
-         jsonb_array_elements(p.spec->'containers') c
-   GROUP BY 1, 2, 3),
-ratio AS (
-  SELECT q.namespace, q.deployment, round(100 * sum(u.bytes) / sum(q.bytes)) AS pct
-    FROM requested q JOIN used u USING (namespace, pod)
-   GROUP BY 1, 2
-  HAVING sum(q.bytes) > 0)
-UPDATE k8s.apps_deployments d
-   SET annotations = coalesce(d.annotations, '{}')
-                     || jsonb_build_object('axiom/memory-used-pct', r.pct::text)
-  FROM ratio r
- WHERE d.namespace = r.namespace AND d.name = r.deployment AND r.pct < 20
-RETURNING d.namespace, d.name, r.pct;
-```
-
-`axiom_quantity()` is what makes that arithmetic possible. Kubernetes reports
-`49903n` of CPU and `14488Ki` of memory as strings, and it turns them into exact
-numbers. Annotating a Deployment needs `update` on `deployments` in the
-gateway's ClusterRole, which the shipped one deliberately does not grant.
-
-**Join the cluster to your own data.** Axiom runs inside your application's
-Postgres, so live cluster state joins to your business tables directly, with no
-export and no copy going stale. Which customers are hit by a failing pod right
-now?
-
-```sql
-SELECT t.customer, t.plan, p.name AS pod, e.reason AS reason
+SELECT DISTINCT ON (p.namespace, p.name)
+       t.customer, t.plan, p.name AS pod, e.reason
   FROM tenants t
   JOIN k8s.core_pods p ON p.namespace = t.namespace
   JOIN k8s.core_events e ON e.namespace = p.namespace
+                        AND e.involved_object->>'kind' = 'Pod'
                         AND e.involved_object->>'name' = p.name
  WHERE e.type = 'Warning'
-   AND e.involved_object->>'kind' = 'Pod';
+ ORDER BY p.namespace, p.name,
+          coalesce(e.last_timestamp, e.event_time, e.creation_timestamp) DESC;
 ```
 
-**Find crash-looping pods.** `CrashLoopBackOff` is a container waiting reason,
-not a pod phase — so it lives in a nested field `kubectl` cannot filter on:
-
-```sql
-SELECT namespace, name
-FROM k8s.core_pods
-WHERE raw->'status'->'containerStatuses' @>
-      '[{"state":{"waiting":{"reason":"CrashLoopBackOff"}}}]';
+```
+ customer  |    plan    |            pod            |      reason      
+-----------+------------+---------------------------+------------------
+ Acme Corp | enterprise | checkout-6b889d49cf-jt7bz | FailedScheduling
+ Acme Corp | enterprise | checkout-worker           | BackOff
+ Acme Corp | enterprise | report                    | Failed
+(3 rows)
 ```
 
-**Ask one question across many clusters**, because each cluster is its own
-server and its own schema:
-
-```sql
-SELECT 'prod' AS cluster, namespace, name FROM prod.core_pods  WHERE phase = 'Failed'
-UNION ALL
-SELECT 'stage',           namespace, name FROM stage.core_pods WHERE phase = 'Failed';
-```
+More, including writes, a capacity review and an operator written in SQL, in
+**[Examples](https://dhilipkumars.github.io/axiom/guides/examples/)**.
 
 ## Getting started
 
@@ -207,45 +148,16 @@ Axiom must be loaded through `shared_preload_libraries`; a package cannot do
 that for you. [Compatibility](https://dhilipkumars.github.io/axiom/compatibility/)
 lists the tested versions, distributions and architectures.
 
-## Design
-
-- **Watch-driven, not polling.** A standing watch keeps a shared-memory cache
-  live, so a `SELECT` reflects cluster state within watch latency and costs the
-  API server nothing. Tables opt in per kind with `cache_mode 'watch'`.
-- **Postgres can live outside the cluster.** It always dials out, so it never
-  needs inbound connectivity, a kubeconfig, or credentials of its own.
-- **Multi-cluster by design.** One server per cluster, one schema per server,
-  joins across them; the cache has been keyed by cluster since the first
-  release. Isolation between two live clusters is not yet covered by a test —
-  see the [roadmap](ROADMAP.md).
-- **Bounded by RBAC, not by configuration.** The gateway offers exactly the
-  kinds its ServiceAccount may list. Discovery finds CRDs with no code change.
-- **Writes are real.** `INSERT`/`UPDATE`/`DELETE` become create/update/delete
-  against the API server, and a conflicting write raises a SQL error rather
-  than silently winning.
-
 ## How it works
 
-No Kubernetes client code ever runs inside a Postgres backend. A small **Go
-gateway** runs in each cluster, holds that cluster's credentials, and exposes a
-gRPC API over TLS. The **pgrx extension** talks only to gateways: a background
-worker keeps one persistent stream per cluster and maintains a shared-memory
-cache, while per-connection backends serve scans from that cache or issue short
-unary RPCs.
+A small Go **gateway** runs in each cluster and holds its credentials. The
+**extension** in Postgres talks only to the gateway, over gRPC and TLS, and
+keeps a watch-driven cache in shared memory. Postgres can live anywhere, and
+what SQL can reach is exactly what the gateway's RBAC allows.
 
-```
- Kubernetes cluster                                Postgres host
- ┌──────────────────────────┐   gRPC over TLS   ┌─────────────────────────────────┐
- │ gateway (Go, in-cluster) │◄─────────────────►│ axiom (pgrx extension)          │
- │  client-go informers,    │                   │  bgworker: tokio + tonic client │
- │  Get/List/Create/Update/ │                   │  shared-memory cache (dshash)   │
- │  Delete/Subscribe        │                   │  FDW callbacks per backend      │
- └──────────────────────────┘                   └─────────────────────────────────┘
-```
-
-The reasoning behind that split — why a gateway rather than a client in the
-backend, the consistency tiers, the schema mapping — is in
-[docs/DESIGN.md](docs/DESIGN.md).
+**→ [Architecture](https://dhilipkumars.github.io/axiom/architecture/)** has the design, and
+**[How tables work](https://dhilipkumars.github.io/axiom/guides/examples/how-tables-work/)** what it means for a
+query.
 
 ## Working on Axiom
 
