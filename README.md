@@ -69,32 +69,19 @@ SELECT namespace, name AS pod, phase, c->>'name' AS container,
 ### Did your patch regress?
 
 Postgres 16, 17 and 18 clusters created by CloudNativePG from a table, a
-`pgbench` Job against each, and every result read back from its Pod, all from
-SQL. The [regression lab](https://dhilipkumars.github.io/axiom/guides/examples/regression-lab/)
-also shows the CPU and memory each Postgres used while it ran.
+`pgbench` Job against each, one at a time, and each run's throughput beside the
+CPU and memory its Postgres used while it ran, all from SQL.
 
 ```sql
-SELECT p.labels->>'axiom-lab/run'                        AS run,
-       split_part(m.r->>'server_version', ' ', 1)        AS postgres,
-       round((m.r->>'tps')::numeric)                     AS tps,
-       (m.r->>'latency_ms')::numeric                     AS latency_ms
-  FROM lab.pods p,
-       jsonb_array_elements(p.status->'containerStatuses') cs,
-       LATERAL (SELECT (cs->'state'->'terminated'->>'message')::jsonb AS r) m
- WHERE p.namespace = 'regression-lab'
-   AND cs->>'name' = 'pgbench'
-   AND cs->'state'->'terminated'->>'reason' = 'Completed'
- ORDER BY run;
+SELECT * FROM lab.results;
 ```
 
 ```
-      run       | postgres | tps  | latency_ms 
-----------------+----------+------+------------
- pg16-8-clients | 16.15    | 5132 |      1.559
- pg17-8-clients | 17.11    | 5040 |      1.587
- pg18-8-clients | 18.4     | 4937 |      1.621
-(3 rows)
+<!-- output:lab-results -->
 ```
+
+**→ [The regression lab](https://dhilipkumars.github.io/axiom/guides/examples/regression-lab/)**
+explains the `lab.results` view, how to read each column, and how to run it.
 
 ### Which customers are affected right now?
 
