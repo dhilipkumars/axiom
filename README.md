@@ -88,7 +88,7 @@ SELECT p.labels->>'axiom-lab/run'                        AS run,
 ```
 
 ```
-       run       | postgres | tps  | latency_ms 
+      run       | postgres | tps  | latency_ms 
 ----------------+----------+------+------------
  pg16-8-clients | 16.15    | 5132 |      1.559
  pg17-8-clients | 17.11    | 5040 |      1.587
