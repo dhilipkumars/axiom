@@ -3,7 +3,7 @@
 # against a kind cluster with CloudNativePG and metrics-server. Three
 # CloudNativePG clusters, Postgres 16, 17 and 18, are created from SQL; a
 # pgbench Job runs against each, one at a time; their resource use is sampled
-# while the benchmark runs; and results.sql joins the two.
+# while the benchmark runs; and the lab.results view (results.sql) joins the two.
 #
 # Not in ALL_GATES: it installs two operators, pulls three Postgres images and
 # runs minutes of benchmarks. The example-tests workflow
@@ -78,11 +78,11 @@ until [[ "$(psql_axiom "SELECT count(DISTINCT cluster) FROM lab.usage WHERE name
   (( SECONDS < deadline )) || fail "metrics-server never reported all three clusters: $(psql_axiom "SELECT cluster, count(*) FROM lab.usage GROUP BY 1;")"
   sleep 5
 done
-# results.sql's columns, as the reads below take them:
+# lab.results's columns, as the reads below take them:
 #   1 run  2 cluster  3 server_version  4 cpu_limit  5 clients  6 state  7 tps
 #   8 latency_ms  9 pg_cpu_avg  10 tps_per_core  11 pg_cpu_peak
 #   12 pg_memory_peak  13 samples  14 pgbench_cpu_avg  15 error
-results() { psql_file "$EX/regression-lab/results.sql" -v namespace="$LAB_NS"; }
+results() { psql_file "$EX/regression-lab/results.sql"; }
 unfinished() {
   kubectl_e2e -n "$LAB_NS" get jobs -o jsonpath='{range .items[*]}{.status.succeeded}{.status.failed}{"\n"}{end}' \
     | grep -c '^$' || true
@@ -111,7 +111,9 @@ psql_file "$EX/regression-lab/launch.sql" -v namespace="$LAB_NS" >/dev/null
 sleep 20
 psql_file "$EX/regression-lab/sample.sql" -v namespace="$LAB_NS" >/dev/null 2>&1 || true
 kill "$SAMPLER_PID" 2>/dev/null || true; SAMPLER_PID=""
-table="$(psql_table "$EX/regression-lab/results.sql" -v namespace="$LAB_NS")"
+# What both READMEs quote: `SELECT * FROM lab.results;`, which is results.sql.
+echo "=== SELECT * FROM lab.results;"
+table="$(psql_table "$EX/regression-lab/results.sql")"
 echo "$table"
 [[ -n "${E2E_LAB_REPORT:-}" ]] && printf '%s\n' "$table" > "$E2E_LAB_REPORT"
 

@@ -16,19 +16,19 @@ version, each measured by the same `pgbench` 18 client, one at a time.
 ```
       run       | cluster |         server_version          | cpu_limit | clients | state | tps  | latency_ms | pg_cpu_avg | tps_per_core | pg_cpu_peak | pg_memory_peak | samples | pgbench_cpu_avg | error
 ----------------+---------+---------------------------------+-----------+---------+-------+------+------------+------------+--------------+-------------+----------------+---------+-----------------+-------
- pg16-8-clients | pg16    | 16.15 (Debian 16.15-1.pgdg11+2) | 2         |       8 | done  | 2296 |      3.484 |       1.96 |         1173 |        1.96 | 173 MB         |       4 |            0.77 |
- pg17-8-clients | pg17    | 17.11 (Debian 17.11-1.pgdg11+2) | 2         |       8 | done  | 2316 |      3.454 |       1.96 |         1180 |        1.97 | 158 MB         |       6 |            0.77 |
- pg18-8-clients | pg18    | 18.4 (Debian 18.4-1.pgdg11+1)   | 2         |       8 | done  | 2247 |      3.561 |       1.96 |         1145 |        1.98 | 164 MB         |       5 |            0.74 |
+ pg16-8-clients | pg16    | 16.15 (Debian 16.15-1.pgdg11+2) | 2         |       8 | done  | 2292 |      3.491 |       1.96 |         1167 |        1.98 | 155 MB         |       5 |            0.75 |
+ pg17-8-clients | pg17    | 17.11 (Debian 17.11-1.pgdg11+2) | 2         |       8 | done  | 2300 |      3.478 |       1.96 |         1174 |        1.97 | 156 MB         |       5 |            0.77 |
+ pg18-8-clients | pg18    | 18.4 (Debian 18.4-1.pgdg11+1)   | 2         |       8 | done  | 2249 |      3.557 |       1.96 |         1145 |        1.97 | 196 MB         |       5 |            0.73 |
 (3 rows)
 ```
 
-That is `results.sql` from the example-tests workflow's run on kind, with
-`lab-example.sql`. How to read it:
+That is `SELECT * FROM lab.results;` from the example-tests workflow's run on
+kind, with `lab-example.sql`. How to read it:
 
 - **Every server was CPU-bound.** Each Postgres used 1.96 of its 2 CPUs for
   the whole benchmark. So the comparison is throughput per unit of CPU, and
   `tps_per_core` shows it directly.
-- **The three majors are within about 3% of each other,** at 1,145 to 1,180
+- **The three majors are within about 3% of each other,** at 1,145 to 1,174
   TPS per core. At this scale, with 90-second runs, each run once, that is no
   difference: nothing here says any of them regressed.
 - **Running them one at a time is what made them comparable.** When the same
@@ -51,8 +51,9 @@ Every step is SQL through Axiom:
   for each row of `lab.clusters`.
 - **Benchmarks.** `launch.sql` writes a `Job` for the next queued run.
 - **Usage.** `sample.sql` reads `metrics.k8s.io`.
-- **Results.** `results.sql` reads each run's result back from its Pod's
-  termination message, and joins it to the samples.
+- **Results.** The `lab.results` view, which `setup.sql` creates, reads each
+  run's result back from its Pod's termination message and joins it to the
+  samples. `results.sql` is `SELECT * FROM lab.results;`.
 
 Nothing is collected, exported or scraped outside Postgres.
 
@@ -91,7 +92,7 @@ $ psql -v namespace=regression-lab             $ psql -v namespace=regression-la
 ```
 
 ```sh
-psql -v namespace=regression-lab -f results.sql   # again, until every run is done
+psql -c "SELECT * FROM lab.results"   # again, until every run is done
 ```
 
 `\watch` repeats the last statement until you interrupt it; it needs an
@@ -107,7 +108,7 @@ one starts as soon as the last one finishes. Queue more with an `INSERT` into
 
 - **The benchmark window.** Each Job records the UTC times immediately before
   and after the timed `pgbench -T` run, and reports them with its result.
-  `results.sql` counts only the samples whose whole window falls between them.
+  `lab.results` counts only the samples whose whole window falls between them.
   Waiting for the cluster and building the pgbench tables don't dilute the
   average. `samples` shows how many samples that left.
 - **Only real samples.** metrics-server reports a Pod about every 15 seconds,
@@ -145,7 +146,7 @@ The tables are the experiment. Change the rows, then run `clusters.sql` and
   time: three 90-second runs take about six minutes.
 - **A run that never finishes holds up the queue.** A run whose Pod can't
   start, such as one naming a cluster that doesn't exist, stays unfinished,
-  and `results.sql` shows it as `waiting` with the reason. The queue waits for
+  and `lab.results` shows it as `waiting` with the reason. The queue waits for
   its Job, not its row, so clear the Job:
 
   ```sql
