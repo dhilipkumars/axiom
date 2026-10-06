@@ -115,6 +115,13 @@ table="$(psql_table "$EX/regression-lab/results.sql" -v namespace="$LAB_NS")"
 echo "$table"
 [[ -n "${E2E_LAB_REPORT:-}" ]] && printf '%s\n' "$table" > "$E2E_LAB_REPORT"
 
+# The short version the top-level README quotes: just the benchmark numbers.
+echo
+echo "=== examples/regression-lab/summary.sql"
+psql_table "$EX/regression-lab/summary.sql" || fail "summary.sql failed"
+[[ "$(psql_file "$EX/regression-lab/summary.sql" | wc -l | tr -d ' ')" == "$(wc -w <<<"$RUNS" | tr -d ' ')" ]] \
+  || fail "summary.sql does not show one row per run"
+
 got="$(results)"
 for run in $RUNS; do
   IFS='|' read -r _ _ version _ _ state tps latency _ _ peak _ samples _ error <<<"$(grep "^$run|" <<<"$got")"

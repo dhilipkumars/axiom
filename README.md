@@ -66,36 +66,29 @@ SELECT namespace, name AS pod, phase, c->>'name' AS container,
 (1 row)
 ```
 
-### Which rollouts are stuck, and why?
+### Did your patch regress?
 
-Four kinds in one statement: Deployment, ReplicaSet, Pod, and the event that
-explains it.
+Postgres 16, 17 and 18 clusters created by CloudNativePG from a table, a
+`pgbench` Job against each, and every result read back from its Pod, all from
+SQL. The [regression lab](https://dhilipkumars.github.io/axiom/guides/examples/regression-lab/)
+also shows the CPU and memory each Postgres used while it ran.
 
 ```sql
-SELECT DISTINCT ON (d.namespace, d.name, p.name)
-       d.namespace, d.name AS deployment,
-       coalesce(d.ready_replicas, 0) || '/' || d.replicas AS ready,
-       p.name AS pod, e.message AS why
-  FROM k8s.apps_deployments d
-  JOIN k8s.apps_replicasets r ON r.namespace = d.namespace
-                             AND r.metadata->'ownerReferences'->0->>'name' = d.name
-  JOIN k8s.core_pods p ON p.namespace = r.namespace
-                      AND p.metadata->'ownerReferences'->0->>'name' = r.name
-  LEFT JOIN k8s.core_events e ON e.namespace = p.namespace
-                             AND e.involved_object->>'kind' = 'Pod'
-                             AND e.involved_object->>'name' = p.name
-                             AND e.type = 'Warning'
- WHERE coalesce(d.ready_replicas, 0) < d.replicas
-   AND p.phase <> 'Running'
- ORDER BY d.namespace, d.name, p.name,
-          coalesce(e.last_timestamp, e.event_time, e.creation_timestamp) DESC NULLS LAST;
+SELECT p.labels->>'axiom-lab/run'                        AS run,
+       split_part(m.r->>'server_version', ' ', 1)        AS postgres,
+       round((m.r->>'tps')::numeric)                     AS tps,
+       (m.r->>'latency_ms')::numeric                     AS latency_ms
+  FROM lab.pods p,
+       jsonb_array_elements(p.status->'containerStatuses') cs,
+       LATERAL (SELECT (cs->'state'->'terminated'->>'message')::jsonb AS r) m
+ WHERE p.namespace = 'regression-lab'
+   AND cs->>'name' = 'pgbench'
+   AND cs->'state'->'terminated'->>'reason' = 'Completed'
+ ORDER BY run;
 ```
 
 ```
- namespace | deployment | ready |            pod            |                                                                            why                                                                             
------------+------------+-------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------
- shop      | checkout   | 0/1   | checkout-6b889d49cf-jt7bz | 0/1 nodes are available: 1 Insufficient cpu. no new claims to deallocate, preemption: 0/1 nodes are available: 1 Preemption is not helpful for scheduling.
-(1 row)
+<!-- output:summary -->
 ```
 
 ### Which customers are affected right now?

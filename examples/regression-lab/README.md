@@ -52,7 +52,8 @@ Every step is SQL through Axiom:
 - **Benchmarks.** `launch.sql` writes a `Job` for the next queued run.
 - **Usage.** `sample.sql` reads `metrics.k8s.io`.
 - **Results.** `results.sql` reads each run's result back from its Pod's
-  termination message, and joins it to the samples.
+  termination message, and joins it to the samples. `summary.sql` is the
+  short version: just each run's version, TPS and latency.
 
 Nothing is collected, exported or scraped outside Postgres.
 
