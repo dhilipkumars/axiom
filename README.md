@@ -88,7 +88,12 @@ SELECT p.labels->>'axiom-lab/run'                        AS run,
 ```
 
 ```
-<!-- output:summary -->
+       run       | postgres | tps  | latency_ms 
+----------------+----------+------+------------
+ pg16-8-clients | 16.15    | 5132 |      1.559
+ pg17-8-clients | 17.11    | 5040 |      1.587
+ pg18-8-clients | 18.4     | 4937 |      1.621
+(3 rows)
 ```
 
 ### Which customers are affected right now?
