@@ -11,7 +11,21 @@
   {% endif %}
 {% endblock %}
 
+{#- The dev track (mkdocs.dev.yml): say on every page that this is not what
+    the latest release does, and point at what is. -#}
+{% block announce %}
+  {% if config.extra.dev %}
+    You are reading the docs for <strong>unreleased</strong> work on main.
+    <a href="{{ config.site_url | replace('/dev/', '/') }}">The docs for the latest release</a>
+    describe what you can install.
+  {% endif %}
+{% endblock %}
+
 {% block extrahead %}
+  {%- if config.extra.dev %}
+  {#- Search should land on the released docs, not on these. -#}
+  <meta name="robots" content="noindex">
+  {%- endif %}
   {#- Google Search Console ownership proof for dhilipkumars.github.io/axiom.
       Public by design; removing it un-verifies the property. -#}
   <meta name="google-site-verification" content="hK9HXln5ub6pqHhCkHl3f0b5r-wbxnYitdoetJbMC5U" />

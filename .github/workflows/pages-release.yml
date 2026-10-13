@@ -1,0 +1,33 @@
+# A docs change on a release branch -- a backport -- republishes the site.
+#
+# The site is built and deployed by pages.yml on main, because only main may
+# deploy to the github-pages environment. This asks for that run rather than
+# deploying itself; the run on main then builds the released docs from this
+# branch and the dev docs from main (#114).
+#
+# It lives on main so that every release branch cut from main carries it. On
+# main itself it never fires: it only watches release branches.
+name: pages (release branch)
+
+on:
+  push:
+    branches: ["release-*"]
+    paths:
+      - docs/**
+      - examples/*/README.md
+      - docs-overrides/**
+      - mkdocs.yml
+
+permissions:
+  actions: write
+
+jobs:
+  republish:
+    runs-on: ubuntu-latest
+    steps:
+      # A workflow_dispatch from GITHUB_TOKEN is one of the events that does
+      # start another workflow.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run pages.yml --ref main

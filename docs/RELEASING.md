@@ -100,6 +100,8 @@ Commit that, open it as a PR like anything else, and merge it. Then:
 
 ```sh
 git tag vX.Y.Z && git push origin vX.Y.Z
+# a new minor only: its release branch, before the release is published
+git push origin "vX.Y.Z^{commit}:refs/heads/release-X.Y"
 ```
 
 Then **publish a GitHub release from the tag**. That is the step that matters:
@@ -117,6 +119,28 @@ do not. `scripts/version check vX.Y.Z` compares the tag against
 `extension/Cargo.toml` — it does not read `CHANGELOG.md`, so nothing mechanical
 catches a changelog heading that disagrees. The release workflow calls it before
 publishing anything.
+
+## The docs follow the release
+
+The site has two trees. `/axiom/` is the **released docs**, built from the
+latest release's `release-X.Y` branch; `/axiom/dev/` is `main`'s docs, with an
+"unreleased" banner and kept out of search. `pages.yml` builds both on every
+publish, because a Pages deploy replaces the whole site.
+
+- **A new minor cuts its branch from its tag**, as above, before the release
+  is published. Publishing the release makes it the latest, and from then on
+  `pages.yml` builds the released docs from `release-X.Y`; until the branch
+  exists that build fails rather than publish docs that are not the release's.
+  A patch release lives on its minor's branch and cuts nothing.
+- **The released docs change only by backport.** A docs fix that matters to
+  people running the release lands on `main` first, then as a cherry-pick PR
+  into `release-X.Y`. Merging that republishes the site: `pages-release.yml`
+  asks `pages.yml` on `main` to run, since only `main` may deploy to the
+  `github-pages` environment.
+- **Everything else waits for the next release.** A feature merged to `main`
+  is documented under `/dev/` until its release makes it the latest.
+- **A patch release is cut from the release branch**, so a fix backported for
+  it ships with the docs backported beside it.
 
 ## Rehearsing with a release candidate
 

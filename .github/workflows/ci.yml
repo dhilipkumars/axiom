@@ -47,6 +47,9 @@ jobs:
       - run: pip install mkdocs-material==9.5.49 mkdocs-redirects==1.2.2
       # --strict comes from mkdocs.yml, so a warning is a failure.
       - run: mkdocs build --site-dir /tmp/site
+      # The dev track (#114) builds the same pages with mkdocs.dev.yml; a
+      # break there would otherwise surface only when pages.yml publishes.
+      - run: mkdocs build --config-file mkdocs.dev.yml --site-dir /tmp/site-dev
 
   release-plumbing:
     name: changesets + version consistency

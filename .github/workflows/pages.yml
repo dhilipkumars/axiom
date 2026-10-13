@@ -1,9 +1,20 @@
-# Publishes docs/ to GitHub Pages.
+# Publishes the docs site to GitHub Pages, as two trees (#114):
 #
-# Runs only on main, and only when something the site renders has changed. The
-# generated pages are committed to the tree rather than built here, because the
-# anti-drift check in the ci workflow needs them committed to have anything to
-# compare against; this job publishes what is in the tree, it does not
+#   /axiom/       the released docs: the latest release's release-X.Y branch
+#   /axiom/dev/   main's docs, with an "unreleased" banner and noindex
+#
+# The released docs change only when something is merged or backported to the
+# release branch, so a feature merged to main appears under /dev/ until it is
+# released. Every run builds both trees, because a Pages deploy replaces the
+# whole site: publishing one alone would delete the other.
+#
+# Only main may deploy to the github-pages environment, so this runs only on
+# main. A push to a release branch asks for a run here (pages-release.yml)
+# rather than deploying itself.
+#
+# The generated pages are committed to the tree rather than built here, because
+# the anti-drift check in the ci workflow needs them committed to have anything
+# to compare against; this job publishes what is in the tree, it does not
 # regenerate it.
 name: pages
 
@@ -16,6 +27,7 @@ on:
       - examples/*/README.md
       - docs-overrides/**
       - mkdocs.yml
+      - mkdocs.dev.yml
       - .github/workflows/pages.yml
   workflow_dispatch:
 
@@ -34,14 +46,44 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # The released docs are the latest release's branch: v0.2.0 is
+      # release-0.2. A prerelease never counts, and a patch release lives on
+      # the same branch as its minor.
+      - id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="$(gh release list --exclude-pre-releases --exclude-drafts --limit 1 --json tagName -q '.[0].tagName')"
+          [[ "$tag" =~ ^v([0-9]+)\.([0-9]+)\.[0-9]+$ ]] || { echo "latest release '$tag' is not vX.Y.Z" >&2; exit 1; }
+          branch="release-${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+          # Fail rather than fall back to the tag: the tag predates every
+          # backport, so publishing it would quietly revert the released docs.
+          # RELEASING.md cuts the branch before the release is published.
+          git ls-remote --exit-code --heads "https://github.com/$GH_REPO" "$branch" >/dev/null \
+            || { echo "$tag is the latest release but $branch does not exist; cut it from the tag" >&2; exit 1; }
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "released docs: $branch (latest release $tag)"
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.branch }}
+          path: released
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: dev
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install mkdocs-material==9.5.49 mkdocs-redirects==1.2.2
       # --strict, set in mkdocs.yml, turns a broken internal link into a
       # failure. A reference page that moves therefore fails here rather than
-      # publishing a 404.
-      - run: mkdocs build
+      # publishing a 404. Each tree builds from its own checkout, so includes
+      # (docs/snippets/, examples/*/README.md) resolve against its own files.
+      - working-directory: released
+        run: mkdocs build --site-dir ../site
+      - working-directory: dev
+        run: mkdocs build --config-file mkdocs.dev.yml --site-dir ../site/dev
       - uses: actions/upload-pages-artifact@v3
         with: { path: site }
 
