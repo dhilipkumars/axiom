@@ -1,12 +1,14 @@
-# A docs change on a release branch -- a backport -- republishes the site.
+# A docs change on a release branch -- a backport -- republishes the site, and
+# so does publishing a release, which can change which branch is the released
+# docs.
 #
 # The site is built and deployed by pages.yml on main, because only main may
 # deploy to the github-pages environment. This asks for that run rather than
 # deploying itself; the run on main then builds the released docs from this
 # branch and the dev docs from main (#114).
 #
-# It lives on main so that every release branch cut from main carries it. On
-# main itself it never fires: it only watches release branches.
+# It lives on main so that every release branch, and every release's tag,
+# carries it. A push to main never fires it: main publishes through pages.yml.
 name: pages (release branch)
 
 on:
@@ -17,12 +19,17 @@ on:
       - examples/*/README.md
       - docs-overrides/**
       - mkdocs.yml
+  # Runs from the release's tag, which cannot deploy either.
+  release:
+    types: [published]
 
 permissions:
   actions: write
 
 jobs:
   republish:
+    # A prerelease never becomes the released docs.
+    if: github.event_name != 'release' || !github.event.release.prerelease
     runs-on: ubuntu-latest
     steps:
       # A workflow_dispatch from GITHUB_TOKEN is one of the events that does

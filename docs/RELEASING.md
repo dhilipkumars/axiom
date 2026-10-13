@@ -140,7 +140,10 @@ publish, because a Pages deploy replaces the whole site.
 - **Everything else waits for the next release.** A feature merged to `main`
   is documented under `/dev/` until its release makes it the latest.
 - **A patch release is cut from the release branch**, so a fix backported for
-  it ships with the docs backported beside it.
+  it ships with the docs backported beside it. Publishing a release republishes
+  the site. A patch for an older minor, such as 0.2.1 after 0.3.0, is published
+  with "Set as the latest release" unticked (`gh release create --latest=false`),
+  or the released docs would go back to it.
 
 ## Rehearsing with a release candidate
 

@@ -9,8 +9,8 @@
 # whole site: publishing one alone would delete the other.
 #
 # Only main may deploy to the github-pages environment, so this runs only on
-# main. A push to a release branch asks for a run here (pages-release.yml)
-# rather than deploying itself.
+# main. A push to a release branch, and a published release, ask for a run here
+# (pages-release.yml) rather than deploying themselves.
 #
 # The generated pages are committed to the tree rather than built here, because
 # the anti-drift check in the ci workflow needs them committed to have anything
@@ -47,21 +47,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # The released docs are the latest release's branch: v0.2.0 is
-      # release-0.2. A prerelease never counts, and a patch release lives on
-      # the same branch as its minor.
+      # release-0.2, and a patch release lives on its minor's branch. "Latest"
+      # is GitHub's own designation, which never names a prerelease or a draft
+      # and follows the "set as latest" choice when a release is published, so
+      # a v0.2.1 fix shipped after v0.3.0 does not take the site back to 0.2.
       - id: release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          tag="$(gh release list --exclude-pre-releases --exclude-drafts --limit 1 --json tagName -q '.[0].tagName')"
+          tag="$(gh api "repos/$GH_REPO/releases/latest" -q .tag_name)"
           [[ "$tag" =~ ^v([0-9]+)\.([0-9]+)\.[0-9]+$ ]] || { echo "latest release '$tag' is not vX.Y.Z" >&2; exit 1; }
           branch="release-${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
           # Fail rather than fall back to the tag: the tag predates every
           # backport, so publishing it would quietly revert the released docs.
           # RELEASING.md cuts the branch before the release is published.
-          git ls-remote --exit-code --heads "https://github.com/$GH_REPO" "$branch" >/dev/null \
+          gh api "repos/$GH_REPO/branches/$branch" --silent 2>/dev/null \
             || { echo "$tag is the latest release but $branch does not exist; cut it from the tag" >&2; exit 1; }
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
           echo "released docs: $branch (latest release $tag)"
