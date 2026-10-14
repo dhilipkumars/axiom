@@ -38,12 +38,20 @@ func newRecorder(ctx context.Context) *recorder {
 func (r *recorder) Context() context.Context                 { return r.ctx }
 func (r *recorder) Send(ev *axiomv1.SubscribeResponse) error { r.events <- ev; return nil }
 
+// eventWait bounds how long next waits for an event that should arrive. It is
+// generous because it only matters when the stream is broken: a passing test
+// never waits it out. Under -race on a loaded CI runner, encoding the
+// megabyte-sized objects TestSubscribeShrinksALaterPageThatOutgrowsTheFirst
+// streams took longer than the 5 seconds this used to be, between two events
+// that did arrive.
+const eventWait = 30 * time.Second
+
 func (r *recorder) next(t *testing.T) *axiomv1.SubscribeResponse {
 	t.Helper()
 	select {
 	case ev := <-r.events:
 		return ev
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("timed out waiting for a watch event")
 		return nil
 	}
