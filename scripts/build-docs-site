@@ -25,6 +25,7 @@ in search from one release to the next; /X.Y/ and /dev/ carry noindex.
 """
 
 import argparse
+import gzip
 import json
 import os
 import re
@@ -111,9 +112,14 @@ def main():
         build_tree(releases[a.latest], out, "latest", overrides=overrides, dev=False, noindex=False)
     build_tree(main_dir, out, "dev", overrides=overrides, dev=True, noindex=True)
 
-    # What the version picker reads: the newest release first, then dev.
+    # What the version picker reads: the newest release first, then dev. The
+    # picker links to ../<version>/ and ignores aliases, so the newest release
+    # is listed as "latest" -- the indexed tree -- with its number as the
+    # alias, which still lets a reader who lands on /X.Y/ be recognised as
+    # reading the latest release.
     versions = [
-        {"version": v, "title": v, "aliases": ["latest"] if v == a.latest else []}
+        {"version": "latest", "title": f"{v} (latest)", "aliases": [v]} if v == a.latest
+        else {"version": v, "title": v, "aliases": []}
         for v in sorted(releases, key=version_key, reverse=True)
     ]
     versions.append({"version": "dev", "title": "dev (unreleased)", "aliases": []})
@@ -131,9 +137,11 @@ def main():
         for loc in locs:
             f.write(f"  <url><loc>{loc}</loc></url>\n")
         f.write("</urlset>\n")
-    gz = os.path.join(out, "sitemap.xml.gz")
-    if os.path.exists(gz):
-        os.remove(gz)
+    # The theme writes a gzipped copy too, which now describes only the landing
+    # page; replace it with the merged one.
+    with open(os.path.join(out, "sitemap.xml"), "rb") as src, \
+            gzip.open(os.path.join(out, "sitemap.xml.gz"), "wb") as dst:
+        shutil.copyfileobj(src, dst)
 
     # Pages moved under a version (#114). A link from before then, such as
     # the one quickstart.sh v0.2.0 prints, takes a browser to the same page

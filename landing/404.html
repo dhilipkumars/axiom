@@ -8,13 +8,20 @@
 <script>
   // The docs moved under a version in #114: /axiom/guides/... is now
   // /axiom/latest/guides/... . A link from before then lands on the same page
-  // under /latest/; anything already under a version gets the page below.
+  // under /latest/. A page missing from /latest/ -- such as one the "this page
+  // in the latest release" banner on dev points at before it is released --
+  // lands on the latest release's home page. Anything else missing under a
+  // version gets the page below.
   (function () {
     var m = location.pathname.match(/^\/axiom\/(.*)$/);
     if (!m) return;
     var rest = m[1];
     var first = rest.split("/")[0];
-    if (first === "latest" || first === "dev" || /^\d+\.\d+$/.test(first)) return;
+    if (first === "latest") {
+      if (rest !== "latest/" && rest !== "latest") location.replace("/axiom/latest/");
+      return;
+    }
+    if (first === "dev" || /^\d+\.\d+$/.test(first)) return;
     location.replace("/axiom/latest/" + rest + location.search + location.hash);
   })();
 </script>
