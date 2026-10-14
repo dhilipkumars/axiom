@@ -1,0 +1,16 @@
+# The landing page at the root of the docs site (#114): what Axiom is, how to
+# try it, and links into each version's docs. The docs themselves live under
+# /axiom/X.Y/, /axiom/latest/ and /axiom/dev/; scripts/build-docs-site builds
+# the lot. Built from main, with the same theme and template as the docs.
+INHERIT: mkdocs.yml
+docs_dir: landing
+site_url: https://dhilipkumars.github.io/axiom/
+nav:
+  - index.md
+# The landing page has one page; it needs neither search nor the docs'
+# redirects.
+plugins: []
+# scripts/build-docs-site puts this at the site root after every tree is
+# built; as a page here it would collide with the theme's own 404.
+exclude_docs: |
+  404.html

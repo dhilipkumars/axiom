@@ -47,6 +47,9 @@ jobs:
       - run: pip install mkdocs-material==9.5.49 mkdocs-redirects==1.2.2
       # --strict comes from mkdocs.yml, so a warning is a failure.
       - run: mkdocs build --site-dir /tmp/site
+      # The whole site as pages.yml builds it (#114): the landing page and
+      # main's docs as dev. Release branches were checked when they were main.
+      - run: python3 scripts/build-docs-site --out /tmp/site-all --main .
 
   release-plumbing:
     name: changesets + version consistency

@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""Build the whole docs site: a landing page and one tree per version (#114).
+
+    /axiom/            landing page, from main's landing/
+    /axiom/X.Y/        each release, from its release-X.Y branch
+    /axiom/latest/     the newest release again, under its own address
+    /axiom/dev/        main's docs: unreleased
+
+usage:
+    build-docs-site --out DIR --main DIR [--release X.Y=DIR ...] [--latest X.Y]
+
+--main is a checkout of main: it supplies the landing page, the dev tree and
+the page template every tree is built with. Each --release is a checkout of
+its release-X.Y branch, built with that branch's own pages and mkdocs.yml.
+Without a release only the landing page and dev are built, which is what CI
+checks a change with.
+
+Every tree is built with main's template (docs-overrides/) and given its
+version settings here, so a release branch never needs editing to gain the
+version picker, the "not the latest" banner or noindex.
+
+Only /latest/ and the landing page are for search engines. Every link worth
+keeping points at /latest/, so that is the address that has to hold its place
+in search from one release to the next; /X.Y/ and /dev/ carry noindex.
+"""
+
+import argparse
+import gzip
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+SITE = "https://dhilipkumars.github.io/axiom/"
+
+
+def version_key(v):
+    return tuple(int(p) for p in v.split("."))
+
+
+def build_tree(src, out, version, *, overrides, dev, noindex):
+    """Build one checkout into out/version, with this site's version settings."""
+    cfg = os.path.join(src, "mkdocs.site.yml")
+    with open(cfg, "w") as f:
+        # INHERIT keeps the branch's own nav, extensions and plugins; this
+        # adds only where the tree lives and how it presents itself.
+        f.write(
+            "INHERIT: mkdocs.yml\n"
+            f"site_url: {SITE}{version}/\n"
+            "theme:\n"
+            f"  custom_dir: {json.dumps(overrides)}\n"
+            "extra:\n"
+            "  version:\n"
+            "    provider: mike\n"
+            "    default: latest\n"
+            f"  dev: {json.dumps(dev)}\n"
+            f"  noindex: {json.dumps(noindex)}\n"
+        )
+    try:
+        # From inside the checkout: snippet includes (docs/snippets/,
+        # examples/*/README.md) resolve against its own files.
+        subprocess.run(
+            ["mkdocs", "build", "--config-file", cfg, "--site-dir", os.path.join(out, version)],
+            cwd=src,
+            check=True,
+        )
+    finally:
+        os.remove(cfg)
+
+
+def sitemap_locs(path):
+    if not os.path.exists(path):
+        return []
+    return re.findall(r"<loc>([^<]+)</loc>", open(path).read())
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--main", required=True)
+    ap.add_argument("--release", action="append", default=[], metavar="X.Y=DIR")
+    ap.add_argument("--latest", metavar="X.Y")
+    a = ap.parse_args()
+
+    out = os.path.abspath(a.out)
+    main_dir = os.path.abspath(a.main)
+    overrides = os.path.join(main_dir, "docs-overrides")
+    releases = {}
+    for r in a.release:
+        v, _, d = r.partition("=")
+        if not re.fullmatch(r"\d+\.\d+", v) or not d:
+            sys.exit(f"--release wants X.Y=DIR, not {r!r}")
+        releases[v] = os.path.abspath(d)
+    if (releases or a.latest) and a.latest not in releases:
+        sys.exit(f"--latest {a.latest!r} is not among the releases built: {sorted(releases)}")
+
+    # The landing page first: building it cleans --out, so the trees go in
+    # after it, each into its own directory.
+    subprocess.run(
+        ["mkdocs", "build", "--config-file", "mkdocs.landing.yml", "--site-dir", out],
+        cwd=main_dir,
+        check=True,
+    )
+    for v, d in sorted(releases.items(), key=lambda kv: version_key(kv[0])):
+        build_tree(d, out, v, overrides=overrides, dev=False, noindex=True)
+    # The newest release again, under its own address and indexed: a page's
+    # place in search then survives the next release, which only changes what
+    # /latest/ is built from.
+    if a.latest:
+        build_tree(releases[a.latest], out, "latest", overrides=overrides, dev=False, noindex=False)
+    build_tree(main_dir, out, "dev", overrides=overrides, dev=True, noindex=True)
+
+    # What the version picker reads: the newest release first, then dev. The
+    # picker links to ../<version>/ and ignores aliases, so the newest release
+    # is listed as "latest" -- the indexed tree -- with its number as the
+    # alias, which still lets a reader who lands on /X.Y/ be recognised as
+    # reading the latest release.
+    versions = [
+        {"version": "latest", "title": f"{v} (latest)", "aliases": [v]} if v == a.latest
+        else {"version": v, "title": v, "aliases": []}
+        for v in sorted(releases, key=version_key, reverse=True)
+    ]
+    versions.append({"version": "dev", "title": "dev (unreleased)", "aliases": []})
+    with open(os.path.join(out, "versions.json"), "w") as f:
+        json.dump(versions, f, indent=2)
+
+    # One sitemap at the root for the pages search should find: the landing
+    # page and /latest/.
+    locs = sitemap_locs(os.path.join(out, "sitemap.xml"))
+    if a.latest:
+        locs += sitemap_locs(os.path.join(out, "latest", "sitemap.xml"))
+    with open(os.path.join(out, "sitemap.xml"), "w") as f:
+        f.write('<?xml version="1.0" encoding="UTF-8"?>\n'
+                '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n')
+        for loc in locs:
+            f.write(f"  <url><loc>{loc}</loc></url>\n")
+        f.write("</urlset>\n")
+    # The theme writes a gzipped copy too, which now describes only the landing
+    # page; replace it with the merged one.
+    with open(os.path.join(out, "sitemap.xml"), "rb") as src, \
+            gzip.open(os.path.join(out, "sitemap.xml.gz"), "wb") as dst:
+        shutil.copyfileobj(src, dst)
+
+    # Pages moved under a version (#114). A link from before then, such as
+    # the one quickstart.sh v0.2.0 prints, takes a browser to the same page
+    # under /latest/ rather than to a dead end. Only a browser: the response
+    # is still a 404, so search engines drop the old URL and find /latest/
+    # through the sitemap.
+    shutil.copy(os.path.join(main_dir, "landing", "404.html"), os.path.join(out, "404.html"))
+
+    print(f"built {out}: landing, {', '.join(sorted(releases, key=version_key)) or 'no releases'}, dev"
+          + (f"; latest is {a.latest}" if a.latest else ""))
+
+
+if __name__ == "__main__":
+    main()

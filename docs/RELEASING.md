@@ -100,6 +100,8 @@ Commit that, open it as a PR like anything else, and merge it. Then:
 
 ```sh
 git tag vX.Y.Z && git push origin vX.Y.Z
+# a new minor only: its release branch, before the release is published
+git push origin "vX.Y.Z^{commit}:refs/heads/release-X.Y"
 ```
 
 Then **publish a GitHub release from the tag**. That is the step that matters:
@@ -117,6 +119,44 @@ do not. `scripts/version check vX.Y.Z` compares the tag against
 `extension/Cargo.toml` — it does not read `CHANGELOG.md`, so nothing mechanical
 catches a changelog heading that disagrees. The release workflow calls it before
 publishing anything.
+
+## The docs follow the release
+
+The site is a landing page at `/axiom/` and one docs tree per version, built
+by `scripts/build-docs-site` (#114):
+
+| Path | Built from |
+|---|---|
+| `/axiom/X.Y/` | each `release-X.Y` branch |
+| `/axiom/latest/` | the newest release again, under its own address |
+| `/axiom/dev/` | `main`, with an "unreleased" banner and `noindex` |
+
+Every docs page has a version picker, and `dev` and older releases carry a
+banner pointing at the same page in the latest release. Search engines index
+only `/latest/`, which is the newest release built under its own address, so a
+page keeps its place in search when a release changes what it holds. Link to
+`/axiom/latest/...` from anything that outlives a release, such as the README
+or a script's output.
+
+- **A new minor cuts its branch from its tag**, as above, before the release
+  is published. Publishing it makes it GitHub's latest release, and
+  `pages.yml` then builds it as `/axiom/X.Y/` and as `/latest/`; until the
+  branch exists that build fails rather than publish docs that are not the
+  release's. A patch release lives on its minor's branch and cuts nothing.
+- **A release's docs change only by backport.** A docs fix that matters to
+  people running the release lands on `main` first, then as a cherry-pick PR
+  into `release-X.Y`. Merging that republishes the site: `pages-release.yml`
+  asks `pages.yml` on `main` to run, since only `main` may deploy to the
+  `github-pages` environment.
+- **Everything else waits for the next release.** A feature merged to `main`
+  is documented under `/dev/` until its release makes it the latest.
+- **A patch release is cut from the release branch**: its fixes reach
+  `release-X.Y` by merged backport PRs, and the tag goes on that branch's head
+  (`git tag vX.Y.Z origin/release-X.Y`), so a fix backported for it ships with
+  the docs backported beside it. Publishing a release republishes
+  the site. A patch for an older minor, such as 0.2.1 after 0.3.0, is published
+  with "Set as the latest release" unticked (`gh release create --latest=false`),
+  or `/latest/` would go back to it.
 
 ## Rehearsing with a release candidate
 

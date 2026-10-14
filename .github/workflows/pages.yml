@@ -1,9 +1,23 @@
-# Publishes docs/ to GitHub Pages.
+# Publishes the docs site to GitHub Pages (#114), built by
+# scripts/build-docs-site:
 #
-# Runs only on main, and only when something the site renders has changed. The
-# generated pages are committed to the tree rather than built here, because the
-# anti-drift check in the ci workflow needs them committed to have anything to
-# compare against; this job publishes what is in the tree, it does not
+#   /axiom/          landing page: what Axiom is, how to try it, links in
+#   /axiom/X.Y/      each release, from its release-X.Y branch
+#   /axiom/latest/   a copy of the newest release
+#   /axiom/dev/      main's docs: an "unreleased" banner, and noindex
+#
+# Each docs page has a version picker. A release's docs change only when
+# something is merged or backported to its branch; a feature merged to main
+# appears under /dev/ until it is released. Every run builds every tree,
+# because a Pages deploy replaces the whole site.
+#
+# Only main may deploy to the github-pages environment, so this runs only on
+# main. A push to a release branch, and a published release, ask for a run here
+# (pages-release.yml) rather than deploying themselves.
+#
+# The generated pages are committed to the tree rather than built here, because
+# the anti-drift check in the ci workflow needs them committed to have anything
+# to compare against; this job publishes what is in the tree, it does not
 # regenerate it.
 name: pages
 
@@ -15,7 +29,10 @@ on:
       # The examples pages include these.
       - examples/*/README.md
       - docs-overrides/**
+      - landing/**
       - mkdocs.yml
+      - mkdocs.landing.yml
+      - scripts/build-docs-site
       - .github/workflows/pages.yml
   workflow_dispatch:
 
@@ -34,14 +51,45 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # Every branch, so each release-X.Y can be added as a worktree below.
       - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          path: main
+      # The newest release is GitHub's own "latest" designation, which never
+      # names a prerelease or a draft and follows the "set as latest" choice,
+      # so a v0.2.1 fix shipped after v0.3.0 does not make 0.2 the latest.
+      - id: releases
+        working-directory: main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="$(gh api "repos/$GH_REPO/releases/latest" -q .tag_name)"
+          [[ "$tag" =~ ^v([0-9]+)\.([0-9]+)\.[0-9]+$ ]] || { echo "latest release '$tag' is not vX.Y.Z" >&2; exit 1; }
+          latest="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+          args=()
+          for branch in $(git branch -r --format='%(refname:lstrip=3)' | grep -E '^release-[0-9]+\.[0-9]+$'); do
+            v="${branch#release-}"
+            git worktree add --detach "../releases/$v" "origin/$branch" >/dev/null
+            args+=(--release "$v=../releases/$v")
+          done
+          # Fail rather than publish without it: the newest release's docs are
+          # what the site is for. RELEASING.md cuts the branch before the
+          # release is published.
+          [[ -d "../releases/$latest" ]] \
+            || { echo "$tag is the latest release but release-$latest does not exist; cut it from the tag" >&2; exit 1; }
+          echo "args=${args[*]} --latest $latest" >> "$GITHUB_OUTPUT"
+          echo "releases: ${args[*]}; latest: $latest ($tag)"
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install mkdocs-material==9.5.49 mkdocs-redirects==1.2.2
       # --strict, set in mkdocs.yml, turns a broken internal link into a
-      # failure. A reference page that moves therefore fails here rather than
-      # publishing a 404.
-      - run: mkdocs build
+      # failure in any tree.
+      - working-directory: main
+        run: python3 scripts/build-docs-site --out ../site --main . ${{ steps.releases.outputs.args }}
       - uses: actions/upload-pages-artifact@v3
         with: { path: site }
 
