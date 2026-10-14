@@ -31,7 +31,7 @@ SELECT d.name, d.replicas, d.ready_replicas
 - **[Latest release](latest/)**: the docs for what you can install today.
 - **[dev](dev/)**: the docs for unreleased work on `main`.
 
-Every page has a version picker at the top, to move between releases.
+Every docs page has a version picker at the top, to move between releases.
 
 ## Try it
 

@@ -3,8 +3,8 @@
 
     /axiom/            landing page, from main's landing/
     /axiom/X.Y/        each release, from its release-X.Y branch
-    /axiom/latest/     a copy of the newest release
-    /axiom/dev/        main's docs: unreleased, and kept out of search
+    /axiom/latest/     the newest release again, under its own address
+    /axiom/dev/        main's docs: unreleased
 
 usage:
     build-docs-site --out DIR --main DIR [--release X.Y=DIR ...] [--latest X.Y]
@@ -18,6 +18,10 @@ checks a change with.
 Every tree is built with main's template (docs-overrides/) and given its
 version settings here, so a release branch never needs editing to gain the
 version picker, the "not the latest" banner or noindex.
+
+Only /latest/ and the landing page are for search engines. Every link worth
+keeping points at /latest/, so that is the address that has to hold its place
+in search from one release to the next; /X.Y/ and /dev/ carry noindex.
 """
 
 import argparse
@@ -27,7 +31,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 
 SITE = "https://dhilipkumars.github.io/axiom/"
 
@@ -89,7 +92,7 @@ def main():
         if not re.fullmatch(r"\d+\.\d+", v) or not d:
             sys.exit(f"--release wants X.Y=DIR, not {r!r}")
         releases[v] = os.path.abspath(d)
-    if releases and a.latest not in releases:
+    if (releases or a.latest) and a.latest not in releases:
         sys.exit(f"--latest {a.latest!r} is not among the releases built: {sorted(releases)}")
 
     # The landing page first: building it cleans --out, so the trees go in
@@ -100,16 +103,13 @@ def main():
         check=True,
     )
     for v, d in sorted(releases.items(), key=lambda kv: version_key(kv[0])):
-        # Only the newest release is for search engines; an older one still
-        # reads fine, but a search should land on what people install now.
-        build_tree(d, out, v, overrides=overrides, dev=False, noindex=(v != a.latest))
-    build_tree(main_dir, out, "dev", overrides=overrides, dev=True, noindex=True)
-
-    # /latest/ is a copy, not redirects, so any page under it works. Its
-    # pages keep their canonical address under /X.Y/, so search sees one
-    # page, not two.
+        build_tree(d, out, v, overrides=overrides, dev=False, noindex=True)
+    # The newest release again, under its own address and indexed: a page's
+    # place in search then survives the next release, which only changes what
+    # /latest/ is built from.
     if a.latest:
-        shutil.copytree(os.path.join(out, a.latest), os.path.join(out, "latest"))
+        build_tree(releases[a.latest], out, "latest", overrides=overrides, dev=False, noindex=False)
+    build_tree(main_dir, out, "dev", overrides=overrides, dev=True, noindex=True)
 
     # What the version picker reads: the newest release first, then dev.
     versions = [
@@ -121,10 +121,10 @@ def main():
         json.dump(versions, f, indent=2)
 
     # One sitemap at the root for the pages search should find: the landing
-    # page and the newest release.
+    # page and /latest/.
     locs = sitemap_locs(os.path.join(out, "sitemap.xml"))
     if a.latest:
-        locs += sitemap_locs(os.path.join(out, a.latest, "sitemap.xml"))
+        locs += sitemap_locs(os.path.join(out, "latest", "sitemap.xml"))
     with open(os.path.join(out, "sitemap.xml"), "w") as f:
         f.write('<?xml version="1.0" encoding="UTF-8"?>\n'
                 '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n')
@@ -136,8 +136,10 @@ def main():
         os.remove(gz)
 
     # Pages moved under a version (#114). A link from before then, such as
-    # the one quickstart.sh v0.2.0 prints, lands on the same page under
-    # /latest/ rather than on a dead end.
+    # the one quickstart.sh v0.2.0 prints, takes a browser to the same page
+    # under /latest/ rather than to a dead end. Only a browser: the response
+    # is still a 404, so search engines drop the old URL and find /latest/
+    # through the sitemap.
     shutil.copy(os.path.join(main_dir, "landing", "404.html"), os.path.join(out, "404.html"))
 
     print(f"built {out}: landing, {', '.join(sorted(releases, key=version_key)) or 'no releases'}, dev"

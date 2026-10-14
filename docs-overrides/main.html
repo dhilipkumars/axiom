@@ -20,14 +20,15 @@
   {% else %}
     You are reading the docs for an older release.
   {% endif %}
-  <a href="{{ base_url }}/../latest/">The docs for the latest release</a>
-  describe what you can install.
+  <a href="{{ base_url }}/../latest/{{ page.url if page else '' }}">This page in the latest release</a>
+  describes what you can install.
 {% endblock %}
 
 {% block extrahead %}
   {%- if config.extra.noindex %}
-  {#- Only the latest release is for search engines: a search should land on
-      what people install now, not on dev or an older release. -#}
+  {#- Only /latest/ is for search engines (scripts/build-docs-site): it is the
+      address every lasting link uses, so it keeps its place in search from one
+      release to the next. /X.Y/ and /dev/ carry this. -#}
   <meta name="robots" content="noindex">
   {%- endif %}
   {#- Google Search Console ownership proof for dhilipkumars.github.io/axiom.
