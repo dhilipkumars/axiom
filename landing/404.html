@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Page not found - Axiom</title>
+<script>
+  // The docs moved under a version in #114: /axiom/guides/... is now
+  // /axiom/latest/guides/... . A link from before then lands on the same page
+  // under /latest/; anything already under a version gets the page below.
+  (function () {
+    var m = location.pathname.match(/^\/axiom\/(.*)$/);
+    if (!m) return;
+    var rest = m[1];
+    var first = rest.split("/")[0];
+    if (first === "latest" || first === "dev" || /^\d+\.\d+$/.test(first)) return;
+    location.replace("/axiom/latest/" + rest + location.search + location.hash);
+  })();
+</script>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 36rem; margin: 4rem auto; padding: 0 1rem; color: #222; }
+  a { color: #3f51b5; }
+  @media (prefers-color-scheme: dark) { body { background: #1e2129; color: #e3e3e3; } a { color: #8c9eff; } }
+</style>
+</head>
+<body>
+<h1>Page not found</h1>
+<p>That page is not in this version of the docs.</p>
+<p><a href="/axiom/latest/">The docs for the latest release</a> &middot;
+   <a href="/axiom/dev/">dev</a> &middot;
+   <a href="/axiom/">Axiom</a></p>
+</body>
+</html>

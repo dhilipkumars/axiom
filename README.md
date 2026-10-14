@@ -4,16 +4,16 @@
 
 [![CI](https://github.com/dhilipkumars/axiom/actions/workflows/ci.yml/badge.svg)](https://github.com/dhilipkumars/axiom/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/dhilipkumars/axiom?label=release)](https://github.com/dhilipkumars/axiom/releases/latest)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16%20%7C%2017%20%7C%2018-336791?logo=postgresql&logoColor=white)](https://dhilipkumars.github.io/axiom/compatibility/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16%20%7C%2017%20%7C%2018-336791?logo=postgresql&logoColor=white)](https://dhilipkumars.github.io/axiom/latest/compatibility/)
 [![Docs](https://img.shields.io/badge/docs-dhilipkumars.github.io%2Faxiom-blue)](https://dhilipkumars.github.io/axiom/)
 [![Security](https://img.shields.io/badge/scanned-govulncheck%20%C2%B7%20cargo--audit%20%C2%B7%20gitleaks-4c1)](https://github.com/dhilipkumars/axiom/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/dhilipkumars/axiom)](LICENSE)
 
 📖 **[Documentation](https://dhilipkumars.github.io/axiom/)** &nbsp;·&nbsp;
-[Quick start](https://dhilipkumars.github.io/axiom/guides/quick-start/) &nbsp;·&nbsp;
-[Install](https://dhilipkumars.github.io/axiom/guides/install/) &nbsp;·&nbsp;
-[Examples](https://dhilipkumars.github.io/axiom/guides/examples/) &nbsp;·&nbsp;
-[AI agent access](https://dhilipkumars.github.io/axiom/guides/agent-access/) &nbsp;·&nbsp;
+[Quick start](https://dhilipkumars.github.io/axiom/latest/guides/quick-start/) &nbsp;·&nbsp;
+[Install](https://dhilipkumars.github.io/axiom/latest/guides/install/) &nbsp;·&nbsp;
+[Examples](https://dhilipkumars.github.io/axiom/latest/guides/examples/) &nbsp;·&nbsp;
+[AI agent access](https://dhilipkumars.github.io/axiom/latest/guides/agent-access/) &nbsp;·&nbsp;
 [Roadmap](ROADMAP.md)
 
 Axiom makes Kubernetes resources — built-in kinds and CRDs alike — look like
@@ -85,7 +85,7 @@ SELECT * FROM lab.results;
 (3 rows)
 ```
 
-**→ [The regression lab](https://dhilipkumars.github.io/axiom/guides/examples/regression-lab/)**
+**→ [The regression lab](https://dhilipkumars.github.io/axiom/latest/guides/examples/regression-lab/)**
 explains the `lab.results` view, how to read each column, and how to run it.
 
 ### Which customers are affected right now?
@@ -119,7 +119,7 @@ SELECT DISTINCT ON (p.namespace, p.name)
 ```
 
 More, including writes, a capacity review and an operator written in SQL, in
-**[Examples](https://dhilipkumars.github.io/axiom/guides/examples/)**.
+**[Examples](https://dhilipkumars.github.io/axiom/latest/guides/examples/)**.
 
 ## Getting started
 
@@ -130,10 +130,10 @@ then runs a first query. It needs Docker, `kind` and `kubectl`:
 curl -fsSL https://github.com/dhilipkumars/axiom/releases/latest/download/quickstart.sh | bash
 ```
 
-**→ [Quick start](https://dhilipkumars.github.io/axiom/guides/quick-start/)** has
+**→ [Quick start](https://dhilipkumars.github.io/axiom/latest/guides/quick-start/)** has
 the download-and-read version, and how to clean up.
 
-Already run Postgres? [Install](https://dhilipkumars.github.io/axiom/guides/install/)
+Already run Postgres? [Install](https://dhilipkumars.github.io/axiom/latest/guides/install/)
 the gateway in your cluster and the extension from a `.deb` or `.rpm` per
 Postgres major and architecture, no toolchain and no rebuild:
 
@@ -143,7 +143,7 @@ sudo dnf install ./axiom_17-<version>-1.el9.x86_64.rpm           # RHEL, Rocky, 
 ```
 
 Axiom must be loaded through `shared_preload_libraries`; a package cannot do
-that for you. [Compatibility](https://dhilipkumars.github.io/axiom/compatibility/)
+that for you. [Compatibility](https://dhilipkumars.github.io/axiom/latest/compatibility/)
 lists the tested versions, distributions and architectures.
 
 ## How it works
@@ -153,8 +153,8 @@ A small Go **gateway** runs in each cluster and holds its credentials. The
 keeps a watch-driven cache in shared memory. Postgres can live anywhere, and
 what SQL can reach is exactly what the gateway's RBAC allows.
 
-**→ [Architecture](https://dhilipkumars.github.io/axiom/architecture/)** has the design, and
-**[How tables work](https://dhilipkumars.github.io/axiom/guides/examples/how-tables-work/)** what it means for a
+**→ [Architecture](https://dhilipkumars.github.io/axiom/latest/architecture/)** has the design, and
+**[How tables work](https://dhilipkumars.github.io/axiom/latest/guides/examples/how-tables-work/)** what it means for a
 query.
 
 ## Working on Axiom

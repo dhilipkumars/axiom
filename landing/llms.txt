@@ -1,0 +1,56 @@
+# Axiom
+
+> A Postgres foreign data wrapper for Kubernetes. Query and control Kubernetes
+> resources, built-in kinds and CRDs alike, from plain SQL, across one or more
+> clusters, from a Postgres that may live entirely outside those clusters'
+> networks. A standing watch keeps a shared-memory cache live, so `SELECT`s
+> reflect cluster state within watch latency, and `INSERT`/`UPDATE`/`DELETE`
+> map to real Kubernetes writes with optimistic-concurrency conflicts surfaced
+> as SQL errors.
+
+Things worth knowing before answering questions about Axiom:
+
+- No Kubernetes client code runs inside a Postgres backend. A Go **gateway**
+  runs in each cluster, holds the credentials, and speaks gRPC over TLS.
+- What a query can reach is bounded by the **gateway's RBAC**, not the SQL
+  user's.
+- Axiom **cannot run on managed Postgres** (RDS, Cloud SQL, Aurora): it is not
+  a trusted extension and requires `shared_preload_libraries`.
+- Two ways to install it. To try Axiom, run a published Postgres image with the
+  extension already in it. To add it to a Postgres someone already runs,
+  install the release `.deb` (`postgresql-<major>-axiom`) or `.rpm`
+  (`axiom_<major>`) for that major and architecture, or the tarball where
+  neither applies — published from v0.1.1 onward; v0.1.0 has none. Either way
+  it must be preloaded.
+- Linux artifacts need **glibc 2.34+** (Debian 12+, Ubuntu 22.04+, RHEL 9+).
+  The packages refuse to install below that; the tarball does not check.
+- All published images are **multi-architecture** (amd64 and arm64) from v0.1.1 on, so no `--platform` flag is needed. Earlier versions are amd64-only.
+- It is pre-1.0. Interfaces may change between minor versions.
+
+## Setting up a working environment
+
+- [Setting up Axiom (for coding agents)](https://dhilipkumars.github.io/axiom/latest/guides/for-agents/): what to ask the user first, then a step-by-step procedure with a verification and expected output for each step, failure signatures, and teardown. Start here to bring up a working environment.
+- [Quick start](https://dhilipkumars.github.io/axiom/latest/guides/quick-start/): one script (`quickstart.sh`, attached to each release) that brings up kind, the gateway and Postgres with Axiom, and runs a first query.
+- [Install](https://dhilipkumars.github.io/axiom/latest/guides/install/): the gateway, then Axiom into Postgres by image, `.deb`/`.rpm`/tarball, or source; and restricting the gateway's RBAC.
+- [Initialize](https://dhilipkumars.github.io/axiom/latest/guides/initialize/): `CREATE EXTENSION`, the server, importing tables, short names, and checks that it works.
+- [Compatibility](https://dhilipkumars.github.io/axiom/latest/compatibility/): Postgres versions, distributions and architectures, and which are tested.
+
+## Using it
+
+- [Examples](https://dhilipkumars.github.io/axiom/latest/guides/examples/): questions `kubectl` cannot answer in one command, each with real output.
+- [How tables work](https://dhilipkumars.github.io/axiom/latest/guides/examples/how-tables-work/): what is pushed down, how columns are typed, on-demand versus watch-cached tables, staleness, `axiom_watch_status()`.
+- [Install the gateway](https://dhilipkumars.github.io/axiom/latest/guides/install/gateway/): running the gateway in a cluster, exposure choices, operational notes.
+- [Giving an AI agent access](https://dhilipkumars.github.io/axiom/latest/guides/agent-access/): a Postgres role recipe that gives an agent redacted, scoped cluster access with no shell and no Kubernetes credential; the grants to never give; controls that are not controls; what is not yet enforced.
+
+## Reference, generated from the code
+
+- [Foreign table columns](https://dhilipkumars.github.io/axiom/latest/generated/columns/): how a Kubernetes kind becomes a table's columns.
+- [FDW options](https://dhilipkumars.github.io/axiom/latest/generated/fdw-options/): every accepted `CREATE SERVER` and table option.
+- [Gateway flags](https://dhilipkumars.github.io/axiom/latest/generated/gateway-flags/): the gateway's command line.
+- [gRPC API](https://dhilipkumars.github.io/axiom/latest/generated/api/): the wire protocol between extension and gateway.
+
+## Optional
+
+- [Architecture](https://dhilipkumars.github.io/axiom/latest/architecture/) and the [design notes](https://dhilipkumars.github.io/axiom/latest/DESIGN/): why a gateway, consistency tiers, schema mapping, multi-cluster.
+- [Auth design](https://dhilipkumars.github.io/axiom/latest/AUTH/): per-caller identity, the threat model, the recommended flow.
+- [Releasing](https://dhilipkumars.github.io/axiom/latest/RELEASING/): what each image tag means and how a release is cut.

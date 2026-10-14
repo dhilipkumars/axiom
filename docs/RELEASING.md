@@ -122,17 +122,26 @@ publishing anything.
 
 ## The docs follow the release
 
-The site has two trees. `/axiom/` is the **released docs**, built from the
-latest release's `release-X.Y` branch; `/axiom/dev/` is `main`'s docs, with an
-"unreleased" banner and kept out of search. `pages.yml` builds both on every
-publish, because a Pages deploy replaces the whole site.
+The site is a landing page at `/axiom/` and one docs tree per version, built
+by `scripts/build-docs-site` (#114):
+
+| Path | Built from |
+|---|---|
+| `/axiom/X.Y/` | each `release-X.Y` branch |
+| `/axiom/latest/` | a copy of the newest release |
+| `/axiom/dev/` | `main`, with an "unreleased" banner and `noindex` |
+
+Every docs page has a version picker. Older releases carry a banner pointing
+at the latest, and only the latest is indexed by search engines. Link to
+`/axiom/latest/...` from anything that outlives a release, such as the README
+or a script's output.
 
 - **A new minor cuts its branch from its tag**, as above, before the release
-  is published. Publishing the release makes it the latest, and from then on
-  `pages.yml` builds the released docs from `release-X.Y`; until the branch
-  exists that build fails rather than publish docs that are not the release's.
-  A patch release lives on its minor's branch and cuts nothing.
-- **The released docs change only by backport.** A docs fix that matters to
+  is published. Publishing it makes it GitHub's latest release, and
+  `pages.yml` then builds it as `/axiom/X.Y/` and as `/latest/`; until the
+  branch exists that build fails rather than publish docs that are not the
+  release's. A patch release lives on its minor's branch and cuts nothing.
+- **A release's docs change only by backport.** A docs fix that matters to
   people running the release lands on `main` first, then as a cherry-pick PR
   into `release-X.Y`. Merging that republishes the site: `pages-release.yml`
   asks `pages.yml` on `main` to run, since only `main` may deploy to the
@@ -143,7 +152,7 @@ publish, because a Pages deploy replaces the whole site.
   it ships with the docs backported beside it. Publishing a release republishes
   the site. A patch for an older minor, such as 0.2.1 after 0.3.0, is published
   with "Set as the latest release" unticked (`gh release create --latest=false`),
-  or the released docs would go back to it.
+  or `/latest/` would go back to it.
 
 ## Rehearsing with a release candidate
 

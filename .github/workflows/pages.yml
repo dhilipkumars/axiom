@@ -1,12 +1,15 @@
-# Publishes the docs site to GitHub Pages, as two trees (#114):
+# Publishes the docs site to GitHub Pages (#114), built by
+# scripts/build-docs-site:
 #
-#   /axiom/       the released docs: the latest release's release-X.Y branch
-#   /axiom/dev/   main's docs, with an "unreleased" banner and noindex
+#   /axiom/          landing page: what Axiom is, how to try it, links in
+#   /axiom/X.Y/      each release, from its release-X.Y branch
+#   /axiom/latest/   a copy of the newest release
+#   /axiom/dev/      main's docs: an "unreleased" banner, and noindex
 #
-# The released docs change only when something is merged or backported to the
-# release branch, so a feature merged to main appears under /dev/ until it is
-# released. Every run builds both trees, because a Pages deploy replaces the
-# whole site: publishing one alone would delete the other.
+# Each docs page has a version picker. A release's docs change only when
+# something is merged or backported to its branch; a feature merged to main
+# appears under /dev/ until it is released. Every run builds every tree,
+# because a Pages deploy replaces the whole site.
 #
 # Only main may deploy to the github-pages environment, so this runs only on
 # main. A push to a release branch, and a published release, ask for a run here
@@ -26,8 +29,10 @@ on:
       # The examples pages include these.
       - examples/*/README.md
       - docs-overrides/**
+      - landing/**
       - mkdocs.yml
-      - mkdocs.dev.yml
+      - mkdocs.landing.yml
+      - scripts/build-docs-site
       - .github/workflows/pages.yml
   workflow_dispatch:
 
@@ -46,12 +51,17 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # The released docs are the latest release's branch: v0.2.0 is
-      # release-0.2, and a patch release lives on its minor's branch. "Latest"
-      # is GitHub's own designation, which never names a prerelease or a draft
-      # and follows the "set as latest" choice when a release is published, so
-      # a v0.2.1 fix shipped after v0.3.0 does not take the site back to 0.2.
-      - id: release
+      # Every branch, so each release-X.Y can be added as a worktree below.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          path: main
+      # The newest release is GitHub's own "latest" designation, which never
+      # names a prerelease or a draft and follows the "set as latest" choice,
+      # so a v0.2.1 fix shipped after v0.3.0 does not make 0.2 the latest.
+      - id: releases
+        working-directory: main
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -59,33 +69,27 @@ jobs:
           set -euo pipefail
           tag="$(gh api "repos/$GH_REPO/releases/latest" -q .tag_name)"
           [[ "$tag" =~ ^v([0-9]+)\.([0-9]+)\.[0-9]+$ ]] || { echo "latest release '$tag' is not vX.Y.Z" >&2; exit 1; }
-          branch="release-${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
-          # Fail rather than fall back to the tag: the tag predates every
-          # backport, so publishing it would quietly revert the released docs.
-          # RELEASING.md cuts the branch before the release is published.
-          gh api "repos/$GH_REPO/branches/$branch" --silent 2>/dev/null \
-            || { echo "$tag is the latest release but $branch does not exist; cut it from the tag" >&2; exit 1; }
-          echo "branch=$branch" >> "$GITHUB_OUTPUT"
-          echo "released docs: $branch (latest release $tag)"
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ steps.release.outputs.branch }}
-          path: released
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          path: dev
+          latest="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+          args=()
+          for branch in $(git branch -r --format='%(refname:lstrip=3)' | grep -E '^release-[0-9]+\.[0-9]+$'); do
+            v="${branch#release-}"
+            git worktree add --detach "../releases/$v" "origin/$branch" >/dev/null
+            args+=(--release "$v=../releases/$v")
+          done
+          # Fail rather than publish without it: the newest release's docs are
+          # what the site is for. RELEASING.md cuts the branch before the
+          # release is published.
+          [[ -d "../releases/$latest" ]] \
+            || { echo "$tag is the latest release but release-$latest does not exist; cut it from the tag" >&2; exit 1; }
+          echo "args=${args[*]} --latest $latest" >> "$GITHUB_OUTPUT"
+          echo "releases: ${args[*]}; latest: $latest ($tag)"
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install mkdocs-material==9.5.49 mkdocs-redirects==1.2.2
       # --strict, set in mkdocs.yml, turns a broken internal link into a
-      # failure. A reference page that moves therefore fails here rather than
-      # publishing a 404. Each tree builds from its own checkout, so includes
-      # (docs/snippets/, examples/*/README.md) resolve against its own files.
-      - working-directory: released
-        run: mkdocs build --site-dir ../site
-      - working-directory: dev
-        run: mkdocs build --config-file mkdocs.dev.yml --site-dir ../site/dev
+      # failure in any tree.
+      - working-directory: main
+        run: python3 scripts/build-docs-site --out ../site --main . ${{ steps.releases.outputs.args }}
       - uses: actions/upload-pages-artifact@v3
         with: { path: site }
 

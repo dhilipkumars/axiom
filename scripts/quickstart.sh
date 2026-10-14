@@ -11,7 +11,7 @@
 #
 # Each release attaches its own copy, with AXIOM_VERSION filled in, so the
 # script installs that release's images and manifests and nothing from main.
-# https://dhilipkumars.github.io/axiom/guides/quick-start/
+# https://dhilipkumars.github.io/axiom/latest/guides/quick-start/
 #
 # Written for the bash 3.2 macOS ships, which is what `curl ... | bash` runs
 # there: no associative arrays, no mapfile, no ${x,,}.
@@ -54,7 +54,7 @@ preflight() {
   case "$PG" in 16|17|18) ;; *) die "AXIOM_PG must be 16, 17 or 18, not '$PG'" ;; esac
   local t
   for t in docker kind kubectl; do
-    command -v "$t" >/dev/null 2>&1 || die "$t is not installed; see https://dhilipkumars.github.io/axiom/guides/prerequisites/"
+    command -v "$t" >/dev/null 2>&1 || die "$t is not installed; see https://dhilipkumars.github.io/axiom/latest/guides/prerequisites/"
   done
   case "$MANIFESTS" in
     http*) command -v curl >/dev/null 2>&1 || die "curl is not installed" ;;
@@ -214,7 +214,7 @@ SQL
     echo "           or: psql postgresql://postgres:axiom@127.0.0.1:$PORT/postgres"
   fi
   cat <<EOF
-Examples:      https://dhilipkumars.github.io/axiom/guides/examples/
+Examples:      https://dhilipkumars.github.io/axiom/latest/guides/examples/
 Remove it all: bash quickstart.sh down    (piped: curl ... | bash -s down)
 EOF
 }

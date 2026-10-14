@@ -4,8 +4,8 @@
 #
 # The site is built and deployed by pages.yml on main, because only main may
 # deploy to the github-pages environment. This asks for that run rather than
-# deploying itself; the run on main then builds the released docs from this
-# branch and the dev docs from main (#114).
+# deploying itself; the run on main then builds every release's docs from its
+# branch, and dev from main (#114).
 #
 # It lives on main so that every release branch, and every release's tag,
 # carries it. A push to main never fires it: main publishes through pages.yml.
