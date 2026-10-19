@@ -423,6 +423,24 @@ func TestListShrinksFromTheObjectsReturnedNotTheLimit(t *testing.T) {
 	}
 }
 
+// A single object over the budget cannot be split by asking for fewer, so it
+// costs one List call, not a second at a limit of 1 for the same object.
+func TestListDoesNotRefetchASingleOversizedObject(t *testing.T) {
+	t.Parallel()
+	pc := &pagingClient{items: []unstructured.Unstructured{padded("huge", 5<<20)}}
+	s := New("test", nil, pc, nil)
+
+	_, err := s.List(context.Background(), &axiomv1.ListRequest{
+		Gvk: &axiomv1.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}, Limit: 200,
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot be split further") {
+		t.Errorf("err = %v, want the cannot-be-split explanation", err)
+	}
+	if len(pc.limits) != 1 {
+		t.Errorf("limits were %v, want one call: the same object was fetched again", pc.limits)
+	}
+}
+
 func TestListReportsASingleObjectOverTheBudget(t *testing.T) {
 	t.Parallel()
 	pc := &pagingClient{items: []unstructured.Unstructured{padded("huge", 5<<20)}}
