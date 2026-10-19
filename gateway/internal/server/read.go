@@ -149,6 +149,13 @@ func (s *Server) fetchBoundedPage(
 			return objs, list, size, limit, nil
 		}
 		shrunk = true
+		// Halve what came back, not what was asked for. A short final page --
+		// four large objects returned for a limit of 200 -- would otherwise be
+		// fetched again at 100, 50, 25, 13 and 7, the same four objects each
+		// time, before a limit small enough to split them.
+		if n := len(list.Items); n < int(limit) {
+			limit = int32(n) //nolint:gosec // n < limit, which is an int32, so n fits in one
+		}
 		// Round up, so 3 becomes 2 rather than 1. Halving downwards
 		// overshoots on small limits and buys an extra round trip for a page
 		// that would have fit. Still strictly decreasing while limit > 1, so
