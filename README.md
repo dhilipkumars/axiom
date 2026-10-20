@@ -83,7 +83,11 @@ SELECT p.name AS pod, l.ts, l.line
 ```
 
 ```
-@@POD_LOG_CRASHES@@
+   pod    |              ts               |                             line                             
+----------+-------------------------------+--------------------------------------------------------------
+ payments | 2026-10-20 20:58:33.054297+00 | payments v1.4 starting
+ payments | 2026-10-20 20:58:33.054327+00 | panic: dial tcp 10.96.0.15:5432: connect: connection refused
+(2 rows)
 ```
 
 **→ [Reading pod logs](https://dhilipkumars.github.io/axiom/latest/guides/examples/pod-logs/)**

@@ -29,7 +29,12 @@ Until then, every call fails with an error naming `--serve-pod-logs`.
 ```
 
 ```
-@@POD_LOG@@
+ container_name | line_no |            line            
+----------------+---------+----------------------------
+ app            |       1 | listening on :8080
+ app            |       2 | GET /cart 200 12ms
+ app            |       3 | GET /search?q=caf� 200 9ms
+(3 rows)
 ```
 
 `frontend` has two containers, `envoy` and `app`. With no `container`
@@ -55,7 +60,11 @@ then reads the latest crash of every pod that has restarted, in one statement:
 ```
 
 ```
-@@POD_LOG_CRASHES@@
+   pod    |              ts               |                             line                             
+----------+-------------------------------+--------------------------------------------------------------
+ payments | 2026-10-20 20:58:33.054297+00 | payments v1.4 starting
+ payments | 2026-10-20 20:58:33.054327+00 | panic: dial tcp 10.96.0.15:5432: connect: connection refused
+(2 rows)
 ```
 
 `payments` panicked once and is running again, so its panic is in the previous
