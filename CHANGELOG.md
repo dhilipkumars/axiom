@@ -17,6 +17,20 @@ are the former. [docs/RELEASING.md](docs/RELEASING.md) has the full rule.
 
 <!-- releases below -->
 
+## 0.2.1
+
+A security release. Upgrade the gateway image; nothing else changes.
+
+### Security
+
+- **Gateway: Go 1.27.2 and `golang.org/x/net` v0.60.0**, fixing nine
+  advisories in HTTP/2, TLS and HTTP handling (GO-2026-6617, GO-2026-6613,
+  GO-2026-6612 and others). Each is on a path the gateway uses: it serves gRPC
+  over HTTP/2 and reaches the API server over it.
+- **Extension: rustls 0.23.46**, fixing RUSTSEC-2026-0346 to -0349. None is
+  reachable in Axiom's configuration: each needs a rustls feature or setting
+  Axiom does not use. The update keeps the extension off a flagged release.
+
 ## 0.2.0
 
 ### Added
