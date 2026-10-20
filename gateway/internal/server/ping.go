@@ -32,6 +32,8 @@ type Server struct {
 	now     Clock
 	k8s     k8s.Client
 	log     *slog.Logger
+	// logs serves PodLog; nil unless the gateway runs with --serve-pod-logs.
+	logs k8s.LogSource
 
 	startedAtUnixSeconds int64
 

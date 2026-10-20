@@ -1687,6 +1687,231 @@ func (x *StatsResponse) GetAccessReviews() uint64 {
 	return 0
 }
 
+type PodLogRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Both required.
+	Namespace string `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	Pod       string `protobuf:"bytes,2,opt,name=pod,proto3" json:"pod,omitempty"`
+	// Empty picks the container `kubectl logs` would: the one named by the
+	// kubectl.kubernetes.io/default-container annotation, otherwise the first.
+	// The API server does neither, and rejects a pod with several containers.
+	Container string `protobuf:"bytes,3,opt,name=container,proto3" json:"container,omitempty"`
+	// How many of the newest lines to read. Required and positive; the gateway
+	// rejects more than it will serve rather than clamping silently.
+	TailLines int64 `protobuf:"varint,4,opt,name=tail_lines,json=tailLines,proto3" json:"tail_lines,omitempty"`
+	// If set, only lines at or after this time. Kubernetes honours it to the
+	// second.
+	SinceTime *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=since_time,json=sinceTime,proto3" json:"since_time,omitempty"`
+	// Read the container's previous instance, before its last restart. This is
+	// where a crash's output is.
+	Previous bool `protobuf:"varint,6,opt,name=previous,proto3" json:"previous,omitempty"`
+	// How many bytes of log text to return at most. Required and positive, and
+	// no more than the gateway's ceiling.
+	MaxBytes      int64 `protobuf:"varint,7,opt,name=max_bytes,json=maxBytes,proto3" json:"max_bytes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PodLogRequest) Reset() {
+	*x = PodLogRequest{}
+	mi := &file_axiom_v1_axiom_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PodLogRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PodLogRequest) ProtoMessage() {}
+
+func (x *PodLogRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_axiom_v1_axiom_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PodLogRequest.ProtoReflect.Descriptor instead.
+func (*PodLogRequest) Descriptor() ([]byte, []int) {
+	return file_axiom_v1_axiom_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *PodLogRequest) GetNamespace() string {
+	if x != nil {
+		return x.Namespace
+	}
+	return ""
+}
+
+func (x *PodLogRequest) GetPod() string {
+	if x != nil {
+		return x.Pod
+	}
+	return ""
+}
+
+func (x *PodLogRequest) GetContainer() string {
+	if x != nil {
+		return x.Container
+	}
+	return ""
+}
+
+func (x *PodLogRequest) GetTailLines() int64 {
+	if x != nil {
+		return x.TailLines
+	}
+	return 0
+}
+
+func (x *PodLogRequest) GetSinceTime() *timestamppb.Timestamp {
+	if x != nil {
+		return x.SinceTime
+	}
+	return nil
+}
+
+func (x *PodLogRequest) GetPrevious() bool {
+	if x != nil {
+		return x.Previous
+	}
+	return false
+}
+
+func (x *PodLogRequest) GetMaxBytes() int64 {
+	if x != nil {
+		return x.MaxBytes
+	}
+	return 0
+}
+
+type PodLogResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The container read: the one requested, or the one chosen for an empty
+	// request.
+	Container string `protobuf:"bytes,1,opt,name=container,proto3" json:"container,omitempty"`
+	// Oldest first.
+	Lines []*LogLine `protobuf:"bytes,2,rep,name=lines,proto3" json:"lines,omitempty"`
+	// True when lines were left out to stay within max_bytes, or one was cut.
+	Truncated     bool `protobuf:"varint,3,opt,name=truncated,proto3" json:"truncated,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PodLogResponse) Reset() {
+	*x = PodLogResponse{}
+	mi := &file_axiom_v1_axiom_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PodLogResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PodLogResponse) ProtoMessage() {}
+
+func (x *PodLogResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_axiom_v1_axiom_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PodLogResponse.ProtoReflect.Descriptor instead.
+func (*PodLogResponse) Descriptor() ([]byte, []int) {
+	return file_axiom_v1_axiom_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *PodLogResponse) GetContainer() string {
+	if x != nil {
+		return x.Container
+	}
+	return ""
+}
+
+func (x *PodLogResponse) GetLines() []*LogLine {
+	if x != nil {
+		return x.Lines
+	}
+	return nil
+}
+
+func (x *PodLogResponse) GetTruncated() bool {
+	if x != nil {
+		return x.Truncated
+	}
+	return false
+}
+
+// LogLine is one line of a container's log, without its trailing newline.
+type LogLine struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// When the container runtime recorded the line. Unset if the runtime gave
+	// no timestamp the gateway could read.
+	Time *timestamppb.Timestamp `protobuf:"bytes,1,opt,name=time,proto3" json:"time,omitempty"`
+	// Valid UTF-8 with no NUL bytes: the gateway replaces invalid sequences with
+	// U+FFFD and drops NULs, since a Postgres text value accepts neither.
+	Text          string `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LogLine) Reset() {
+	*x = LogLine{}
+	mi := &file_axiom_v1_axiom_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LogLine) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LogLine) ProtoMessage() {}
+
+func (x *LogLine) ProtoReflect() protoreflect.Message {
+	mi := &file_axiom_v1_axiom_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LogLine.ProtoReflect.Descriptor instead.
+func (*LogLine) Descriptor() ([]byte, []int) {
+	return file_axiom_v1_axiom_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *LogLine) GetTime() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Time
+	}
+	return nil
+}
+
+func (x *LogLine) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
 var File_axiom_v1_axiom_proto protoreflect.FileDescriptor
 
 const file_axiom_v1_axiom_proto_rawDesc = "" +
@@ -1802,14 +2027,31 @@ const file_axiom_v1_axiom_proto_rawDesc = "" +
 	"\x0fopenapi_fetches\x18\t \x01(\x04R\x0eopenapiFetches\x124\n" +
 	"\x16openapi_group_versions\x18\n" +
 	" \x01(\x04R\x14openapiGroupVersions\x12%\n" +
-	"\x0eaccess_reviews\x18\v \x01(\x04R\raccessReviews*\x8f\x01\n" +
+	"\x0eaccess_reviews\x18\v \x01(\x04R\raccessReviews\"\xf0\x01\n" +
+	"\rPodLogRequest\x12\x1c\n" +
+	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x10\n" +
+	"\x03pod\x18\x02 \x01(\tR\x03pod\x12\x1c\n" +
+	"\tcontainer\x18\x03 \x01(\tR\tcontainer\x12\x1d\n" +
+	"\n" +
+	"tail_lines\x18\x04 \x01(\x03R\ttailLines\x129\n" +
+	"\n" +
+	"since_time\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tsinceTime\x12\x1a\n" +
+	"\bprevious\x18\x06 \x01(\bR\bprevious\x12\x1b\n" +
+	"\tmax_bytes\x18\a \x01(\x03R\bmaxBytes\"u\n" +
+	"\x0ePodLogResponse\x12\x1c\n" +
+	"\tcontainer\x18\x01 \x01(\tR\tcontainer\x12'\n" +
+	"\x05lines\x18\x02 \x03(\v2\x11.axiom.v1.LogLineR\x05lines\x12\x1c\n" +
+	"\ttruncated\x18\x03 \x01(\bR\ttruncated\"M\n" +
+	"\aLogLine\x12.\n" +
+	"\x04time\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x04time\x12\x12\n" +
+	"\x04text\x18\x02 \x01(\tR\x04text*\x8f\x01\n" +
 	"\aSqlType\x12\x18\n" +
 	"\x14SQL_TYPE_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rSQL_TYPE_TEXT\x10\x01\x12\x12\n" +
 	"\x0eSQL_TYPE_JSONB\x10\x02\x12\x13\n" +
 	"\x0fSQL_TYPE_BIGINT\x10\x03\x12\x14\n" +
 	"\x10SQL_TYPE_BOOLEAN\x10\x04\x12\x18\n" +
-	"\x14SQL_TYPE_TIMESTAMPTZ\x10\x052\x86\x05\n" +
+	"\x14SQL_TYPE_TIMESTAMPTZ\x10\x052\xc3\x05\n" +
 	"\x0eGatewayService\x125\n" +
 	"\x04Ping\x12\x15.axiom.v1.PingRequest\x1a\x16.axiom.v1.PingResponse\x122\n" +
 	"\x03Get\x12\x14.axiom.v1.GetRequest\x1a\x15.axiom.v1.GetResponse\x125\n" +
@@ -1820,7 +2062,8 @@ const file_axiom_v1_axiom_proto_rawDesc = "" +
 	"\tSubscribe\x12\x1a.axiom.v1.SubscribeRequest\x1a\x1b.axiom.v1.SubscribeResponse0\x01\x12S\n" +
 	"\x0eDiscoverSchema\x12\x1f.axiom.v1.DiscoverSchemaRequest\x1a .axiom.v1.DiscoverSchemaResponse\x12D\n" +
 	"\tListKinds\x12\x1a.axiom.v1.ListKindsRequest\x1a\x1b.axiom.v1.ListKindsResponse\x128\n" +
-	"\x05Stats\x12\x16.axiom.v1.StatsRequest\x1a\x17.axiom.v1.StatsResponseB<Z:github.com/dhilipkumars/axiom/gateway/gen/axiom/v1;axiomv1b\x06proto3"
+	"\x05Stats\x12\x16.axiom.v1.StatsRequest\x1a\x17.axiom.v1.StatsResponse\x12;\n" +
+	"\x06PodLog\x12\x17.axiom.v1.PodLogRequest\x1a\x18.axiom.v1.PodLogResponseB<Z:github.com/dhilipkumars/axiom/gateway/gen/axiom/v1;axiomv1b\x06proto3"
 
 var (
 	file_axiom_v1_axiom_proto_rawDescOnce sync.Once
@@ -1835,7 +2078,7 @@ func file_axiom_v1_axiom_proto_rawDescGZIP() []byte {
 }
 
 var file_axiom_v1_axiom_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_axiom_v1_axiom_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
+var file_axiom_v1_axiom_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
 var file_axiom_v1_axiom_proto_goTypes = []any{
 	(SqlType)(0),                   // 0: axiom.v1.SqlType
 	(SubscribeResponse_Type)(0),    // 1: axiom.v1.SubscribeResponse.Type
@@ -1863,10 +2106,13 @@ var file_axiom_v1_axiom_proto_goTypes = []any{
 	(*ListKindsResponse)(nil),      // 23: axiom.v1.ListKindsResponse
 	(*StatsRequest)(nil),           // 24: axiom.v1.StatsRequest
 	(*StatsResponse)(nil),          // 25: axiom.v1.StatsResponse
-	(*timestamppb.Timestamp)(nil),  // 26: google.protobuf.Timestamp
+	(*PodLogRequest)(nil),          // 26: axiom.v1.PodLogRequest
+	(*PodLogResponse)(nil),         // 27: axiom.v1.PodLogResponse
+	(*LogLine)(nil),                // 28: axiom.v1.LogLine
+	(*timestamppb.Timestamp)(nil),  // 29: google.protobuf.Timestamp
 }
 var file_axiom_v1_axiom_proto_depIdxs = []int32{
-	26, // 0: axiom.v1.PingResponse.server_time:type_name -> google.protobuf.Timestamp
+	29, // 0: axiom.v1.PingResponse.server_time:type_name -> google.protobuf.Timestamp
 	4,  // 1: axiom.v1.GetRequest.gvk:type_name -> axiom.v1.GroupVersionKind
 	5,  // 2: axiom.v1.GetResponse.object:type_name -> axiom.v1.Object
 	4,  // 3: axiom.v1.ListRequest.gvk:type_name -> axiom.v1.GroupVersionKind
@@ -1885,31 +2131,36 @@ var file_axiom_v1_axiom_proto_depIdxs = []int32{
 	4,  // 16: axiom.v1.DiscoverSchemaRequest.gvk:type_name -> axiom.v1.GroupVersionKind
 	19, // 17: axiom.v1.DiscoverSchemaResponse.schema:type_name -> axiom.v1.KindSchema
 	19, // 18: axiom.v1.ListKindsResponse.kinds:type_name -> axiom.v1.KindSchema
-	2,  // 19: axiom.v1.GatewayService.Ping:input_type -> axiom.v1.PingRequest
-	6,  // 20: axiom.v1.GatewayService.Get:input_type -> axiom.v1.GetRequest
-	8,  // 21: axiom.v1.GatewayService.List:input_type -> axiom.v1.ListRequest
-	10, // 22: axiom.v1.GatewayService.Create:input_type -> axiom.v1.CreateRequest
-	12, // 23: axiom.v1.GatewayService.Update:input_type -> axiom.v1.UpdateRequest
-	14, // 24: axiom.v1.GatewayService.Delete:input_type -> axiom.v1.DeleteRequest
-	16, // 25: axiom.v1.GatewayService.Subscribe:input_type -> axiom.v1.SubscribeRequest
-	20, // 26: axiom.v1.GatewayService.DiscoverSchema:input_type -> axiom.v1.DiscoverSchemaRequest
-	22, // 27: axiom.v1.GatewayService.ListKinds:input_type -> axiom.v1.ListKindsRequest
-	24, // 28: axiom.v1.GatewayService.Stats:input_type -> axiom.v1.StatsRequest
-	3,  // 29: axiom.v1.GatewayService.Ping:output_type -> axiom.v1.PingResponse
-	7,  // 30: axiom.v1.GatewayService.Get:output_type -> axiom.v1.GetResponse
-	9,  // 31: axiom.v1.GatewayService.List:output_type -> axiom.v1.ListResponse
-	11, // 32: axiom.v1.GatewayService.Create:output_type -> axiom.v1.CreateResponse
-	13, // 33: axiom.v1.GatewayService.Update:output_type -> axiom.v1.UpdateResponse
-	15, // 34: axiom.v1.GatewayService.Delete:output_type -> axiom.v1.DeleteResponse
-	17, // 35: axiom.v1.GatewayService.Subscribe:output_type -> axiom.v1.SubscribeResponse
-	21, // 36: axiom.v1.GatewayService.DiscoverSchema:output_type -> axiom.v1.DiscoverSchemaResponse
-	23, // 37: axiom.v1.GatewayService.ListKinds:output_type -> axiom.v1.ListKindsResponse
-	25, // 38: axiom.v1.GatewayService.Stats:output_type -> axiom.v1.StatsResponse
-	29, // [29:39] is the sub-list for method output_type
-	19, // [19:29] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	29, // 19: axiom.v1.PodLogRequest.since_time:type_name -> google.protobuf.Timestamp
+	28, // 20: axiom.v1.PodLogResponse.lines:type_name -> axiom.v1.LogLine
+	29, // 21: axiom.v1.LogLine.time:type_name -> google.protobuf.Timestamp
+	2,  // 22: axiom.v1.GatewayService.Ping:input_type -> axiom.v1.PingRequest
+	6,  // 23: axiom.v1.GatewayService.Get:input_type -> axiom.v1.GetRequest
+	8,  // 24: axiom.v1.GatewayService.List:input_type -> axiom.v1.ListRequest
+	10, // 25: axiom.v1.GatewayService.Create:input_type -> axiom.v1.CreateRequest
+	12, // 26: axiom.v1.GatewayService.Update:input_type -> axiom.v1.UpdateRequest
+	14, // 27: axiom.v1.GatewayService.Delete:input_type -> axiom.v1.DeleteRequest
+	16, // 28: axiom.v1.GatewayService.Subscribe:input_type -> axiom.v1.SubscribeRequest
+	20, // 29: axiom.v1.GatewayService.DiscoverSchema:input_type -> axiom.v1.DiscoverSchemaRequest
+	22, // 30: axiom.v1.GatewayService.ListKinds:input_type -> axiom.v1.ListKindsRequest
+	24, // 31: axiom.v1.GatewayService.Stats:input_type -> axiom.v1.StatsRequest
+	26, // 32: axiom.v1.GatewayService.PodLog:input_type -> axiom.v1.PodLogRequest
+	3,  // 33: axiom.v1.GatewayService.Ping:output_type -> axiom.v1.PingResponse
+	7,  // 34: axiom.v1.GatewayService.Get:output_type -> axiom.v1.GetResponse
+	9,  // 35: axiom.v1.GatewayService.List:output_type -> axiom.v1.ListResponse
+	11, // 36: axiom.v1.GatewayService.Create:output_type -> axiom.v1.CreateResponse
+	13, // 37: axiom.v1.GatewayService.Update:output_type -> axiom.v1.UpdateResponse
+	15, // 38: axiom.v1.GatewayService.Delete:output_type -> axiom.v1.DeleteResponse
+	17, // 39: axiom.v1.GatewayService.Subscribe:output_type -> axiom.v1.SubscribeResponse
+	21, // 40: axiom.v1.GatewayService.DiscoverSchema:output_type -> axiom.v1.DiscoverSchemaResponse
+	23, // 41: axiom.v1.GatewayService.ListKinds:output_type -> axiom.v1.ListKindsResponse
+	25, // 42: axiom.v1.GatewayService.Stats:output_type -> axiom.v1.StatsResponse
+	27, // 43: axiom.v1.GatewayService.PodLog:output_type -> axiom.v1.PodLogResponse
+	33, // [33:44] is the sub-list for method output_type
+	22, // [22:33] is the sub-list for method input_type
+	22, // [22:22] is the sub-list for extension type_name
+	22, // [22:22] is the sub-list for extension extendee
+	0,  // [0:22] is the sub-list for field type_name
 }
 
 func init() { file_axiom_v1_axiom_proto_init() }
@@ -1924,7 +2175,7 @@ func file_axiom_v1_axiom_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_axiom_v1_axiom_proto_rawDesc), len(file_axiom_v1_axiom_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   24,
+			NumMessages:   27,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

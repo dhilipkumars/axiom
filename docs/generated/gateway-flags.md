@@ -12,6 +12,7 @@ The gateway takes all of its configuration from flags. It reads no environment v
 | `-kubeconfig` | _(none)_ | path to a kubeconfig; empty means in-cluster config |
 | `-listen` | `:8443` | TCP address to listen on |
 | `-no-cluster` | `false` | serve Ping only; Get/List fail with FAILED_PRECONDITION (Phase 0 plumbing mode) |
+| `-serve-pod-logs` | `false` | serve container logs to SQL (axiom_pod_log); requires pods in --serve. Off by default because logs often hold secrets, and the shipped RBAC already grants pods/log through the view role, so this flag is the switch |
 | `-serve` | `*.*` | comma-separated resources this gateway serves, as plural[.group] (e.g. "pods,configmaps,widgets.example.com"); "*.group" covers a whole group. Scope the ServiceAccount's RBAC to match: this bounds what is offered, RBAC enforces it |
 | `-tls-cert` | _(none)_ | path to PEM server certificate (required) |
 | `-tls-key` | _(none)_ | path to PEM server private key (required) |
