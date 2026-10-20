@@ -5,8 +5,12 @@
 # a byte that is not UTF-8. restartPolicy Never, so it has no previous
 # instance.
 #
-# crasher: prints a "backtrace" and exits, so after its first restart its
-# previous instance holds that output.
+# crasher: prints a "backtrace" and exits once, then stays up, so its previous
+# instance holds the crash. A pod that keeps crashing would not do: the
+# kubelet keeps one exited instance per container, so while the latest crash
+# waits out its back-off, the one before it is already gone and `previous`
+# reads nothing -- which is Kubernetes' behaviour, and kubectl's too. The
+# emptyDir outlives the container, which is how the second run knows.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -50,13 +54,24 @@ metadata:
 spec:
   restartPolicy: Always
   terminationGracePeriodSeconds: 0
+  volumes:
+    - name: state
+      emptyDir: {}
   containers:
     - name: app
       image: registry.k8s.io/e2e-test-images/busybox:1.36.1-1
+      volumeMounts:
+        - name: state
+          mountPath: /state
       command:
         - sh
         - -c
         - |
+          if [ -e /state/crashed ]; then
+            echo second life
+            sleep 3600
+          fi
+          touch /state/crashed
           echo starting
           echo "backtrace: boom"
           exit 1

@@ -339,6 +339,36 @@ func TestPodLogRefusesAWindowOverTheTransferCeiling(t *testing.T) {
 	}
 }
 
+// The kubelet reports an instance it has already removed in the body of a
+// successful response. That is no log, not a line of one.
+func TestPodLogTreatsAnInstanceTheKubeletLostAsNoLog(t *testing.T) {
+	t.Parallel()
+	crashed := corev1.ContainerStatus{
+		Name:                 "app",
+		State:                corev1.ContainerState{Terminated: terminated("containerd://new")},
+		LastTerminationState: corev1.ContainerState{Terminated: terminated("containerd://old")},
+	}
+	srv := newLogServer(t, textLogs("unable to retrieve container logs for containerd://old"),
+		logPod("web", nil, []corev1.ContainerStatus{crashed}, "app"))
+	req := logReq("web")
+	req.Previous = true
+	resp, err := srv.PodLog(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.GetLines()) != 0 || resp.GetTruncated() {
+		t.Fatalf("lines = %q, truncated = %t; want no lines", texts(resp), resp.GetTruncated())
+	}
+
+	// A real line that happens to say the same thing carries a timestamp.
+	srv = newLogServer(t, textLogs("2026-10-19T12:00:00Z unable to retrieve container logs for x\n"),
+		logPod("web", nil, nil, "app"))
+	resp, err = srv.PodLog(context.Background(), logReq("web"))
+	if err != nil || len(resp.GetLines()) != 1 {
+		t.Fatalf("a timestamped line was taken for the kubelet's error: %v, %q", err, texts(resp))
+	}
+}
+
 func TestPodLogMapsAPIErrors(t *testing.T) {
 	t.Parallel()
 	logs := &fakeLogs{err: apierrors.NewBadRequest(`container "app" in pod "web" is waiting to start`)}

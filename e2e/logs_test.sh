@@ -30,10 +30,10 @@ kubectl_e2e delete namespace "$NS" --ignore-not-found --wait=true >/dev/null
 kubectl_e2e apply -f "$E2E_ROOT/e2e/fixtures/logs.yaml" >/dev/null || fail "apply logs fixture"
 kubectl_e2e -n "$NS" wait --for=condition=Ready pod/printer --timeout=120s >/dev/null \
   || fail "printer did not become ready"
+# Crashed once, restarted, and printing from its second life.
 deadline=$((SECONDS + 120))
-until [[ "$(kubectl_e2e -n "$NS" get pod crasher \
-             -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}' 2>/dev/null)" == "1" ]]; do
-  (( SECONDS < deadline )) || fail "crasher never restarted"
+until kubectl_e2e -n "$NS" logs crasher 2>/dev/null | grep -q '^second life'; do
+  (( SECONDS < deadline )) || fail "crasher never restarted into its second life"
   sleep 2
 done
 # The app container prints and then sleeps; wait until its lines are written.
@@ -86,16 +86,19 @@ echo "container, tail_lines, max_bytes and since all applied"
 log "a crash's output is in the previous instance"
 got="$(psql_axiom "SELECT string_agg(line, '|' ORDER BY line_no) FROM axiom_pod_log('kind', '$NS', 'crasher', previous => true);")"
 [[ "$got" == "starting|backtrace: boom" ]] || fail "crasher's previous log: '$got'"
+got="$(psql_axiom "SELECT string_agg(line, '|' ORDER BY line_no) FROM axiom_pod_log('kind', '$NS', 'crasher');")"
+[[ "$got" == "second life" ]] || fail "crasher's current log: '$got'"
 got="$(psql_axiom "SELECT count(*) FROM axiom_pod_log('kind', '$NS', 'printer', previous => true);")"
 [[ "$got" == "0" ]] || fail "a container that never restarted has no previous log, got $got rows"
-echo "previous reads the crash; a container that never restarted is no rows, not an error"
+echo "previous reads the crash, the current instance its second life; a container that never restarted is no rows, not an error"
 
-log "LATERAL over pods: one query, every pod's previous log"
+log "LATERAL over pods: the docs' query, every pod's latest crash"
 psql_axiom "CREATE SCHEMA k8s;"
 psql_axiom "IMPORT FOREIGN SCHEMA k8s LIMIT TO (core_pods) FROM SERVER kind INTO k8s;"
 got="$(psql_axiom "SELECT string_agg(p.name || ':' || l.line, '|' ORDER BY p.name, l.line_no)
                      FROM k8s.core_pods p,
-                          LATERAL axiom_pod_log('kind', p.namespace, p.name, previous => true) l
+                          LATERAL axiom_pod_log('kind', p.namespace, p.name,
+                            previous => coalesce(p.status->'containerStatuses'->0->'state' ? 'running', false)) l
                     WHERE p.namespace = '$NS';")"
 [[ "$got" == "crasher:starting|crasher:backtrace: boom" ]] || fail "LATERAL: '$got'"
 echo "$got"

@@ -46,13 +46,20 @@ one `kubectl logs` would pick: the container named by the
 
 ## Why did it crash?
 
-A crash's output is in the container's previous instance, before its last
-restart. `LATERAL` reads it for every failed pod in one statement:
+`previous => true` reads the instance before the container's last restart, as
+`kubectl logs --previous` does. Kubernetes keeps one exited instance per
+container. So once a container is running again, its crash is in the previous
+instance. While it's still down, the crash is the current instance, and the
+one before it is usually gone.
+
+So ask for `previous` only when the container is running again. `LATERAL`
+then reads the latest crash of every failed pod in one statement:
 
 ```sql
 SELECT p.name, l.line
   FROM k8s.core_pods p,
-       LATERAL axiom_pod_log('prod', p.namespace, p.name, previous => true) l
+       LATERAL axiom_pod_log('prod', p.namespace, p.name,
+         previous => coalesce(p.status->'containerStatuses'->0->'state' ? 'running', false)) l
  WHERE p.namespace = 'axiom-logs'
  ORDER BY p.name, l.line_no;
 ```
@@ -65,9 +72,11 @@ SELECT p.name, l.line
 (2 rows)
 ```
 
-`printer` has never restarted, so it has no previous instance and adds no rows.
-The same applies to a container that hasn't started yet. Neither is an error,
-so one such pod doesn't fail a query over many.
+`crasher` crashed once and is running again, so its crash is the previous
+instance. `printer` has never restarted and has no previous instance, so it
+adds no rows. Neither does a container that hasn't started, or a previous
+instance Kubernetes has already removed. None of these is an error, so one
+such pod doesn't fail a query over many.
 
 ## The arguments
 

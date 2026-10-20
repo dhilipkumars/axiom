@@ -144,7 +144,7 @@ PodLog reads the tail of one container's log, bounded in lines and bytes (issue 
 
 Off unless the gateway was started with --serve-pod-logs, which also requires pods to be in --serve. Logs often hold secrets, and the shipped RBAC already grants pods/log through Kubernetes' `view` role, so RBAC cannot be the switch.
 
-When the window holds more than max_bytes, the newest bytes are kept and `truncated` is set: the end of a log is where a crash is. A container that has not started, or a `previous` request for a container that has never restarted, has no such log and returns no lines rather than an error, so one such pod does not fail a query over many.
+When the window holds more than max_bytes, the newest bytes are kept and `truncated` is set: the end of a log is where a crash is. A container that has not started, a `previous` request for a container that has never restarted, or an instance the kubelet has already removed (it keeps one exited instance per container) has no such log and returns no lines rather than an error, so one such pod does not fail a query over many.
 
 Errors: INVALID_ARGUMENT for invalid names or bounds, or a container the pod does not have; NOT_FOUND if the pod does not exist; FAILED_PRECONDITION if this gateway does not serve pod logs or has no cluster; RESOURCE_EXHAUSTED if the requested window is larger than the gateway will read; PERMISSION_DENIED / UNAVAILABLE as for Get.
 

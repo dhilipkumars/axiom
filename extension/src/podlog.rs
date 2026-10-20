@@ -39,9 +39,9 @@ pub const MAX_TAIL_LINES: i32 = 100_000;
 /// At most `tail_lines` lines and `max_bytes` bytes of text come back. When the
 /// window holds more, the newest bytes are kept and every row has `truncated`
 /// set, so a query can tell a cut result from a complete one. A container that
-/// has not started, or a `previous` read of one that never restarted, returns
-/// no rows rather than an error, so one such pod does not fail a query over
-/// many.
+/// has not started, a `previous` read of one that never restarted, or an
+/// instance Kubernetes has already removed returns no rows rather than an
+/// error, so one such pod does not fail a query over many.
 ///
 /// Requires `USAGE` on the server, like `axiom_gateway_stats`, and is not
 /// executable by `PUBLIC`: logs often hold secrets. A role is given scoped

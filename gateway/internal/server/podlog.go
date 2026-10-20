@@ -141,6 +141,14 @@ func (s *Server) PodLog(ctx context.Context, req *axiomv1.PodLogRequest) (*axiom
 	if err := readLogLines(rc, int(req.GetMaxBytes())+maxTimestampPrefix, buf.add); err != nil {
 		return nil, err
 	}
+	if kubeletLostTheLog(buf.lines) {
+		// The instance was removed after the status said it existed: the
+		// kubelet keeps one exited instance per container, so a crash-looping
+		// container's `previous` is usually gone while the latest crash waits
+		// out its back-off. Like a log that never existed, that is no lines.
+		s.logPodLog(ctx, req, container, resp, "gone")
+		return resp, nil
+	}
 	resp.Lines, resp.Truncated = buf.lines, buf.truncated
 	s.logPodLog(ctx, req, container, resp, "read")
 	return resp, nil
@@ -261,6 +269,18 @@ func containerStatus(pod *corev1.Pod, container string) *corev1.ContainerStatus 
 		}
 	}
 	return nil
+}
+
+// kubeletLostTheLog reports whether a reply is the kubelet saying it could
+// not read the container's log rather than the log itself.
+//
+// The kubelet reports that in the body of a successful response, as one line
+// of text, so it would otherwise reach SQL as a log line. It is recognisable
+// because every real line carries a timestamp when timestamps are requested,
+// and this one does not.
+func kubeletLostTheLog(lines []*axiomv1.LogLine) bool {
+	return len(lines) == 1 && lines[0].GetTime() == nil &&
+		strings.HasPrefix(lines[0].GetText(), "unable to retrieve container logs for ")
 }
 
 // readLogLines splits a timestamped log stream into lines and hands each to

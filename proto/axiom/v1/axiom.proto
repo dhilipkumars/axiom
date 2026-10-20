@@ -161,9 +161,10 @@ service GatewayService {
   //
   // When the window holds more than max_bytes, the newest bytes are kept and
   // `truncated` is set: the end of a log is where a crash is. A container
-  // that has not started, or a `previous` request for a container that has
-  // never restarted, has no such log and returns no lines rather than an
-  // error, so one such pod does not fail a query over many.
+  // that has not started, a `previous` request for a container that has
+  // never restarted, or an instance the kubelet has already removed (it keeps
+  // one exited instance per container) has no such log and returns no lines
+  // rather than an error, so one such pod does not fail a query over many.
   //
   // Errors: INVALID_ARGUMENT for invalid names or bounds, or a container the
   // pod does not have; NOT_FOUND if the pod does not exist; FAILED_PRECONDITION
