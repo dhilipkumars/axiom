@@ -145,10 +145,20 @@ func (s *Server) fetchBoundedPage(
 			size += len(po.GetJson())
 			objs = append(objs, po)
 		}
-		if size <= maxPageBytes || limit <= 1 || !mayShrink() {
+		// One object cannot be split by asking for fewer, so a page that is
+		// over budget with a single object in it is returned as it is; the
+		// caller says why it cannot be sent.
+		if size <= maxPageBytes || limit <= 1 || len(list.Items) <= 1 || !mayShrink() {
 			return objs, list, size, limit, nil
 		}
 		shrunk = true
+		// Halve what came back, not what was asked for. A short final page --
+		// four large objects returned for a limit of 200 -- was otherwise
+		// fetched again at 100, 50, 25, 13, 7 and 4, the same four objects each
+		// time, before 2 split them: eight List calls where two do.
+		if n := len(list.Items); n < int(limit) {
+			limit = int32(n) //nolint:gosec // n < limit, which is an int32, so n fits in one
+		}
 		// Round up, so 3 becomes 2 rather than 1. Halving downwards
 		// overshoots on small limits and buys an extra round trip for a page
 		// that would have fit. Still strictly decreasing while limit > 1, so

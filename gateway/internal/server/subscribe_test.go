@@ -38,12 +38,37 @@ func newRecorder(ctx context.Context) *recorder {
 func (r *recorder) Context() context.Context                 { return r.ctx }
 func (r *recorder) Send(ev *axiomv1.SubscribeResponse) error { r.events <- ev; return nil }
 
+// eventWait bounds how long next waits for an event that should arrive. It is
+// generous because it only matters when the stream is broken: a passing test
+// never waits it out. It was 5 seconds, which a loaded CI runner under -race
+// exceeded in TestSubscribeShrinksALaterPageThatOutgrowsTheFirst while the
+// gateway re-fetched the same megabyte-sized objects at every halving of the
+// limit (fixed in fetchBoundedPage); this leaves room for a slow runner.
+const eventWait = 30 * time.Second
+
+// nextOrDone is next for a test that also holds Subscribe's result: if
+// Subscribe returns before the next event, the test fails with its error
+// rather than with a timeout that hides it.
+func (r *recorder) nextOrDone(t *testing.T, done <-chan error) *axiomv1.SubscribeResponse {
+	t.Helper()
+	select {
+	case ev := <-r.events:
+		return ev
+	case err := <-done:
+		t.Fatalf("Subscribe returned before the next event: %v", err)
+		return nil
+	case <-time.After(eventWait):
+		t.Fatal("timed out waiting for a watch event")
+		return nil
+	}
+}
+
 func (r *recorder) next(t *testing.T) *axiomv1.SubscribeResponse {
 	t.Helper()
 	select {
 	case ev := <-r.events:
 		return ev
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("timed out waiting for a watch event")
 		return nil
 	}
@@ -365,12 +390,7 @@ func TestSubscribeShrinksALaterPageThatOutgrowsTheFirst(t *testing.T) {
 
 	seen := map[string]int{}
 	for synced := false; !synced; {
-		select {
-		case err := <-done:
-			t.Fatalf("#85: the initial listing failed before SYNCED: %v", err)
-		default:
-		}
-		ev := rec.next(t)
+		ev := rec.nextOrDone(t, done)
 		switch ev.GetType() {
 		case axiomv1.SubscribeResponse_TYPE_ADDED:
 			seen[ev.GetObject().GetName()]++

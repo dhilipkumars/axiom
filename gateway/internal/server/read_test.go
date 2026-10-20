@@ -393,6 +393,54 @@ func TestListShrinksAPageThatExceedsTheByteBudget(t *testing.T) {
 	}
 }
 
+// A page that comes back with fewer objects than were asked for -- the end of
+// a collection, or a collection smaller than the limit -- shrinks from what it
+// held, not from the limit. Halving the limit instead fetched the same large
+// objects again at every step down to their own count.
+func TestListShrinksFromTheObjectsReturnedNotTheLimit(t *testing.T) {
+	t.Parallel()
+	// Six objects, four of them 1.5 MiB: 6 MiB in all, over the 4 MiB budget.
+	items := []unstructured.Unstructured{padded("small-0", 8), padded("small-1", 8)}
+	for i := range 4 {
+		items = append(items, padded(fmt.Sprintf("large-%d", i), 3<<19))
+	}
+	pc := &pagingClient{items: items}
+	s := New("test", nil, pc, nil)
+
+	resp, err := s.List(context.Background(), &axiomv1.ListRequest{
+		Gvk:   &axiomv1.GroupVersionKind{Version: "v1", Kind: "ConfigMap"},
+		Limit: 200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 200 returns all six, too large; half of six is three, which fits.
+	if len(pc.limits) != 2 || pc.limits[0] != 200 || pc.limits[1] != 3 {
+		t.Errorf("limits were %v, want [200 3]: the same objects were fetched again", pc.limits)
+	}
+	if got := len(resp.GetObjects()); got != 3 {
+		t.Errorf("returned %d objects, want 3", got)
+	}
+}
+
+// A single object over the budget cannot be split by asking for fewer, so it
+// costs one List call, not a second at a limit of 1 for the same object.
+func TestListDoesNotRefetchASingleOversizedObject(t *testing.T) {
+	t.Parallel()
+	pc := &pagingClient{items: []unstructured.Unstructured{padded("huge", 5<<20)}}
+	s := New("test", nil, pc, nil)
+
+	_, err := s.List(context.Background(), &axiomv1.ListRequest{
+		Gvk: &axiomv1.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}, Limit: 200,
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot be split further") {
+		t.Errorf("err = %v, want the cannot-be-split explanation", err)
+	}
+	if len(pc.limits) != 1 {
+		t.Errorf("limits were %v, want one call: the same object was fetched again", pc.limits)
+	}
+}
+
 func TestListReportsASingleObjectOverTheBudget(t *testing.T) {
 	t.Parallel()
 	pc := &pagingClient{items: []unstructured.Unstructured{padded("huge", 5<<20)}}
