@@ -16,6 +16,8 @@ ignore = [
     # about an ignore that matches nothing.
     { id = "RUSTSEC-2021-0127", reason = "serde_cbor via pgrx (schema generation only, never sees gateway input)" },
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile via tonic 0.12 TLS config; PEM parsing of operator-provided CA only" },
+    # Mirrored in .cargo/audit.toml, which says why in full.
+    { id = "RUSTSEC-2026-0381", reason = "webpki-roots 0.26.11 is a shim re-exporting webpki-roots 1, which Cargo.lock pins to the patched 1.0.10; no patched 0.26 exists" },
 ]
 
 [licenses]
