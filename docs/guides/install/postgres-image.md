@@ -29,7 +29,7 @@ The image is the official `postgres` image with Axiom added, so everything its
 | Tag | Follows |
 |---|---|
 | `latest-pg16`, `latest-pg17`, `latest-pg18` | the newest release, for that major |
-| `0.2.0-pg17` (and so on) | one release; never moves |
+| `0.2.1-pg17` (and so on) | one release; never moves |
 | `latest` | the newest release, on the newest major |
 
 Pin a version in anything you keep, and move it when you choose to. Every tag
