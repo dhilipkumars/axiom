@@ -25,24 +25,19 @@ Until then, every call fails with an error naming `--serve-pod-logs`.
 ## One pod's log
 
 ```sql
-SELECT line_no, line
-  FROM axiom_pod_log('prod', 'axiom-logs', 'printer');
+--8<-- "docs/snippets/examples/pod-log.sql"
 ```
 
 ```
- line_no |     line
----------+--------------
-       1 | hello
-       2 | second line
-       3 | bad byte: �
-(3 rows)
+@@POD_LOG@@
 ```
 
-`printer` has two containers. With no `container` argument, the one read is the
-one `kubectl logs` would pick: the container named by the
-`kubectl.kubernetes.io/default-container` annotation, otherwise the first.
-`container_name` says which it was. A byte that isn't valid UTF-8 comes back as
-`�` rather than failing the query.
+`frontend` has two containers, `envoy` and `app`. With no `container`
+argument, the one read is the one `kubectl logs` would pick: the container
+named by the `kubectl.kubernetes.io/default-container` annotation, otherwise
+the first. `container_name` says which it was. The last request came from a
+client that sent Latin-1, and the byte that isn't valid UTF-8 comes back as `�`
+rather than failing the query.
 
 ## Why did it crash?
 
@@ -53,30 +48,21 @@ instance. While it's still down, the crash is the current instance, and the
 one before it is usually gone.
 
 So ask for `previous` only when the container is running again. `LATERAL`
-then reads the latest crash of every failed pod in one statement:
+then reads the latest crash of every pod that has restarted, in one statement:
 
 ```sql
-SELECT p.name, l.line
-  FROM k8s.core_pods p,
-       LATERAL axiom_pod_log('prod', p.namespace, p.name,
-         previous => coalesce(p.status->'containerStatuses'->0->'state' ? 'running', false)) l
- WHERE p.namespace = 'axiom-logs'
- ORDER BY p.name, l.line_no;
+--8<-- "docs/snippets/examples/pod-log-crashes.sql"
 ```
 
 ```
-  name   |      line
----------+-----------------
- crasher | starting
- crasher | backtrace: boom
-(2 rows)
+@@POD_LOG_CRASHES@@
 ```
 
-`crasher` crashed once and is running again, so its crash is the previous
-instance. `printer` has never restarted and has no previous instance, so it
-adds no rows. Neither does a container that hasn't started, or a previous
-instance Kubernetes has already removed. None of these is an error, so one
-such pod doesn't fail a query over many.
+`payments` panicked once and is running again, so its panic is in the previous
+instance. A pod with no such log adds no rows: one that has never restarted,
+a container that hasn't started, or a previous instance Kubernetes has already
+removed. None of these is an error, so one such pod doesn't fail a query over
+many.
 
 ## The arguments
 

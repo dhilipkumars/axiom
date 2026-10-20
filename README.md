@@ -66,6 +66,29 @@ SELECT namespace, name AS pod, phase, c->>'name' AS container,
 (1 row)
 ```
 
+### What did it print before it crashed?
+
+`kubectl logs --previous`, for every pod that has restarted, in one query.
+Logs are off by default because they often contain secrets: start the gateway
+with `-serve-pod-logs`.
+
+```sql
+SELECT p.name AS pod, l.ts, l.line
+  FROM k8s.core_pods p,
+       LATERAL axiom_pod_log('prod', p.namespace, p.name, tail_lines => 20,
+         previous => coalesce(p.status->'containerStatuses'->0->'state' ? 'running', false)) l
+ WHERE p.namespace = 'shop'
+   AND (p.status->'containerStatuses'->0->>'restartCount')::int > 0
+ ORDER BY p.name, l.line_no;
+```
+
+```
+@@POD_LOG_CRASHES@@
+```
+
+**→ [Reading pod logs](https://dhilipkumars.github.io/axiom/latest/guides/examples/pod-logs/)**
+covers the bounds, choosing a container, and giving a role one namespace's logs.
+
 ### Did your patch regress?
 
 Postgres 16, 17 and 18 clusters created by CloudNativePG from a table, a
