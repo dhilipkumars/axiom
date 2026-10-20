@@ -19,7 +19,8 @@ are the former. [docs/RELEASING.md](docs/RELEASING.md) has the full rule.
 
 ## 0.2.1
 
-A security release. Upgrade the gateway image; nothing else changes.
+A security release. Upgrade the gateway image. Upgrading the extension is
+optional: none of its advisories is reachable in Axiom.
 
 ### Security
 
