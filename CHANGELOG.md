@@ -27,10 +27,11 @@ optional: none of its advisories is reachable in Axiom.
 - **`quickstart.sh` is attached to every release**, with its checksum, and
   installs that release's images and manifests:
   `curl -fsSL https://github.com/dhilipkumars/axiom/releases/latest/download/quickstart.sh | bash`.
-  It brings up a kind cluster, the gateway and Postgres with Axiom, runs a
-  first query, and `bash -s down` removes only what it made. 0.2.0 had a copy
-  uploaded by hand; from 0.2.1 the release workflow builds it, and the
-  install check runs it unmodified before the release is promoted.
+  It brings up a kind cluster, the gateway and Postgres with Axiom, and runs a
+  first query; `curl ... | bash -s down` (or `bash quickstart.sh down`)
+  removes only what it made. 0.2.0 had a copy uploaded by hand. From 0.2.1 the
+  install check runs the script, rendered for the release, before the release
+  is promoted, and the workflow then attaches the same rendering.
 
 ### Security
 
