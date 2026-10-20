@@ -120,6 +120,32 @@ pub fn format(pg_micros: i64) -> Option<String> {
     ))
 }
 
+/// Converts a protobuf timestamp (seconds and nanoseconds from the Unix epoch)
+/// to microseconds since the Postgres epoch. Nanoseconds past the microsecond
+/// are truncated, as for [`parse`]. `None` if the result overflows.
+#[must_use]
+pub fn from_unix(seconds: i64, nanos: i32) -> Option<i64> {
+    let secs = seconds.checked_sub(POSTGRES_EPOCH_UNIX_SECS)?;
+    secs.checked_mul(MICROS_PER_SEC)?
+        .checked_add(i64::from(nanos.div_euclid(1_000)))
+}
+
+/// Converts microseconds since the Postgres epoch to a protobuf timestamp's
+/// seconds and nanoseconds from the Unix epoch. `None` for Postgres's
+/// `infinity` and `-infinity`, which are the extreme values of the type and
+/// mean no point in time.
+#[must_use]
+pub fn to_unix(pg_micros: i64) -> Option<(i64, i32)> {
+    if pg_micros == i64::MAX || pg_micros == i64::MIN {
+        return None;
+    }
+    let secs = pg_micros
+        .div_euclid(MICROS_PER_SEC)
+        .checked_add(POSTGRES_EPOCH_UNIX_SECS)?;
+    let nanos = i32::try_from(pg_micros.rem_euclid(MICROS_PER_SEC) * 1_000).ok()?;
+    Some((secs, nanos))
+}
+
 /// Reads `n` ASCII digits of `b` from `at` as a number.
 fn digits(b: &[u8], at: usize, n: usize) -> Option<i64> {
     b.get(at..at + n)?.iter().try_fold(0, |acc, d| {
@@ -169,6 +195,25 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unix_round_trips_through_postgres_micros() {
+        // 2026-10-19T12:00:00.5Z
+        let pg = from_unix(1_792_411_200, 500_000_123).expect("in range");
+        assert_eq!(format(pg).as_deref(), Some("2026-10-19T12:00:00.500000Z"));
+        assert_eq!(to_unix(pg), Some((1_792_411_200, 500_000_000)));
+        // Before 2000, where the Postgres value is negative.
+        let old = from_unix(0, 1_000).expect("in range");
+        assert_eq!(format(old).as_deref(), Some("1970-01-01T00:00:00.000001Z"));
+        assert_eq!(to_unix(old), Some((0, 1_000)));
+    }
+
+    #[test]
+    fn infinity_is_no_point_in_time() {
+        assert_eq!(to_unix(i64::MAX), None);
+        assert_eq!(to_unix(i64::MIN), None);
+        assert_eq!(from_unix(i64::MIN, 0), None);
+    }
 
     #[test]
     fn the_postgres_epoch_is_zero() {

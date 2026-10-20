@@ -73,6 +73,37 @@ gateway list every namespace, and Postgres then filters. The result is
 correct, but costs a cluster-wide list. When the scope is fixed, write the
 namespaces out literally, or `UNION ALL` one branch per namespace.
 
+### Letting an agent read logs
+
+`axiom_pod_log` reads any namespace the gateway can, so it is never granted to
+an agent directly. A function owned by a trusted role fixes the server and the
+namespace, and the agent gets only that:
+
+```sql
+CREATE SCHEMA tenant;
+CREATE FUNCTION tenant.pod_log(pod text, tail_lines integer DEFAULT 100)
+  RETURNS TABLE (container_name text, line_no integer, ts timestamptz,
+                 line text, truncated boolean)
+  LANGUAGE sql STABLE SECURITY DEFINER
+  SET search_path = pg_catalog, pg_temp
+  AS $$ SELECT * FROM public.axiom_pod_log('prod', 'acme', pod,
+                                           tail_lines => tail_lines) $$;
+REVOKE ALL ON FUNCTION tenant.pod_log FROM PUBLIC;
+GRANT USAGE ON SCHEMA tenant TO agent_role;
+GRANT EXECUTE ON FUNCTION tenant.pod_log TO agent_role;
+```
+
+- **The server and namespace are literals.** A wrapper that takes either as an
+  argument hands the agent every namespace the gateway can read.
+- **`SET search_path`** stops a caller from substituting its own function or
+  operator for one the body uses. `SECURITY DEFINER` runs as the owner, so
+  without it the caller's objects run with the owner's privileges.
+- **The owner needs `EXECUTE` on `axiom_pod_log` and `USAGE` on the server.**
+  Those stay with the owner. The agent never holds them.
+
+Logs often contain secrets that the columns of a view would have hidden.
+Granting this is a decision about the agent, not about a table.
+
 ### Letting an agent write one field
 
 To let an agent change one thing, grant that column on the table and nothing
@@ -123,6 +154,9 @@ ConfigMaps and nothing else.
 - **`EXECUTE` on `axiom_watch_status()`.** It isn't granted by default, because
   it names every watched resource and namespace whatever the role's other
   grants. Keep it for monitoring roles.
+- **`EXECUTE` on `axiom_pod_log()`.** It reads the log of any pod the gateway
+  can see, in any namespace. Grant a wrapper that fixes the namespace instead,
+  as above.
 
 ## What Axiom does not yet enforce
 

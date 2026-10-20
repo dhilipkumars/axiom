@@ -24,7 +24,8 @@ use crate::proto::v1::gateway_service_server::{GatewayService, GatewayServiceSer
 use crate::proto::v1::subscribe_response::Type as EvType;
 use crate::proto::v1::{
     ColumnSchema, DiscoverSchemaRequest, DiscoverSchemaResponse, GroupVersionKind, KindSchema,
-    ListKindsRequest, ListKindsResponse, SqlType, StatsRequest, StatsResponse,
+    ListKindsRequest, ListKindsResponse, LogLine, PodLogRequest, PodLogResponse, SqlType,
+    StatsRequest, StatsResponse,
 };
 use crate::proto::v1::{
     CreateRequest, CreateResponse, DeleteRequest, DeleteResponse, GetRequest, GetResponse,
@@ -55,6 +56,8 @@ struct Cluster {
     event_log: Mutex<Vec<(u64, SubscribeResponse)>>,
     /// Bumping this ends every open Subscribe stream (simulates losing the gateway).
     stream_generation: tokio::sync::watch::Sender<u64>,
+    /// The last `PodLog` request, so a test can check what SQL sent (#105).
+    last_pod_log: Mutex<Option<PodLogRequest>>,
 }
 
 impl Default for Cluster {
@@ -78,6 +81,7 @@ impl Default for Cluster {
             events,
             event_log: Mutex::new(Vec::new()),
             stream_generation,
+            last_pod_log: Mutex::new(None),
         }
     }
 }
@@ -429,6 +433,53 @@ impl GatewayService for Stub {
             list_calls: self.0.list_calls.load(Ordering::SeqCst) as u64,
             subscribe_calls: self.0.subscribe_calls.load(Ordering::SeqCst) as u64,
             ..Default::default()
+        }))
+    }
+
+    /// A fixed log for any pod but two: `gone` does not exist, and `quiet`
+    /// has no log yet. The container is the one asked for, or `app`, and the
+    /// log reads as truncated when fewer than 100 bytes were asked for. The
+    /// gateway's own behaviour (choosing a container, keeping the newest
+    /// bytes) is tested in Go; this pins down what SQL makes of a reply.
+    async fn pod_log(
+        &self,
+        req: Request<PodLogRequest>,
+    ) -> Result<Response<PodLogResponse>, Status> {
+        let req = req.into_inner();
+        *self.0.last_pod_log.lock().expect("lock") = Some(req.clone());
+        let at = |seconds| {
+            Some(prost_types::Timestamp {
+                seconds,
+                nanos: 250_000_000,
+            })
+        };
+        let lines = match req.pod.as_str() {
+            "gone" => return Err(Status::not_found("pod log: pod default/gone not found")),
+            "quiet" => Vec::new(),
+            _ => vec![
+                LogLine {
+                    time: at(1_792_411_200),
+                    text: "first".to_owned(),
+                },
+                LogLine {
+                    time: None,
+                    text: "no timestamp".to_owned(),
+                },
+                LogLine {
+                    time: at(1_792_411_260),
+                    text: "last\0line".to_owned(),
+                },
+            ],
+        };
+        let container = if req.container.is_empty() {
+            "app".to_owned()
+        } else {
+            req.container.clone()
+        };
+        Ok(Response::new(PodLogResponse {
+            container,
+            lines,
+            truncated: req.max_bytes < 100,
         }))
     }
 
@@ -1814,4 +1865,239 @@ fn a_scan_follows_continuations_across_pages() {
         want.join(","),
         "page boundaries lost or reordered rows"
     );
+}
+
+// --- axiom_pod_log (#105) -------------------------------------------------------
+
+/// A transaction with a server `logs` pointing at the stub. Roll it back.
+fn pod_log_fixture<'a>(
+    pg: &'a mut postgres::Client,
+    stub: &RunningStub,
+) -> postgres::Transaction<'a> {
+    let ca = stub.ca_path.display();
+    let port = stub.addr.port();
+    let mut tx = pg.transaction().expect("begin");
+    tx.batch_execute(&format!(
+        "CREATE SERVER logs FOREIGN DATA WRAPPER axiom_fdw \
+           OPTIONS (endpoint 'https://localhost:{port}', ca_cert '{ca}', rpc_timeout_secs '5');"
+    ))
+    .expect("server");
+    tx
+}
+
+#[test]
+fn pod_log_returns_the_gateways_lines_as_rows() {
+    let stub = start_stub();
+    let mut pg = pg_client();
+    let mut tx = pod_log_fixture(&mut pg, &stub);
+
+    let rows: Vec<(String, i32, Option<String>, String, bool)> = tx
+        .query(
+            "SELECT container_name, line_no, \
+                    to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.MS'), line, truncated \
+               FROM axiom_pod_log('logs', 'default', 'web')",
+            &[],
+        )
+        .expect("pod log")
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3), r.get(4)))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "app".into(),
+                1,
+                Some("2026-10-19 12:00:00.250".into()),
+                "first".into(),
+                false
+            ),
+            ("app".into(), 2, None, "no timestamp".into(), false),
+            // A NUL from the gateway is dropped: a text value cannot hold one.
+            (
+                "app".into(),
+                3,
+                Some("2026-10-19 12:01:00.250".into()),
+                "lastline".into(),
+                false
+            ),
+        ]
+    );
+    // The defaults went out as documented.
+    let req = stub
+        .cluster
+        .last_pod_log
+        .lock()
+        .expect("lock")
+        .clone()
+        .expect("a request");
+    assert_eq!(
+        (
+            req.namespace.as_str(),
+            req.pod.as_str(),
+            req.container.as_str()
+        ),
+        ("default", "web", "")
+    );
+    assert_eq!(
+        (req.tail_lines, req.max_bytes, req.previous),
+        (100, 1_048_576, false)
+    );
+    assert!(req.since_time.is_none());
+
+    // Every argument by name, and a truncated reply marked on every row.
+    let truncated: Vec<bool> = tx
+        .query(
+            "SELECT truncated FROM axiom_pod_log('logs', 'default', 'web', \
+               container => 'sidecar', tail_lines => 5, \
+               since => '2026-10-19 11:00:00.5+00', previous => true, max_bytes => 50)",
+            &[],
+        )
+        .expect("pod log")
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert_eq!(truncated, vec![true, true, true]);
+    let req = stub
+        .cluster
+        .last_pod_log
+        .lock()
+        .expect("lock")
+        .clone()
+        .expect("a request");
+    assert_eq!(
+        (
+            req.container.as_str(),
+            req.tail_lines,
+            req.max_bytes,
+            req.previous
+        ),
+        ("sidecar", 5, 50, true)
+    );
+    assert_eq!(
+        req.since_time,
+        Some(prost_types::Timestamp {
+            seconds: 1_792_407_600,
+            nanos: 500_000_000
+        })
+    );
+
+    // A pod with no log yet is no rows, so a LATERAL join over pods keeps
+    // the ones that have one.
+    let n: i64 = tx
+        .query_one(
+            "SELECT count(*) FROM (VALUES ('web'), ('quiet')) p(name), \
+               LATERAL axiom_pod_log('logs', 'default', p.name) l",
+            &[],
+        )
+        .expect("lateral")
+        .get(0);
+    assert_eq!(n, 3);
+    tx.rollback().expect("rollback");
+}
+
+#[test]
+fn pod_log_errors_carry_their_sqlstate() {
+    let stub = start_stub();
+    let mut pg = pg_client();
+    for (sql, state, needle) in [
+        (
+            "SELECT * FROM axiom_pod_log('logs', 'default', 'gone')",
+            "42704",
+            "pod default/gone not found",
+        ),
+        (
+            "SELECT * FROM axiom_pod_log('logs', 'default', 'web', tail_lines => 0)",
+            "22023",
+            "tail_lines must be between 1 and 100000",
+        ),
+        (
+            "SELECT * FROM axiom_pod_log('logs', 'default', 'web', max_bytes => 8388609)",
+            "22023",
+            "max_bytes must be between 1 and 8388608",
+        ),
+        (
+            "SELECT * FROM axiom_pod_log('logs', 'default', 'web', since => 'infinity')",
+            "22023",
+            "not infinity",
+        ),
+    ] {
+        let mut tx = pod_log_fixture(&mut pg, &stub);
+        let e = tx.query(sql, &[]).expect_err(sql);
+        assert_eq!(sqlstate(&e), state, "{sql}: {}", message(&e));
+        assert!(message(&e).contains(needle), "{sql}: {}", message(&e));
+        tx.rollback().expect("rollback");
+    }
+}
+
+/// The privilege model from #105: not executable by PUBLIC, `USAGE` on the
+/// server required, and a `SECURITY DEFINER` wrapper as the way to give a role
+/// one namespace's logs and nothing else.
+#[test]
+fn pod_log_is_reached_through_a_wrapper_not_granted_directly() {
+    let stub = start_stub();
+    let mut pg = pg_client();
+
+    // No grant at all.
+    let mut tx = pod_log_fixture(&mut pg, &stub);
+    tx.batch_execute("CREATE ROLE log_reader; SET ROLE log_reader;")
+        .expect("role");
+    let e = tx
+        .query("SELECT * FROM axiom_pod_log('logs', 'default', 'web')", &[])
+        .expect_err("PUBLIC must not execute it");
+    assert_eq!(sqlstate(&e), "42501", "{}", message(&e));
+    tx.rollback().expect("rollback");
+
+    // EXECUTE alone is not enough: the server needs USAGE, which AUTH.md §6.1
+    // keeps from query roles.
+    let mut tx = pod_log_fixture(&mut pg, &stub);
+    tx.batch_execute(
+        "CREATE ROLE log_reader; \
+         GRANT EXECUTE ON FUNCTION axiom_pod_log TO log_reader; \
+         SET ROLE log_reader;",
+    )
+    .expect("role");
+    let e = tx
+        .query("SELECT * FROM axiom_pod_log('logs', 'default', 'web')", &[])
+        .expect_err("USAGE is required");
+    assert!(
+        message(&e).contains("permission denied for foreign server \"logs\""),
+        "{}",
+        message(&e)
+    );
+    tx.rollback().expect("rollback");
+
+    // The recipe: a wrapper owned by a role with both, fixing the server and
+    // the namespace, with search_path pinned. The caller holds only EXECUTE on
+    // the wrapper.
+    let mut tx = pod_log_fixture(&mut pg, &stub);
+    tx.batch_execute(
+        "CREATE ROLE log_reader; \
+         CREATE SCHEMA tenant; \
+         CREATE FUNCTION tenant.pod_log(pod text, tail_lines integer DEFAULT 100) \
+           RETURNS TABLE (container_name text, line_no integer, ts timestamptz, line text, truncated boolean) \
+           LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp \
+           AS $$ SELECT * FROM public.axiom_pod_log('logs', 'default', pod, tail_lines => tail_lines) $$; \
+         REVOKE ALL ON FUNCTION tenant.pod_log FROM PUBLIC; \
+         GRANT USAGE ON SCHEMA tenant TO log_reader; \
+         GRANT EXECUTE ON FUNCTION tenant.pod_log TO log_reader; \
+         SET ROLE log_reader;",
+    )
+    .expect("wrapper");
+    let lines: Vec<String> = tx
+        .query("SELECT line FROM tenant.pod_log('web')", &[])
+        .expect("the wrapper reads the log")
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert_eq!(lines, ["first", "no timestamp", "lastline"]);
+    let req = stub
+        .cluster
+        .last_pod_log
+        .lock()
+        .expect("lock")
+        .clone()
+        .expect("a request");
+    assert_eq!(req.namespace, "default", "the wrapper fixes the namespace");
+    tx.rollback().expect("rollback");
 }

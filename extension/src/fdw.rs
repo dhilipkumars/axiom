@@ -121,7 +121,7 @@ extension_sql!(
 // --- error plumbing -------------------------------------------------------------
 
 /// Raises a SQL ERROR with `code`. Never returns.
-fn raise(code: PgSqlErrorCode, msg: String) -> ! {
+pub(crate) fn raise(code: PgSqlErrorCode, msg: String) -> ! {
     pgrx::ereport!(PgLogLevel::ERROR, code, msg);
     // ereport at ERROR level unwinds to the pg_guard boundary and never returns.
     unreachable!("ereport(ERROR) returned")
@@ -144,7 +144,7 @@ fn options_sqlstate(e: &OptionsError) -> PgSqlErrorCode {
     }
 }
 
-fn client_sqlstate(e: &ClientError) -> PgSqlErrorCode {
+pub(crate) fn client_sqlstate(e: &ClientError) -> PgSqlErrorCode {
     match e.class() {
         ErrorClass::Connection => PgSqlErrorCode::ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION,
         ErrorClass::Permission => PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,

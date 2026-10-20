@@ -1,0 +1,62 @@
+# Pods whose logs the pod-log gate (#105) reads back through SQL.
+#
+# printer: two containers, with the annotation that makes `app` the one
+# `kubectl logs` reads by default. `app` prints known lines, one of them with
+# a byte that is not UTF-8. restartPolicy Never, so it has no previous
+# instance.
+#
+# crasher: prints a "backtrace" and exits, so after its first restart its
+# previous instance holds that output.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: axiom-logs
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: printer
+  namespace: axiom-logs
+  annotations:
+    kubectl.kubernetes.io/default-container: app
+spec:
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 0
+  containers:
+    - name: sidecar
+      image: registry.k8s.io/e2e-test-images/busybox:1.36.1-1
+      command:
+        - sh
+        - -c
+        - |
+          echo sidecar says hi
+          sleep 3600
+    - name: app
+      image: registry.k8s.io/e2e-test-images/busybox:1.36.1-1
+      command:
+        - sh
+        - -c
+        - |
+          echo hello
+          echo second line
+          printf 'bad byte: \377\n'
+          sleep 3600
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: crasher
+  namespace: axiom-logs
+spec:
+  restartPolicy: Always
+  terminationGracePeriodSeconds: 0
+  containers:
+    - name: app
+      image: registry.k8s.io/e2e-test-images/busybox:1.36.1-1
+      command:
+        - sh
+        - -c
+        - |
+          echo starting
+          echo "backtrace: boom"
+          exit 1

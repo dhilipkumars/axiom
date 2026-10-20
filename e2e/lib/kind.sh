@@ -378,6 +378,26 @@ tested the published image instead of this build"
   kubectl_e2e -n "$E2E_GATEWAY_SA_NS" set env deploy/axiom-gateway \
     AXIOM_SERVE="$serve" AXIOM_DISCOVERY_TTL="$discovery_ttl" >/dev/null \
     || fail "set AXIOM_SERVE / AXIOM_DISCOVERY_TTL"
+  # Pod logs are off unless the operator appends the flag (#105). It is an arg
+  # rather than an env-backed default so the shipped manifest, which pulls
+  # :latest, never passes a flag an older gateway does not know.
+  #
+  # Removed as deliberately as it is added: `kubectl apply` merges three ways
+  # and leaves alone a field the manifest did not change, so an arg a previous
+  # gate appended would otherwise survive into the next gate.
+  local args_path=/spec/template/spec/containers/0/args idx
+  idx="$(kubectl_e2e -n "$E2E_GATEWAY_SA_NS" get deploy/axiom-gateway \
+           -o jsonpath='{range .spec.template.spec.containers[0].args[*]}{@}{"\n"}{end}' \
+         | grep -nx -- '-serve-pod-logs' | head -1 | cut -d: -f1 || true)"
+  if [[ "${E2E_SERVE_POD_LOGS:-0}" == "1" && -z "$idx" ]]; then
+    kubectl_e2e -n "$E2E_GATEWAY_SA_NS" patch deploy/axiom-gateway --type=json \
+      -p "[{\"op\":\"add\",\"path\":\"$args_path/-\",\"value\":\"-serve-pod-logs\"}]" >/dev/null \
+      || fail "append -serve-pod-logs"
+  elif [[ "${E2E_SERVE_POD_LOGS:-0}" != "1" && -n "$idx" ]]; then
+    kubectl_e2e -n "$E2E_GATEWAY_SA_NS" patch deploy/axiom-gateway --type=json \
+      -p "[{\"op\":\"remove\",\"path\":\"$args_path/$((idx - 1))\"}]" >/dev/null \
+      || fail "remove -serve-pod-logs"
+  fi
   # `set env` on an unchanged value patches nothing, so force a fresh Pod.
   # Gates also need a clean process: the gateway caches discovery and access
   # answers for its lifetime, and those must not leak between gates.

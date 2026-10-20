@@ -37,6 +37,16 @@ func TestRunRejectsBadFlag(t *testing.T) {
 	}
 }
 
+// Logs are a subresource of pods, so a gateway told not to serve pods must not
+// serve their logs. The combination is refused before anything starts.
+func TestRunRefusesPodLogsWithoutPods(t *testing.T) {
+	t.Parallel()
+	err := run(context.Background(), []string{"-no-cluster", "-serve", "configmaps", "-serve-pod-logs"}, os.Stderr)
+	if err == nil || !strings.Contains(err.Error(), "--serve-pod-logs needs pods in --serve") {
+		t.Fatalf("err = %v, want the pods requirement named", err)
+	}
+}
+
 func TestRunRequiresClusterOrOptOut(t *testing.T) {
 	t.Setenv("KUBERNETES_SERVICE_HOST", "")
 	certPath, keyPath := testcert.Write(t, t.TempDir())

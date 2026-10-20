@@ -17,7 +17,7 @@ use crate::options::ServerOptions;
 use crate::proto::v1::gateway_service_client::GatewayServiceClient;
 use crate::proto::v1::{
     CreateRequest, DeleteRequest, GroupVersionKind, KindSchema, ListKindsRequest, ListRequest,
-    StatsRequest, StatsResponse, UpdateRequest,
+    PodLogRequest, PodLogResponse, StatsRequest, StatsResponse, UpdateRequest,
 };
 use crate::quals::Filter;
 use crate::resource::Resource;
@@ -410,6 +410,15 @@ pub fn stats(server: &ServerOptions) -> Result<StatsResponse, ClientError> {
         server,
         |mut c| async move { c.stats(StatsRequest {}).await },
     )
+}
+
+/// Reads one container's log (#105).
+///
+/// Never cached: each call is a live read through the gateway, bounded by the
+/// server's `rpc_timeout_secs`. The gateway validates the request again, so the
+/// bounds checked by the caller are a courtesy that gives a clearer error.
+pub fn pod_log(server: &ServerOptions, req: PodLogRequest) -> Result<PodLogResponse, ClientError> {
+    call(server, |mut c| async move { c.pod_log(req).await })
 }
 
 /// Deletes one object by identity.

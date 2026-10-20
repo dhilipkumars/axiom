@@ -22,6 +22,7 @@ pub mod fdw;
 pub mod import;
 pub mod options;
 pub mod ping;
+pub mod podlog;
 pub mod proto;
 pub mod quals;
 pub mod quantity;
