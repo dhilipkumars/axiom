@@ -2021,6 +2021,16 @@ fn pod_log_errors_carry_their_sqlstate() {
             "22023",
             "not infinity",
         ),
+        (
+            "SELECT * FROM axiom_pod_log('logs', NULL, 'web')",
+            "22004",
+            "namespace must not be NULL",
+        ),
+        (
+            "SELECT * FROM axiom_pod_log('logs', 'default', 'web', previous => NULL)",
+            "22004",
+            "previous must not be NULL",
+        ),
     ] {
         let mut tx = pod_log_fixture(&mut pg, &stub);
         let e = tx.query(sql, &[]).expect_err(sql);

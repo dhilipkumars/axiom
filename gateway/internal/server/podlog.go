@@ -138,10 +138,18 @@ func (s *Server) PodLog(ctx context.Context, req *axiomv1.PodLogRequest) (*axiom
 	defer func() { _ = rc.Close() }()
 
 	buf := newTailBuffer(int(req.GetMaxBytes()))
-	if err := readLogLines(rc, int(req.GetMaxBytes())+maxTimestampPrefix, buf.add); err != nil {
+	// Whether the reply is the kubelet's "lost" message is decided on each line
+	// as read, before max_bytes can cut it: a cut copy would no longer match.
+	lines, lost := 0, false
+	add := func(line *axiomv1.LogLine, cut bool) {
+		lines++
+		lost = lines == 1 && kubeletLostTheLog(line)
+		buf.add(line, cut)
+	}
+	if err := readLogLines(rc, int(req.GetMaxBytes())+maxTimestampPrefix, add); err != nil {
 		return nil, err
 	}
-	if kubeletLostTheLog(buf.lines) {
+	if lost {
 		// The instance was removed after the status said it existed: the
 		// kubelet keeps one exited instance per container, so a crash-looping
 		// container's `previous` is usually gone while the latest crash waits
@@ -247,14 +255,17 @@ func hasLog(pod *corev1.Pod, container string, previous bool) bool {
 	if previous {
 		return last != nil && last.ContainerID != ""
 	}
+	lastHasLog := last != nil && last.ContainerID != ""
 	switch {
 	case st.State.Running != nil:
 		return true
-	case st.State.Terminated != nil:
-		return st.State.Terminated.ContainerID != ""
+	case st.State.Terminated != nil && st.State.Terminated.ContainerID != "":
+		return true
 	default:
-		// Waiting: a crash-looping container's log is its last instance's.
-		return last != nil && last.ContainerID != ""
+		// Waiting, or terminated without an instance (the next one did not
+		// start): the kubelet serves the last instance's log, as it does for a
+		// crash-looping container between attempts.
+		return lastHasLog
 	}
 }
 
@@ -271,16 +282,17 @@ func containerStatus(pod *corev1.Pod, container string) *corev1.ContainerStatus 
 	return nil
 }
 
-// kubeletLostTheLog reports whether a reply is the kubelet saying it could
-// not read the container's log rather than the log itself.
+// kubeletLostTheLog reports whether a line is the kubelet saying it could not
+// read the container's log, rather than a line of the log.
 //
 // The kubelet reports that in the body of a successful response, as one line
 // of text, so it would otherwise reach SQL as a log line. It is recognisable
 // because every real line carries a timestamp when timestamps are requested,
 // and this one does not.
-func kubeletLostTheLog(lines []*axiomv1.LogLine) bool {
-	return len(lines) == 1 && lines[0].GetTime() == nil &&
-		strings.HasPrefix(lines[0].GetText(), "unable to retrieve container logs for ")
+// It must be the whole reply, which the caller checks: a lone first line.
+func kubeletLostTheLog(line *axiomv1.LogLine) bool {
+	return line.GetTime() == nil &&
+		strings.HasPrefix(line.GetText(), "unable to retrieve container logs for ")
 }
 
 // readLogLines splits a timestamped log stream into lines and hands each to

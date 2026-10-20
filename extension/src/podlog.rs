@@ -62,14 +62,18 @@ pub const MAX_TAIL_LINES: i32 = 100_000;
     reason = "pgrx passes SQL arguments by value"
 )]
 fn axiom_pod_log(
-    server: &str,
-    namespace: &str,
-    pod: &str,
+    // Every argument is an Option, though only `container` and `since` mean
+    // anything by NULL. The function has defaults, so it is not STRICT, and a
+    // NULL reaching a bare Rust type would fail inside pgrx's glue with a
+    // message that names nothing. `required` says which argument it was.
+    server: Option<&str>,
+    namespace: Option<&str>,
+    pod: Option<&str>,
     container: default!(Option<&str>, "NULL"),
-    tail_lines: default!(i32, 100),
+    tail_lines: default!(Option<i32>, 100),
     since: default!(Option<TimestampWithTimeZone>, "NULL"),
-    previous: default!(bool, false),
-    max_bytes: default!(i32, 1_048_576),
+    previous: default!(Option<bool>, false),
+    max_bytes: default!(Option<i32>, 1_048_576),
 ) -> TableIterator<
     'static,
     (
@@ -80,6 +84,12 @@ fn axiom_pod_log(
         name!(truncated, bool),
     ),
 > {
+    let server = required("server", server);
+    let namespace = required("namespace", namespace);
+    let pod = required("pod", pod);
+    let tail_lines = required("tail_lines", tail_lines);
+    let previous = required("previous", previous);
+    let max_bytes = required("max_bytes", max_bytes);
     if !(1..=MAX_TAIL_LINES).contains(&tail_lines) {
         raise(
             PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
@@ -147,6 +157,17 @@ fn axiom_pod_log(
             truncated,
         )
     }))
+}
+
+/// Unwraps an argument that has no meaning as NULL, or raises naming it.
+fn required<T>(name: &str, v: Option<T>) -> T {
+    match v {
+        Some(v) => v,
+        None => raise(
+            PgSqlErrorCode::ERRCODE_NULL_VALUE_NOT_ALLOWED,
+            format!("axiom_pod_log: {name} must not be NULL"),
+        ),
+    }
 }
 
 // Not callable by every role: logs often hold secrets, and the function reads

@@ -233,6 +233,11 @@ func TestPodLogWithNoLogIsEmpty(t *testing.T) {
 		{"crash looping", []corev1.ContainerStatus{crashLooping}, false, true},
 		{"crash looping, previous", []corev1.ContainerStatus{crashLooping}, true, true},
 		{"terminated without an id", []corev1.ContainerStatus{{Name: "app", State: corev1.ContainerState{Terminated: terminated("")}}}, false, false},
+		{"terminated without an id, after an instance that ran", []corev1.ContainerStatus{{
+			Name:                 "app",
+			State:                corev1.ContainerState{Terminated: terminated("")},
+			LastTerminationState: corev1.ContainerState{Terminated: terminated("containerd://old")},
+		}}, false, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -358,6 +363,12 @@ func TestPodLogTreatsAnInstanceTheKubeletLostAsNoLog(t *testing.T) {
 	}
 	if len(resp.GetLines()) != 0 || resp.GetTruncated() {
 		t.Fatalf("lines = %q, truncated = %t; want no lines", texts(resp), resp.GetTruncated())
+	}
+	// Recognised before max_bytes cuts it, or the cut copy would leak through.
+	req.MaxBytes = 20
+	resp, err = srv.PodLog(context.Background(), req)
+	if err != nil || len(resp.GetLines()) != 0 {
+		t.Fatalf("with max_bytes 20: %v, lines = %q; want no lines", err, texts(resp))
 	}
 
 	// A real line that happens to say the same thing carries a timestamp.
