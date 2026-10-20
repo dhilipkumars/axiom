@@ -22,6 +22,16 @@ are the former. [docs/RELEASING.md](docs/RELEASING.md) has the full rule.
 A security release. Upgrade the gateway image. Upgrading the extension is
 optional: none of its advisories is reachable in Axiom.
 
+### Added
+
+- **`quickstart.sh` is attached to every release**, with its checksum, and
+  installs that release's images and manifests:
+  `curl -fsSL https://github.com/dhilipkumars/axiom/releases/latest/download/quickstart.sh | bash`.
+  It brings up a kind cluster, the gateway and Postgres with Axiom, runs a
+  first query, and `bash -s down` removes only what it made. 0.2.0 had a copy
+  uploaded by hand; from 0.2.1 the release workflow builds it, and the
+  install check runs it unmodified before the release is promoted.
+
 ### Security
 
 - **Gateway: Go 1.27.2 and `golang.org/x/net` v0.60.0**, fixing nine
