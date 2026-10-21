@@ -5,7 +5,7 @@ toolchain and `cargo-pgrx` matching the `pg_config` of the Postgres you are
 installing into.
 
 ```sh
-git clone --branch v0.2.1 https://github.com/dhilipkumars/axiom.git
+git clone --branch v0.2.2 https://github.com/dhilipkumars/axiom.git
 cd axiom
 cargo install cargo-pgrx --version 0.19.2 --locked
 cargo pgrx init --pg17 "$(which pg_config)"
