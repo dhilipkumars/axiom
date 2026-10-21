@@ -17,6 +17,18 @@ are the former. [docs/RELEASING.md](docs/RELEASING.md) has the full rule.
 
 <!-- releases below -->
 
+## 0.2.3
+
+A security release for the gateway. Upgrade the gateway image. The extension
+is unchanged.
+
+### Security
+
+- **Gateway: Go 1.27.3**, fixing GO-2026-6809: `crypto/x509` now distrusts
+  the compromised emSign intermediates, as 0.2.2 did for the extension. In
+  cluster, the gateway verifies the API server against the cluster's own CA
+  and was not exposed; a kubeconfig that trusts public roots was.
+
 ## 0.2.2
 
 A security release for the extension. Upgrade it if any foreign server has no
