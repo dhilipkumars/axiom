@@ -17,6 +17,31 @@ are the former. [docs/RELEASING.md](docs/RELEASING.md) has the full rule.
 
 <!-- releases below -->
 
+## 0.2.3
+
+A security release for the gateway. Upgrade the gateway image. The extension
+is unchanged.
+
+### Security
+
+- **Gateway: Go 1.27.3**, fixing GO-2026-6809: `crypto/x509` now distrusts
+  the compromised emSign intermediates, as 0.2.2 did for the extension. In
+  cluster, the gateway verifies the API server against the cluster's own CA
+  and was not exposed; a kubeconfig that trusts public roots was.
+
+## 0.2.2
+
+A security release for the extension. Upgrade it if any foreign server has no
+`ca_cert`. The gateway is unchanged.
+
+### Security
+
+- **Extension: webpki-roots 1.0.10 and rustls-webpki 0.103.16**, fixing
+  RUSTSEC-2026-0381 and -0382. With no `ca_cert`, the extension verifies the
+  gateway against bundled public roots, which trusted distrusted emSign
+  intermediates whose private keys are public, so a certificate from one could
+  impersonate the gateway. With `ca_cert` set, only that CA is trusted.
+
 ## 0.2.1
 
 A security release. Upgrade the gateway image. Upgrading the extension is

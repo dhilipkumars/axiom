@@ -54,7 +54,7 @@ Use the manifests from the release you are installing, so they match the
 image:
 
 ```sh
-V=0.2.1
+V=0.2.3
 RAW=https://raw.githubusercontent.com/dhilipkumars/axiom/v$V/deploy/k8s
 
 kubectl apply -f "$RAW/gateway-rbac.yaml"
