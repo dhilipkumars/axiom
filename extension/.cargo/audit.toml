@@ -1,0 +1,11 @@
+# cargo audit's triaged advisories. cargo deny reads its own list from
+# deny.toml; keep the two in step, each with its reason (docs/RULES.md §3).
+[advisories]
+ignore = [
+    # webpki-roots 0.26.11 is flagged by version, but it is a shim that holds
+    # no roots: it depends on webpki-roots ^1 and re-exports it. Cargo.lock
+    # pins that to 1.0.10, which drops the distrusted emSign root, so the
+    # roots tonic 0.12 actually loads are the patched ones. No 0.26 release
+    # is patched; drop this when tonic moves to webpki-roots 1.
+    "RUSTSEC-2026-0381",
+]

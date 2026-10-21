@@ -17,6 +17,19 @@ are the former. [docs/RELEASING.md](docs/RELEASING.md) has the full rule.
 
 <!-- releases below -->
 
+## 0.2.2
+
+A security release for the extension. Upgrade it if any foreign server has no
+`ca_cert`. The gateway is unchanged.
+
+### Security
+
+- **Extension: webpki-roots 1.0.10 and rustls-webpki 0.103.16**, fixing
+  RUSTSEC-2026-0381 and -0382. With no `ca_cert`, the extension verifies the
+  gateway against bundled public roots, which trusted distrusted emSign
+  intermediates whose private keys are public, so a certificate from one could
+  impersonate the gateway. With `ca_cert` set, only that CA is trusted.
+
 ## 0.2.1
 
 A security release. Upgrade the gateway image. Upgrading the extension is
