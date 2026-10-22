@@ -1,0 +1,78 @@
+# Pods whose logs the pod-log gate (#105) reads back through SQL, and whose
+# output the "Reading pod logs" page and the README quote.
+#
+# frontend: an app container and an envoy sidecar, with the annotation that
+# makes `app` the one `kubectl logs` reads by default. `app` logs a request
+# whose URL a Latin-1 client sent, so one byte is not UTF-8. restartPolicy
+# Never, so it has no previous instance.
+#
+# payments: panics once, then stays up, so its previous instance holds the
+# crash. A pod that keeps crashing would not do: the kubelet keeps one exited
+# instance per container, so while the latest crash waits out its back-off,
+# the one before it is already gone and `previous` reads nothing -- which is
+# Kubernetes' behaviour, and kubectl's too. The emptyDir outlives the
+# container, which is how the second run knows.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: shop
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: frontend
+  namespace: shop
+  annotations:
+    kubectl.kubernetes.io/default-container: app
+spec:
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 0
+  containers:
+    - name: envoy
+      image: registry.k8s.io/e2e-test-images/busybox:1.36.1-1
+      command:
+        - sh
+        - -c
+        - |
+          echo envoy proxy started
+          sleep 3600
+    - name: app
+      image: registry.k8s.io/e2e-test-images/busybox:1.36.1-1
+      command:
+        - sh
+        - -c
+        - |
+          echo listening on :8080
+          echo GET /cart 200 12ms
+          printf 'GET /search?q=caf\351 200 9ms\n'
+          sleep 3600
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: payments
+  namespace: shop
+spec:
+  restartPolicy: Always
+  terminationGracePeriodSeconds: 0
+  volumes:
+    - name: state
+      emptyDir: {}
+  containers:
+    - name: app
+      image: registry.k8s.io/e2e-test-images/busybox:1.36.1-1
+      volumeMounts:
+        - name: state
+          mountPath: /state
+      command:
+        - sh
+        - -c
+        - |
+          if [ -e /state/crashed ]; then
+            echo payments v1.4 ready
+            sleep 3600
+          fi
+          touch /state/crashed
+          echo payments v1.4 starting
+          echo "panic: dial tcp 10.96.0.15:5432: connect: connection refused"
+          exit 2

@@ -149,6 +149,29 @@ service GatewayService {
   // Errors: none beyond transport. Deliberately cheap and side-effect free, so
   // it is safe to poll.
   rpc Stats(StatsRequest) returns (StatsResponse);
+
+  // PodLog reads the tail of one container's log, bounded in lines and bytes
+  // (issue #105). It is never cached: every call is one read of the pod and
+  // one log request, straight from the API server.
+  //
+  // Off unless the gateway was started with --serve-pod-logs, which also
+  // requires pods to be in --serve. Logs often hold secrets, and the shipped
+  // RBAC already grants pods/log through Kubernetes' `view` role, so RBAC
+  // cannot be the switch.
+  //
+  // When the window holds more than max_bytes, the newest bytes are kept and
+  // `truncated` is set: the end of a log is where a crash is. A container
+  // that has not started, a `previous` request for a container that has
+  // never restarted, or an instance the kubelet has already removed (it keeps
+  // one exited instance per container) has no such log and returns no lines
+  // rather than an error, so one such pod does not fail a query over many.
+  //
+  // Errors: INVALID_ARGUMENT for invalid names or bounds, or a container the
+  // pod does not have; NOT_FOUND if the pod does not exist; FAILED_PRECONDITION
+  // if this gateway does not serve pod logs or has no cluster;
+  // RESOURCE_EXHAUSTED if the requested window is larger than the gateway
+  // will read; PERMISSION_DENIED / UNAVAILABLE as for Get.
+  rpc PodLog(PodLogRequest) returns (PodLogResponse);
 }
 
 message PingRequest {
@@ -423,4 +446,45 @@ message StatsResponse {
   // Access reviews issued against the authorization API while deciding which
   // kinds this gateway may serve.
   uint64 access_reviews = 11;
+}
+message PodLogRequest {
+  // Both required.
+  string namespace = 1;
+  string pod = 2;
+  // Empty picks the container `kubectl logs` would: the one named by the
+  // kubectl.kubernetes.io/default-container annotation, otherwise the first.
+  // The API server does neither, and rejects a pod with several containers.
+  string container = 3;
+  // How many of the newest lines to read. Required and positive; the gateway
+  // rejects more than it will serve rather than clamping silently.
+  int64 tail_lines = 4;
+  // If set, only lines at or after this time. Kubernetes honours it to the
+  // second.
+  google.protobuf.Timestamp since_time = 5;
+  // Read the container's previous instance, before its last restart. This is
+  // where a crash's output is.
+  bool previous = 6;
+  // How many bytes of log text to return at most. Required and positive, and
+  // no more than the gateway's ceiling.
+  int64 max_bytes = 7;
+}
+
+message PodLogResponse {
+  // The container read: the one requested, or the one chosen for an empty
+  // request.
+  string container = 1;
+  // Oldest first.
+  repeated LogLine lines = 2;
+  // True when lines were left out to stay within max_bytes, or one was cut.
+  bool truncated = 3;
+}
+
+// LogLine is one line of a container's log, without its trailing newline.
+message LogLine {
+  // When the container runtime recorded the line. Unset if the runtime gave
+  // no timestamp the gateway could read.
+  google.protobuf.Timestamp time = 1;
+  // Valid UTF-8 with no NUL bytes: the gateway replaces invalid sequences with
+  // U+FFFD and drops NULs, since a Postgres text value accepts neither.
+  string text = 2;
 }

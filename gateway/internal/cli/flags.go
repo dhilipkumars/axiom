@@ -34,6 +34,10 @@ type Options struct {
 	NoCluster *bool
 	// Serve bounds which resources the gateway offers, before RBAC.
 	Serve *string
+	// ServePodLogs turns on the PodLog RPC (issue #105). Off by default: logs
+	// often hold secrets, and the shipped RBAC already grants pods/log, so
+	// this flag rather than RBAC is what decides whether SQL can read them.
+	ServePodLogs *bool
 	// DiscoveryTTL is how long a group-version's resource list is trusted.
 	DiscoveryTTL *time.Duration
 }
@@ -55,5 +59,9 @@ func Register(fs *flag.FlagSet, defaultServe string) *Options {
 			"comma-separated resources this gateway serves, as `plural[.group]` "+
 				"(e.g. \"pods,configmaps,widgets.example.com\"); \"*.group\" covers a whole group. "+
 				"Scope the ServiceAccount's RBAC to match: this bounds what is offered, RBAC enforces it"),
+		ServePodLogs: fs.Bool("serve-pod-logs", false,
+			"serve container logs to SQL (axiom_pod_log); requires pods in --serve. "+
+				"Off by default because logs often hold secrets, and the shipped RBAC "+
+				"already grants pods/log through the view role, so this flag is the switch"),
 	}
 }

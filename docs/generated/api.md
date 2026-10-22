@@ -22,6 +22,7 @@ GatewayService is the cluster-side service the Postgres extension talks to.
 | [`DiscoverSchema`](#discoverschema) | `DiscoverSchemaRequest` | `DiscoverSchemaResponse` |
 | [`ListKinds`](#listkinds) | `ListKindsRequest` | `ListKindsResponse` |
 | [`Stats`](#stats) | `StatsRequest` | `StatsResponse` |
+| [`PodLog`](#podlog) | `PodLogRequest` | `PodLogResponse` |
 
 ### Ping
 
@@ -132,6 +133,20 @@ It exists because counting is the only honest way to assert things like "the cac
 Operationally it answers "what is this gateway actually doing", which is otherwise only visible by reading logs.
 
 Errors: none beyond transport. Deliberately cheap and side-effect free, so it is safe to poll.
+
+### PodLog
+
+```proto
+rpc PodLog(PodLogRequest) returns (PodLogResponse);
+```
+
+PodLog reads the tail of one container's log, bounded in lines and bytes (issue #105). It is never cached: every call is one read of the pod and one log request, straight from the API server.
+
+Off unless the gateway was started with --serve-pod-logs, which also requires pods to be in --serve. Logs often hold secrets, and the shipped RBAC already grants pods/log through Kubernetes' `view` role, so RBAC cannot be the switch.
+
+When the window holds more than max_bytes, the newest bytes are kept and `truncated` is set: the end of a log is where a crash is. A container that has not started, a `previous` request for a container that has never restarted, or an instance the kubelet has already removed (it keeps one exited instance per container) has no such log and returns no lines rather than an error, so one such pod does not fail a query over many.
+
+Errors: INVALID_ARGUMENT for invalid names or bounds, or a container the pod does not have; NOT_FOUND if the pod does not exist; FAILED_PRECONDITION if this gateway does not serve pod logs or has no cluster; RESOURCE_EXHAUSTED if the requested window is larger than the gateway will read; PERMISSION_DENIED / UNAVAILABLE as for Get.
 
 ## Enums
 
@@ -284,6 +299,15 @@ KindSchema is everything the extension needs to define and serve a foreign table
 | `resource_version` | `string` | resourceVersion of the list itself, usable as a watch start point. |
 | `continue_token` | `string` | Non-empty when more objects remain: pass it as the next request's continue_token, unchanged. Empty means this was the last page. Opaque, and issued by the gateway rather than by Kubernetes. |
 
+### LogLine
+
+LogLine is one line of a container's log, without its trailing newline.
+
+| Field | Type | Description |
+|---|---|---|
+| `time` | `google.protobuf.Timestamp` | When the container runtime recorded the line. Unset if the runtime gave no timestamp the gateway could read. |
+| `text` | `string` | Valid UTF-8 with no NUL bytes: the gateway replaces invalid sequences with U+FFFD and drops NULs, since a Postgres text value accepts neither. |
+
 ### Object
 
 Object is one Kubernetes object as returned by the API server.
@@ -308,6 +332,26 @@ Object is one Kubernetes object as returned by the API server.
 | `nonce` | `uint64` | Echo of PingRequest.nonce. |
 | `gateway_version` | `string` | Gateway build version string (e.g. "0.1.0" or a git describe). |
 | `server_time` | `google.protobuf.Timestamp` | Gateway wall-clock time at the moment the reply was built. |
+
+### PodLogRequest
+
+| Field | Type | Description |
+|---|---|---|
+| `namespace` | `string` | Both required. |
+| `pod` | `string` | — |
+| `container` | `string` | Empty picks the container `kubectl logs` would: the one named by the kubectl.kubernetes.io/default-container annotation, otherwise the first. The API server does neither, and rejects a pod with several containers. |
+| `tail_lines` | `int64` | How many of the newest lines to read. Required and positive; the gateway rejects more than it will serve rather than clamping silently. |
+| `since_time` | `google.protobuf.Timestamp` | If set, only lines at or after this time. Kubernetes honours it to the second. |
+| `previous` | `bool` | Read the container's previous instance, before its last restart. This is where a crash's output is. |
+| `max_bytes` | `int64` | How many bytes of log text to return at most. Required and positive, and no more than the gateway's ceiling. |
+
+### PodLogResponse
+
+| Field | Type | Description |
+|---|---|---|
+| `container` | `string` | The container read: the one requested, or the one chosen for an empty request. |
+| `lines` | repeated `LogLine` | Oldest first. |
+| `truncated` | `bool` | True when lines were left out to stay within max_bytes, or one was cut. |
 
 ### StatsRequest
 

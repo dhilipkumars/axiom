@@ -69,8 +69,14 @@ func run(ctx context.Context, args []string, stderr *os.File) error {
 	if allow.IsEmpty() {
 		return fmt.Errorf("--serve is empty: a gateway that serves no resources cannot answer any query")
 	}
+	// A gateway told not to serve pods must not serve their logs either, so
+	// the combination is refused at startup rather than half-honoured.
+	if *opts.ServePodLogs && !allow.Permits("", "pods") {
+		return fmt.Errorf("--serve-pod-logs needs pods in --serve (it is %q)", allow.String())
+	}
 
 	var client k8s.Client
+	var logs k8s.LogSource
 	if *noCluster {
 		client = k8s.Unconfigured{}
 		logger.Warn("running with --no-cluster: Get/List will fail with FAILED_PRECONDITION")
@@ -99,12 +105,20 @@ func run(ctx context.Context, args []string, stderr *os.File) error {
 			return err
 		}
 		client = dyn
+		if *opts.ServePodLogs {
+			pl, err := k8s.NewPodLogs(cfg)
+			if err != nil {
+				return fmt.Errorf("k8s: pod log client: %w", err)
+			}
+			logs = pl
+		}
 		// Which of the two bounds is actually narrowing is worth knowing when
 		// a kind is unexpectedly missing.
 		logger.Info("kubernetes client configured",
 			"api_server", cfg.Host,
 			"serve", allow.String(),
-			"bounded_by", map[bool]string{true: "rbac", false: "rbac+serve"}[allow.ServesEverything()])
+			"bounded_by", map[bool]string{true: "rbac", false: "rbac+serve"}[allow.ServesEverything()],
+			"pod_logs", *opts.ServePodLogs)
 	}
 
 	tlsCfg, err := tlsconfig.Load(*certPath, *keyPath)
@@ -133,7 +147,11 @@ func run(ctx context.Context, args []string, stderr *os.File) error {
 		grpc.KeepaliveParams(server.KeepaliveParams()),
 		grpc.KeepaliveEnforcementPolicy(server.KeepaliveEnforcement()),
 	)
-	axiomv1.RegisterGatewayServiceServer(gs, server.New(version, nil, client, logger))
+	srv := server.New(version, nil, client, logger)
+	if logs != nil {
+		srv.ServePodLogs(logs)
+	}
+	axiomv1.RegisterGatewayServiceServer(gs, srv)
 	hs := health.NewServer()
 	hs.SetServingStatus(axiomv1.GatewayService_ServiceDesc.ServiceName, healthpb.HealthCheckResponse_SERVING)
 	healthpb.RegisterHealthServer(gs, hs)

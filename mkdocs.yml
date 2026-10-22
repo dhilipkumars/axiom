@@ -100,6 +100,7 @@ nav:
           - How tables work: guides/examples/how-tables-work.md
           - Capacity and risk review: guides/examples/capacity-review.md
           - Changing the cluster: guides/examples/changing-the-cluster.md
+          - Reading pod logs: guides/examples/pod-logs.md
           - Manage Postgres with Postgres: guides/examples/manage-postgres.md
           - A silly Kubernetes operator in SQL: guides/examples/sql-operator.md
           - Your deployment, in chronological order: guides/examples/deploy-timeline.md

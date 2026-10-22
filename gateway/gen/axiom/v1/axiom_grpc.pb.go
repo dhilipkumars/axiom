@@ -39,6 +39,7 @@ const (
 	GatewayService_DiscoverSchema_FullMethodName = "/axiom.v1.GatewayService/DiscoverSchema"
 	GatewayService_ListKinds_FullMethodName      = "/axiom.v1.GatewayService/ListKinds"
 	GatewayService_Stats_FullMethodName          = "/axiom.v1.GatewayService/Stats"
+	GatewayService_PodLog_FullMethodName         = "/axiom.v1.GatewayService/PodLog"
 )
 
 // GatewayServiceClient is the client API for GatewayService service.
@@ -170,6 +171,28 @@ type GatewayServiceClient interface {
 	// Errors: none beyond transport. Deliberately cheap and side-effect free, so
 	// it is safe to poll.
 	Stats(ctx context.Context, in *StatsRequest, opts ...grpc.CallOption) (*StatsResponse, error)
+	// PodLog reads the tail of one container's log, bounded in lines and bytes
+	// (issue #105). It is never cached: every call is one read of the pod and
+	// one log request, straight from the API server.
+	//
+	// Off unless the gateway was started with --serve-pod-logs, which also
+	// requires pods to be in --serve. Logs often hold secrets, and the shipped
+	// RBAC already grants pods/log through Kubernetes' `view` role, so RBAC
+	// cannot be the switch.
+	//
+	// When the window holds more than max_bytes, the newest bytes are kept and
+	// `truncated` is set: the end of a log is where a crash is. A container
+	// that has not started, a `previous` request for a container that has
+	// never restarted, or an instance the kubelet has already removed (it keeps
+	// one exited instance per container) has no such log and returns no lines
+	// rather than an error, so one such pod does not fail a query over many.
+	//
+	// Errors: INVALID_ARGUMENT for invalid names or bounds, or a container the
+	// pod does not have; NOT_FOUND if the pod does not exist; FAILED_PRECONDITION
+	// if this gateway does not serve pod logs or has no cluster;
+	// RESOURCE_EXHAUSTED if the requested window is larger than the gateway
+	// will read; PERMISSION_DENIED / UNAVAILABLE as for Get.
+	PodLog(ctx context.Context, in *PodLogRequest, opts ...grpc.CallOption) (*PodLogResponse, error)
 }
 
 type gatewayServiceClient struct {
@@ -283,6 +306,16 @@ func (c *gatewayServiceClient) Stats(ctx context.Context, in *StatsRequest, opts
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(StatsResponse)
 	err := c.cc.Invoke(ctx, GatewayService_Stats_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayServiceClient) PodLog(ctx context.Context, in *PodLogRequest, opts ...grpc.CallOption) (*PodLogResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PodLogResponse)
+	err := c.cc.Invoke(ctx, GatewayService_PodLog_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -418,6 +451,28 @@ type GatewayServiceServer interface {
 	// Errors: none beyond transport. Deliberately cheap and side-effect free, so
 	// it is safe to poll.
 	Stats(context.Context, *StatsRequest) (*StatsResponse, error)
+	// PodLog reads the tail of one container's log, bounded in lines and bytes
+	// (issue #105). It is never cached: every call is one read of the pod and
+	// one log request, straight from the API server.
+	//
+	// Off unless the gateway was started with --serve-pod-logs, which also
+	// requires pods to be in --serve. Logs often hold secrets, and the shipped
+	// RBAC already grants pods/log through Kubernetes' `view` role, so RBAC
+	// cannot be the switch.
+	//
+	// When the window holds more than max_bytes, the newest bytes are kept and
+	// `truncated` is set: the end of a log is where a crash is. A container
+	// that has not started, a `previous` request for a container that has
+	// never restarted, or an instance the kubelet has already removed (it keeps
+	// one exited instance per container) has no such log and returns no lines
+	// rather than an error, so one such pod does not fail a query over many.
+	//
+	// Errors: INVALID_ARGUMENT for invalid names or bounds, or a container the
+	// pod does not have; NOT_FOUND if the pod does not exist; FAILED_PRECONDITION
+	// if this gateway does not serve pod logs or has no cluster;
+	// RESOURCE_EXHAUSTED if the requested window is larger than the gateway
+	// will read; PERMISSION_DENIED / UNAVAILABLE as for Get.
+	PodLog(context.Context, *PodLogRequest) (*PodLogResponse, error)
 	mustEmbedUnimplementedGatewayServiceServer()
 }
 
@@ -457,6 +512,9 @@ func (UnimplementedGatewayServiceServer) ListKinds(context.Context, *ListKindsRe
 }
 func (UnimplementedGatewayServiceServer) Stats(context.Context, *StatsRequest) (*StatsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Stats not implemented")
+}
+func (UnimplementedGatewayServiceServer) PodLog(context.Context, *PodLogRequest) (*PodLogResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PodLog not implemented")
 }
 func (UnimplementedGatewayServiceServer) mustEmbedUnimplementedGatewayServiceServer() {}
 func (UnimplementedGatewayServiceServer) testEmbeddedByValue()                        {}
@@ -652,6 +710,24 @@ func _GatewayService_Stats_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _GatewayService_PodLog_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PodLogRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServiceServer).PodLog(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GatewayService_PodLog_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServiceServer).PodLog(ctx, req.(*PodLogRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // GatewayService_ServiceDesc is the grpc.ServiceDesc for GatewayService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -694,6 +770,10 @@ var GatewayService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Stats",
 			Handler:    _GatewayService_Stats_Handler,
+		},
+		{
+			MethodName: "PodLog",
+			Handler:    _GatewayService_PodLog_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
