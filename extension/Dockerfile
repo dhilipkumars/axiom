@@ -12,7 +12,7 @@ ARG PGDG_COMPONENTS=main
 # Rust 1.96 or newer: cargo-pgrx 0.19 requires it. The exact version is pinned in
 # extension/rust-toolchain.toml, which rustup reads in /src/extension below;
 # keep the two the same, or the build downloads a second toolchain.
-FROM rust:1.97.1-bookworm AS build
+FROM rust:1.100.0-bookworm AS build
 ARG PG_MAJOR
 ARG PGDG_COMPONENTS
 RUN apt-get update && apt-get install -y --no-install-recommends \

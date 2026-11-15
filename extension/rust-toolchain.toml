@@ -2,11 +2,11 @@
 # the Docker build (extension/Dockerfile's FROM must name the same version),
 # and a developer's `cargo` in this directory, which rustup switches to it.
 #
-# Pinned because "stable" moves under us. Rust 1.100 shipped a Clippy whose
-# map_unwrap_or lint flags `.map(..).unwrap_or_default()`; under pedantic
-# `-D warnings` that failed every nightly job on unchanged code, and the fix
-# Clippy suggests, `Option::map_or_default`, does not exist on the 1.97 the
-# images build with.
+# Pinned because "stable" moves under us. When Rust 1.100 became stable, CI
+# picked it up on its own while the images still built with 1.97: its Clippy's
+# map_unwrap_or lint, under pedantic `-D warnings`, failed every nightly job
+# on unchanged code, and the fix it suggested did not exist on 1.97. With one
+# pin, CI and the images move together, in a PR of their own.
 #
 # To move it, change this file and the Dockerfile's FROM together, run
 # `make ext-lint` on the new version, and fix what its Clippy reports in the
@@ -17,5 +17,5 @@
 # both into every image build. The CI lint jobs add them; locally, run
 # `rustup component add clippy rustfmt` once if `make ext-lint` asks.
 [toolchain]
-channel = "1.97.1"
+channel = "1.100.0"
 profile = "minimal"

@@ -80,7 +80,7 @@ impl Target {
         Ok(Self {
             endpoint: format!(
                 "https://{host}{}",
-                url.port().map(|p| format!(":{p}")).unwrap_or_default()
+                url.port().map_or_default(|p| format!(":{p}"))
             ),
             tls_server_name: host,
             ca_cert_path: ca_cert_path
