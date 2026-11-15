@@ -1,0 +1,21 @@
+# The Rust the extension is built, linted and tested with, everywhere: CI,
+# the Docker build (extension/Dockerfile's FROM must name the same version),
+# and a developer's `cargo` in this directory, which rustup switches to it.
+#
+# Pinned because "stable" moves under us. Rust 1.100 shipped a Clippy whose
+# map_unwrap_or lint flags `.map(..).unwrap_or_default()`; under pedantic
+# `-D warnings` that failed every nightly job on unchanged code, and the fix
+# Clippy suggests, `Option::map_or_default`, does not exist on the 1.97 the
+# images build with.
+#
+# To move it, change this file and the Dockerfile's FROM together, run
+# `make ext-lint` on the new version, and fix what its Clippy reports in the
+# same PR. pgrx 0.19 needs 1.96 or newer.
+#
+# No components: the image build needs only rustc and cargo, and the base
+# image ships without clippy and rustfmt, so listing them here would download
+# both into every image build. The CI lint jobs add them; locally, run
+# `rustup component add clippy rustfmt` once if `make ext-lint` asks.
+[toolchain]
+channel = "1.97.1"
+profile = "minimal"
