@@ -69,7 +69,12 @@ ifdef EXT_COVER_DIR
 	# relink the current one, so every axiom-* binary left afterwards is this
 	# run's. Choosing the newest by mtime is not enough: the cache restores
 	# files with their original times.
-	find "$${CARGO_TARGET_DIR:-extension/target}/debug/deps" -maxdepth 1 -type f -perm -u+x -name 'axiom-*' -delete 2>/dev/null || true
+	#
+	# Searched across debug/, not debug/deps: Cargo's newer build-directory
+	# layout (Rust 1.100) puts a test binary at debug/build/axiom/<hash>/out/
+	# and has no deps/ at all. Looking only in deps/ found nothing there, so
+	# the report covered axiom.so alone and dropped every pure unit test.
+	find "$${CARGO_TARGET_DIR:-extension/target}/debug" -type f -perm -u+x -name 'axiom-*' ! -name '*.so' ! -name '*.d' -delete 2>/dev/null || true
 	cd extension && RUSTFLAGS="-C instrument-coverage" \
 		LLVM_PROFILE_FILE=$(abspath $(EXT_COVER_DIR))/ext-%4m.profraw cargo pgrx test $(PG)
 	# The objects that wrote the profiles: the installed library, found through
@@ -81,7 +86,7 @@ ifdef EXT_COVER_DIR
 		&& so="$$(ls "$$lib"/axiom.so "$$lib"/axiom.dylib 2>/dev/null | head -1)" \
 		&& { [ -n "$$so" ] || { echo "no installed axiom library in $$lib" >&2; exit 1; }; } \
 		&& scripts/extension-coverage-lcov $(abspath $(EXT_COVER_DIR)) $(abspath $(EXT_COVER_DIR))/unit.lcov "$$so" \
-			$$(find "$${CARGO_TARGET_DIR:-extension/target}/debug/deps" -maxdepth 1 -type f -perm -u+x -name 'axiom-*')
+			$$(find "$${CARGO_TARGET_DIR:-extension/target}/debug" -type f -perm -u+x -name 'axiom-*' ! -name '*.so' ! -name '*.d')
 else
 	cd extension && cargo pgrx test $(PG)
 endif
