@@ -114,15 +114,21 @@ jobs:
       - name: Install PostgreSQL ${{ env.PG_MAJOR }} (PGDG)
         run: |
           sudo install -d /usr/share/postgresql-common/pgdg
-          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          sudo curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
           sudo apt-get install -y postgresql-${PG_MAJOR} postgresql-server-dev-${PG_MAJOR} libclang-dev clang
           # cargo pgrx test runs initdb/postgres as the current user; it must own the install dirs.
           sudo chown -R "$USER" /usr/lib/postgresql/${PG_MAJOR} /usr/share/postgresql/${PG_MAJOR}
-      - uses: dtolnay/rust-toolchain@stable
-        # llvm-tools for the coverage the pg16 job records (#90).
-        with: { components: "clippy, rustfmt, llvm-tools" }
+      # The version comes from extension/rust-toolchain.toml,
+      # so CI, the Docker build and a developer's machine lint with one Clippy.
+      # llvm-tools for the coverage the pg16 job records (#90).
+      - name: Rust toolchain (extension/rust-toolchain.toml)
+        working-directory: extension
+        run: |
+          rustup toolchain install
+          rustup component add clippy rustfmt llvm-tools
+          rustc --version
       - uses: Swatinem/rust-cache@v2
         # Keyed per major: the builds differ by feature flag and by the
         # generated pg_sys bindings, so one shared cache would thrash.

@@ -133,14 +133,19 @@ jobs:
           COMPONENTS: ${{ matrix.components }}
         run: |
           sudo install -d /usr/share/postgresql-common/pgdg
-          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          sudo curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg ${COMPONENTS}" | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
           sudo apt-get install -y postgresql-${PG_MAJOR} postgresql-server-dev-${PG_MAJOR} libclang-dev clang
           # cargo pgrx test runs initdb/postgres as the current user; it must own the install dirs.
           sudo chown -R "$USER" /usr/lib/postgresql/${PG_MAJOR} /usr/share/postgresql/${PG_MAJOR}
-      - uses: dtolnay/rust-toolchain@stable
-        with: { components: "clippy, rustfmt" }
+      # Pinned in extension/rust-toolchain.toml, as in ci.yml.
+      - name: Rust toolchain (extension/rust-toolchain.toml)
+        working-directory: extension
+        run: |
+          rustup toolchain install
+          rustup component add clippy rustfmt
+          rustc --version
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: extension

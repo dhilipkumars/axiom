@@ -352,7 +352,7 @@ pub fn create(
         json: body.to_string().into_bytes(),
     };
     call(server, |mut c| async move { c.create(req).await })
-        .map(|resp| resp.object.map(|o| o.json).unwrap_or_default())
+        .map(|resp| resp.object.map_or_default(|o| o.json))
 }
 
 /// Replaces one object, sending `id.resource_version` as the concurrency
@@ -371,7 +371,7 @@ pub fn update(
         json: body.to_string().into_bytes(),
     };
     call(server, |mut c| async move { c.update(req).await })
-        .map(|resp| resp.object.map(|o| o.json).unwrap_or_default())
+        .map(|resp| resp.object.map_or_default(|o| o.json))
 }
 
 /// Enumerates the kinds the gateway serves, for `IMPORT FOREIGN SCHEMA`.

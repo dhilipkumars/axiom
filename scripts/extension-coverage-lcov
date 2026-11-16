@@ -6,18 +6,24 @@
 #
 # OBJECTs are the instrumented binaries that wrote the profiles: the axiom.so
 # that ran, and for unit tests the test binaries too. Uses the llvm-tools of
-# the rustc on PATH, which must be the one that compiled them -- the profile
-# format follows the compiler -- so for the e2e suite this runs inside the
-# extension's own build stage. Paths are normalised to src/..., because the
+# the rustc that compiled them -- the profile format follows the compiler -- so
+# for the e2e suite this runs inside the extension's own build stage. That
+# compiler is the one extension/rust-toolchain.toml pins, which rustup applies
+# only inside extension/, so rustc is asked from there: from the repository
+# root it would be the default toolchain, without llvm-tools. Paths are normalised to src/..., because the
 # unit and e2e builds compile the same sources from different directories and
 # are merged by file and line.
 set -euo pipefail
 
 [[ $# -ge 3 ]] || { echo "usage: $(basename "$0") PROFRAW_DIR OUT_LCOV OBJECT..." >&2; exit 2; }
 dir="$1" out="$2"; shift 2
-host="$(rustc -vV | sed -n 's/^host: //p')"
-bin="$(rustc --print sysroot)/lib/rustlib/$host/bin"
-[[ -x "$bin/llvm-cov" ]] || { echo "llvm-tools is not installed for $(rustc -V)" >&2; exit 1; }
+# A checkout's extension/, or else the working directory: the e2e build stage
+# runs this as /scripts/... from /src/extension.
+ext="$(cd "$(dirname "${BASH_SOURCE[0]}")/../extension" 2>/dev/null && pwd || pwd)"
+ext_rustc() { (cd "$ext" && rustc "$@"); }
+host="$(ext_rustc -vV | sed -n 's/^host: //p')"
+bin="$(ext_rustc --print sysroot)/lib/rustlib/$host/bin"
+[[ -x "$bin/llvm-cov" ]] || { echo "llvm-tools is not installed for $(ext_rustc -V)" >&2; exit 1; }
 
 raws=()
 for f in "$dir"/*.profraw; do [[ -e "$f" ]] && raws+=("$f"); done

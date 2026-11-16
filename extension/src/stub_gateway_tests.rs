@@ -170,7 +170,7 @@ impl GatewayService for Stub {
     async fn list(&self, req: Request<ListRequest>) -> Result<Response<ListResponse>, Status> {
         self.0.list_calls.fetch_add(1, Ordering::SeqCst);
         let req = req.into_inner();
-        let kind = req.gvk.map(|g| g.kind).unwrap_or_default();
+        let kind = req.gvk.map_or_default(|g| g.kind);
         let matches = |ns: &str, name: &str| {
             (req.namespace.is_empty() || req.namespace == ns)
                 && (req.name.is_empty() || req.name == name)
@@ -315,7 +315,7 @@ impl GatewayService for Stub {
             return Err(Status::unavailable("stub: gateway is down"));
         }
         let req = req.into_inner();
-        let kind = req.gvk.map(|g| g.kind).unwrap_or_default();
+        let kind = req.gvk.map_or_default(|g| g.kind);
         if kind != "Pod" {
             return Err(Status::invalid_argument(
                 "stub: only Pod subscriptions are supported",
