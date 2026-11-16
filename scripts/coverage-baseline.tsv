@@ -8,8 +8,8 @@
 # counts statements its own way, and extension figures on Postgres 16. A
 # local run on another toolchain is not comparable.
 gateway	unit	85.2
-gateway	e2e	67.5
-gateway	combined	88.9
+gateway	e2e	68.9
+gateway	combined	89.6
 extension	unit	89.3
-extension	e2e	82.6
+extension	e2e	81.4
 extension	combined	91.9
