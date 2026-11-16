@@ -15,11 +15,13 @@ ARG PGDG_COMPONENTS=main
 FROM rust:1.100.0-bookworm AS build
 ARG PG_MAJOR
 ARG PGDG_COMPONENTS
+# The signing key comes from postgresql.org with retries: a dropped connection
+# there (curl exit 18, a partial transfer) failed three image builds in a day.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg clang libclang-dev pkg-config \
         libssl-dev libreadline-dev zlib1g-dev bison flex \
     && install -d /usr/share/postgresql-common/pgdg \
-    && curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    && curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
     && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg ${PGDG_COMPONENTS}" > /etc/apt/sources.list.d/pgdg.list \
     && apt-get update && apt-get install -y --no-install-recommends \
         postgresql-${PG_MAJOR} postgresql-server-dev-${PG_MAJOR} \
